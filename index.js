@@ -34,10 +34,10 @@ export const Config = (() => {
   if (!z) return undefined
   try {
     return z.object({
-      /** PawBot 專案根目錄（run.py 所在） */
-      projectDir: z.string().default('D:/WorkBuddy/2026-10-20-00-14-25/pawbot').extra('volatile', true),
-      /** 用哪個 python 起（`py` = Windows launcher，等同 start.bat 的 Python313） */
-      pythonExe: z.string().default('py').extra('volatile', true),
+      /** PawBot 專案根目錄（run.py 所在）。Linux/macOS 上請改成實際路徑，例如 /opt/pawbot */
+      projectDir: z.string().default(isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot').extra('volatile', true),
+      /** 用哪個 python 起（Windows 是 `py` launcher；Linux/macOS 用 `python3`） */
+      pythonExe: z.string().default(isWin ? 'py' : 'python3').extra('volatile', true),
       /** apply 時是否自動啟動 */
       autostart: z.boolean().default(true).extra('volatile', true),
       /** 進程意外退出後是否自動重啟（有意 stop 不會觸發） */
@@ -62,8 +62,8 @@ export const Config = (() => {
 
 export function apply(ctx, config) {
   const DEFAULTS = {
-    projectDir: 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot',
-    pythonExe: 'py',
+    projectDir: isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot',
+    pythonExe: isWin ? 'py' : 'python3',
     autostart: true,
     restartOnCrash: false,
     logLines: 200,

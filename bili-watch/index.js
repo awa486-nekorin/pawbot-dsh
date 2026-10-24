@@ -47,7 +47,7 @@ export const Config = (() => {
       /** 被擋掉（或留空）時實際使用的模型；本身也必須在白名單內，否則退回 deepseek-flash */
       allowedModel: z.string().default('deepseek-flash').extra('volatile', true),
       /** 共享目錄 ROOT（與 PawBot 的契約路徑） */
-      dataRoot: z.string().default('D:/WorkBuddy/pawbot-bili-watch-data').extra('volatile', true),
+      dataRoot: z.string().default(process.platform === 'win32' ? 'D:/WorkBuddy/pawbot-bili-watch-data' : `${process.env.HOME || '/var/lib'}/pawbot-bili-watch-data`).extra('volatile', true),
       /** 從哪個環境變數讀 SESSDATA（絕不寫進日誌/報告） */
       cookieEnv: z.string().default('BILI_SESSDATA').extra('volatile', true),
       /** 設置頁欄位 SESSDATA（最低優先，標 secret 不落日誌/不落遠端設定回讀） */
@@ -110,7 +110,9 @@ export function apply(ctx, config) {
     provider: 'deepseek-official',
     model: 'deepseek-flash',
     allowedModel: 'deepseek-flash',
-    dataRoot: 'D:/WorkBuddy/pawbot-bili-watch-data',
+    dataRoot: process.platform === 'win32'
+      ? 'D:/WorkBuddy/pawbot-bili-watch-data'
+      : `${process.env.HOME || '/var/lib'}/pawbot-bili-watch-data`,
     cookieEnv: 'BILI_SESSDATA',
     sessdata: '',
     searchOrder: 'totalrank',
