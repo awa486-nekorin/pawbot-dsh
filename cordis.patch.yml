@@ -1,0 +1,12 @@
+# @local/pawbot —— DSH bundle patch
+# 一個 bundle 同時掛兩個 Host 插件列：
+#   1. pawbot —— 受管服務（起停 / 狀態 / 日誌 / 健康檢查）
+#   2. pawbot-bili-watch —— 「大肥魚看 B 站」（從 @local/pawbot-bili-watch 複製進來，
+#      掛成 @local/pawbot 的 subpath export，避免與舊 bundle 重複註冊同名工具）
+- insert:
+    - id: pawbot
+      name: '@local/pawbot'
+      config: {}
+    - id: pawbot-bili-watch
+      name: '@local/pawbot/bili-watch'
+      config: {}

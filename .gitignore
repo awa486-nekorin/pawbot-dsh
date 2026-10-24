@@ -1,0 +1,16 @@
+# 依赖与产物（bundle 本身不需要 node_modules；它从宿主树解析）
+node_modules/
+pnpm-lock.yaml
+
+# 备份/临时文件
+*.before-*
+*.bak
+*.log
+_scan*
+_test*
+diag-*.mjs
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini

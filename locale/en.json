@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "title": "PawBot Managed Service",
+    "description": "Runs PawBot (the QQ chatbot) as a DSH-managed service — start/stop, status, and logs — and bundles the \"Bilibili watch\" plugin. All controls (status / settings / persona / tools) live in the DSH settings page; no need to open PawBot's 6185 web UI."
+  },
+  "panel": {
+    "nav": "PawBot",
+    "title": "PawBot Control Panel",
+    "subtitle": "Status, settings, and persona — all in one place. No need to open PawBot's own 6185 web UI.",
+    "tabs": {
+      "status": "Status",
+      "config": "Settings",
+      "persona": "Persona"
+    },
+    "actions": {
+      "refresh": "Refresh now",
+      "restart": "Restart PawBot",
+      "reloadPlugins": "Reload PawBot plugins",
+      "sendTest": "Send test message",
+      "saveConfig": "Save changes",
+      "savePersona": "Save persona",
+      "revertPersona": "Revert to last loaded version"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "title": "PawBot 受管服务",
+    "description": "把 PawBot（QQ 机器人）当成 DSH 受管服务：启停、状态、日志；并内含「大肥鱼看 B 站」插件。所有控制（状态／设置／人设／工具）都在 DSH 设置页完成，不用再开 PawBot 的 6185 网页。"
+  },
+  "panel": {
+    "nav": "PawBot",
+    "title": "PawBot 控制面板",
+    "subtitle": "看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。",
+    "tabs": {
+      "status": "状态",
+      "config": "设置",
+      "persona": "人设"
+    },
+    "actions": {
+      "refresh": "立即刷新",
+      "restart": "重启 PawBot",
+      "reloadPlugins": "重载 PawBot 插件",
+      "sendTest": "发测试消息",
+      "saveConfig": "保存改动",
+      "savePersona": "保存人设",
+      "revertPersona": "还原成上次读到的版本"
+    }
+  }
+}

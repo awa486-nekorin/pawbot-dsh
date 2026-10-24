@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "PawBot Bilibili Watch",
+    "description": "Lets the PawBot persona actually watch Bilibili videos: it reads subtitles and hot comments, then writes a structured internal report for the bot to use."
+  }
+}

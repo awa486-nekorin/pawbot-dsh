@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="TV with fish tail">
+  <rect x="4" y="18" width="38" height="26" rx="5" fill="#1e293b"/>
+  <rect x="8" y="22" width="30" height="18" rx="2" fill="#38bdf8"/>
+  <polygon points="19,26 19,36 28,31" fill="#0f172a"/>
+  <line x1="14" y1="44" x2="10" y2="52" stroke="#1e293b" stroke-width="3" stroke-linecap="round"/>
+  <line x1="22" y1="44" x2="26" y2="52" stroke="#1e293b" stroke-width="3" stroke-linecap="round"/>
+  <path d="M42 28 L58 18 L53 31 L58 44 L42 36 Z" fill="#f97316"/>
+  <circle cx="49" cy="31" r="2.2" fill="#7c2d12"/>
+</svg>

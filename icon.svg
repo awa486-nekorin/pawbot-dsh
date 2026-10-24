@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Fish with service gear">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
+  <path d="M16 35 C22 25 35 21 46 28 C46 37 38 45 26 45 C19 45 16 41 16 35 Z" fill="#f8fafc"/>
+  <polygon points="45,32 58,23 55,38 58,51 45,40" fill="#f8fafc"/>
+  <circle cx="25" cy="33" r="3.2" fill="#0f172a"/>
+  <circle cx="43" cy="46" r="9.5" fill="#f97316"/>
+  <circle cx="43" cy="46" r="4" fill="#fff7ed"/>
+  <g stroke="#f97316" stroke-width="2.6" stroke-linecap="round">
+    <line x1="43" y1="42.2" x2="43" y2="49.8"/>
+    <line x1="39.2" y1="46" x2="46.8" y2="46"/>
+  </g>
+</svg>
