@@ -19,11 +19,13 @@
     "client.js",
     "cordis.patch.yml",
     "lib",
+    "app",
     "bili-watch",
     "locale/en.json",
     "locale/zh.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "DEPLOY.md"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",

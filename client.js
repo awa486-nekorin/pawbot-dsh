@@ -7,16 +7,23 @@
  *      收進「進階（原始 JSON）」；有中文標籤 / 原始 key / 說明全文搜尋。
  *   3. 字級、行高、間距、對比都照驗收規格（14px / 1.65、說明 12.5px、
  *      卡片 padding 14px 16px、卡片間 12px、每列上下 10px + 1px 分隔線）。
- *   4. 只有 3 個分頁（狀態 / 設定 / 人設）；每個動作按鈕旁都寫清楚後果，
- *      重啟、送出測試訊息、覆寫人設、儲存設定都必須二次確認。
- *   5. 每一列都有影響徽章：立即生效 / 需重啟 PawBot / 需連上 NapCat /
- *      會影響她說話 / 會影響發圖語音 / 會影響記憶 / 舊版相容。
+ *   4. 分頁順序：启动 / 状态 / 设定 / 人设，预设打开「启动」——新用户第一眼
+ *      就能看到「一键安装 → 连 NapCat → 启动 PawBot」的可视化引导。每个动作
+ *      按钮旁都写清楚后果，重启、发送测试消息、覆写人设、保存设定都必须二次确认。
+ *   5. 每一列都有影响徽章：立即生效 / 需重启 PawBot / 需连上 NapCat /
+ *      会影响她说话 / 会影响发图语音 / 会影响记忆 / 旧版兼容。
  *
- * 與 Host 的路由契約（全部同源、回 JSON；Host 側已實作）：
+ * 与 Host 的路由契约（全部同源、回 JSON）：
  *   GET  /pawbot-ui/status              GET  /pawbot-ui/config
  *   POST /pawbot-ui/config {patch}       GET  /pawbot-ui/persona
  *   POST /pawbot-ui/persona {content}    POST /pawbot-ui/restart
  *   POST /pawbot-ui/plugins/reload       POST /pawbot-ui/send {target,message,is_group}
+ *
+ * 启动页专用的路由契约（Host 侧由另一个代理实作，这里只照着写、不另造）：
+ *   GET  /pawbot-ui/setup/status         POST /pawbot-ui/setup/run   {force?}
+ *   GET  /pawbot-ui/napcat/status        POST /pawbot-ui/napcat/setup
+ *   POST /pawbot-ui/napcat/qr            POST /pawbot-ui/boot
+ *   GET  /pawbot-ui/boot/status
  *
  * 安全鐵律：遮罩值 "***已設定***" 只顯示「已設定（不會顯示）」，空的 secret 顯示「未設定」；
  * 絕不當真值寫回；每次存檔只送改動過的鍵（diff）；清空 secret 必須二次確認。
@@ -821,6 +828,82 @@ const CSS = `
 [data-pb-empty]{padding:10px 0;}
 [data-pb-search-summary]{font-size:14px;color:var(--dsw-alias-label-primary);}
 
+/* ── 启动页：一键引导流程（hero / stepper / 日志窗 / 就绪卡） ─────────── */
+[data-pb-hero]{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
+  padding:14px 16px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);
+  background:var(--dsw-alias-settings-card-fill);}
+[data-pb-hero-main]{flex:1 1 340px;min-width:0;}
+[data-pb-hero-actions]{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+[data-pb-btn][data-hero]{padding:9px 18px;font-weight:600;}
+
+[data-pb-stepper]{display:flex;flex-direction:column;}
+[data-pb-step]{display:flex;gap:10px;align-items:flex-start;padding:10px 0;
+  border-bottom:1px solid var(--dsw-alias-border-l1);}
+[data-pb-step]:last-child{border-bottom:0;}
+[data-pb-step-body]{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+[data-pb-step-name]{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;
+  font-size:14px;line-height:1.5;font-weight:600;color:var(--dsw-alias-label-primary);}
+[data-pb-step-index]{font-size:14px;line-height:1.5;color:var(--dsw-alias-label-secondary);}
+[data-pb-step-detail]{font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);
+  word-break:break-word;}
+[data-pb-step][data-state="fail"] [data-pb-step-detail]{color:var(--dsw-alias-state-error-primary);}
+[data-pb-step-error]{display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:4px;}
+[data-pb-step-dot]{flex:none;width:22px;height:22px;box-sizing:border-box;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;
+  border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);
+  color:var(--dsw-alias-label-secondary);}
+[data-pb-step-dot][data-state="ok"]{border-color:var(--dsw-alias-state-success-primary);
+  color:var(--dsw-alias-state-success-primary);}
+[data-pb-step-dot][data-state="fail"]{border-color:var(--dsw-alias-state-error-primary);
+  color:var(--dsw-alias-state-error-primary);}
+[data-pb-step-dot][data-state="skip"]{border-style:dashed;color:var(--dsw-alias-label-tertiary);}
+[data-pb-step-dot][data-state="running"]{background:transparent;}
+[data-pb-step-dot][data-state="running"] i{display:block;width:11px;height:11px;border-radius:50%;
+  border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-brand-primary);
+  animation:pb-step-spin .9s linear infinite;}
+@keyframes pb-step-spin{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){
+  [data-pb-step-dot][data-state="running"] i{animation:none;}
+}
+
+[data-pb-flags]{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:2px 0 0;}
+[data-pb-flag]{display:inline-flex;gap:4px;align-items:center;font-size:12.5px;line-height:1.5;
+  padding:2px 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);}
+[data-pb-flag][data-tone="good"]{color:var(--dsw-alias-state-success-primary);
+  border-color:var(--dsw-alias-state-success-primary);}
+[data-pb-flag][data-tone="err"]{color:var(--dsw-alias-state-error-primary);
+  border-color:var(--dsw-alias-state-error-primary);}
+
+[data-pb-log]{margin-top:8px;max-height:210px;overflow:auto;padding:8px 10px;box-sizing:border-box;
+  border-radius:var(--dsw-radius-sm);border:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,Consolas,monospace;
+  font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);
+  white-space:pre-wrap;word-break:break-word;}
+[data-pb-log-line]{display:block;}
+[data-pb-log-line][data-stream="stderr"]{color:var(--dsw-alias-state-error-primary);}
+
+[data-pb-manual]{margin:8px 0 0;padding-left:22px;font-size:14px;line-height:1.65;
+  color:var(--dsw-alias-label-primary);}
+[data-pb-manual] li{margin:2px 0;word-break:break-word;}
+
+[data-pb-token]{display:block;margin-top:6px;padding:6px 8px;box-sizing:border-box;
+  font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.6;word-break:break-all;
+  color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);
+  border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xs);}
+
+[data-pb-btn][data-link]{display:inline-flex;align-items:center;text-decoration:none;}
+
+[data-pb-ready]{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
+  padding:14px 16px;border-radius:var(--dsw-radius-lg);
+  border:1px solid var(--dsw-alias-state-success-primary);
+  background:var(--dsw-alias-bg-layer-2);
+  background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, var(--dsw-alias-bg-layer-1));}
+[data-pb-ready-text]{flex:1 1 260px;min-width:0;}
+[data-pb-ready-title]{font-size:14px;line-height:1.5;font-weight:600;color:var(--dsw-alias-label-primary);}
+[data-pb-ready-sub]{font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
+[data-pb-ready-actions]{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+
 @container (min-width:760px){
   [data-pb-fields]{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
@@ -949,6 +1032,752 @@ if (typeof window === 'undefined') {
             ? h('div', { 'data-pb-help': '' },
               '其中需要重启 PawBot 才生效：' +
               notice.restart.map((key) => (META_BY_KEY[key] && META_BY_KEY[key].label) || key).join('、') + '。')
+            : null)
+      }
+
+      /* ── 启动页：一键引导（装环境 → 连 NapCat → 启动 PawBot → 就绪） ─────── */
+
+      // 四步的固定顺序与简体名称。来源是 /pawbot-ui/boot/status 的 steps，
+      // 但名称以面板这一份为准，避免主机文案与面板其它文字不一致。
+      const BOOT_STEP_IDS = ['env', 'napcat', 'pawbot', 'ready']
+      const BOOT_STEP_META = {
+        env: { index: '①', name: '环境', hint: 'Python / venv / 依赖 / 设定' },
+        napcat: { index: '②', name: 'NapCat', hint: '侦测与连线' },
+        pawbot: { index: '③', name: 'PawBot 进程', hint: '拉起服务并等它回报' },
+        ready: { index: '④', name: '就绪', hint: '等 /api/status 可达' },
+      }
+      const BOOT_STEP_STATE_TEXT = {
+        pending: '待办',
+        running: '进行中',
+        ok: '完成',
+        fail: '失败',
+        skip: '跳过',
+      }
+      const BOOT_STEP_TONE = {
+        pending: 'muted',
+        running: 'info',
+        ok: 'good',
+        fail: 'err',
+        skip: 'muted',
+      }
+      const NAPCAT_MODE_TEXT = {
+        docker: '已用 Docker 启动',
+        binary: '使用本机已安装的 NapCat',
+        none: '这台机器没有 Docker，也没装 NapCat',
+      }
+
+      function bootStepState(value) {
+        const key = String(value || '')
+        return BOOT_STEP_STATE_TEXT[key] ? key : 'pending'
+      }
+
+      /** 把 /boot/status 的 steps 整理成固定的四行（缺的补成「待办」）。 */
+      function normalizeBootSteps(bootSt) {
+        const raw = bootSt && Array.isArray(bootSt.steps) ? bootSt.steps : []
+        const known = Object.create(null)
+        const extra = []
+        for (const step of raw) {
+          if (!step || typeof step !== 'object') continue
+          const id = String(step.id || '')
+          if (!id) continue
+          if (BOOT_STEP_META[id]) known[id] = step
+          else extra.push(step)
+        }
+        const rows = BOOT_STEP_IDS.map((id) => {
+          const meta = BOOT_STEP_META[id]
+          const step = known[id] || null
+          const state = step ? bootStepState(step.state) : 'pending'
+          const detail = step && step.detail ? String(step.detail) : ''
+          return {
+            key: id,
+            index: meta.index,
+            name: meta.name,
+            state,
+            detail: detail || (state === 'pending' ? meta.hint : ''),
+          }
+        })
+        for (const step of extra) {
+          const state = bootStepState(step.state)
+          rows.push({
+            key: 'extra-' + String(step.id),
+            index: '',
+            name: String(step.name || step.id || '其他步骤'),
+            state,
+            detail: step.detail ? String(step.detail) : (state === 'pending' ? '还没开始' : ''),
+          })
+        }
+        return rows
+      }
+
+      /** 状态接口没回 qr 时保留上一次抓到的二维码，但登入后就不再显示旧的。 */
+      function mergeNapcat(prev, data) {
+        if (!data || typeof data !== 'object') return prev
+        const next = { ...data }
+        const prevQr = prev && prev.qr ? prev.qr : null
+        if (!next.qr && prevQr && !next.loggedIn) next.qr = prevQr
+        return next
+      }
+
+      function fileBaseName(value) {
+        const text = String(value || '').replace(/\\/g, '/')
+        const cut = text.lastIndexOf('/')
+        return cut >= 0 ? text.slice(cut + 1) : text
+      }
+
+      function fileDirName(value) {
+        const text = String(value || '').replace(/\\/g, '/')
+        const cut = text.lastIndexOf('/')
+        return cut > 0 ? text.slice(0, cut) : ''
+      }
+
+      /** 路径是否落在 appDir 之下（不分大小写、两种分隔符都接受）。 */
+      function pathHasPrefix(file, dir) {
+        const norm = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        const f = norm(file)
+        const d = norm(dir)
+        if (!f || !d) return false
+        return f === d || f.indexOf(d + '/') === 0
+      }
+
+      function lastLogLines(log, count) {
+        if (!Array.isArray(log)) return []
+        return log.filter((entry) => entry && typeof entry === 'object').slice(-count)
+      }
+
+      function isHttpUrl(value) {
+        return /^https?:\/\//i.test(String(value || '').trim())
+      }
+
+      function SetupStepDot({ state }) {
+        const label = BOOT_STEP_STATE_TEXT[state] || String(state || '')
+        if (state === 'running') {
+          return h('span', {
+            'data-pb-step-dot': '',
+            'data-state': 'running',
+            role: 'img',
+            'aria-label': label,
+          }, h('i'))
+        }
+        const glyph = state === 'ok' ? '✓' : state === 'fail' ? '✕' : state === 'skip' ? '⊘' : '·'
+        return h('span', {
+          'data-pb-step-dot': '',
+          'data-state': state,
+          role: 'img',
+          'aria-label': label,
+        }, glyph)
+      }
+
+      function SetupStepRow({ row, onRetry, retrying }) {
+        return h('div', { 'data-pb-step': '', 'data-state': row.state },
+          h(SetupStepDot, { state: row.state }),
+          h('div', { 'data-pb-step-body': '' },
+            h('div', { 'data-pb-step-name': '' },
+              row.index
+                ? h('span', { 'data-pb-step-index': '', 'aria-hidden': 'true' }, row.index)
+                : null,
+              h('span', null, row.name),
+              h('span', {
+                'data-pb-badge': '',
+                'data-tone': BOOT_STEP_TONE[row.state] || 'muted',
+              }, BOOT_STEP_STATE_TEXT[row.state] || row.state)),
+            row.detail ? h('div', { 'data-pb-step-detail': '' }, row.detail) : null,
+            row.state === 'fail'
+              ? h('div', { 'data-pb-step-error': '' },
+                h('div', { 'data-pb-help': '' },
+                  '这一步没有过。修好上面的原因后按下面的按钮，会把整套流程再跑一次（已经好的步骤会自动跳过）。'),
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  disabled: Boolean(retrying),
+                  onClick: onRetry,
+                }, retrying ? '重试中…' : '重试这一步'))
+              : null))
+      }
+
+      function SetupEnvCard({ st, err, busy, installing, logRef, onRerun, onReload }) {
+        const python = (st && st.python) || {}
+        const venv = (st && st.venv) || {}
+        const deps = (st && st.deps) || {}
+        const conf = (st && st.config) || {}
+        const appDir = String((st && st.appDir) || '')
+        const pythonOk = Boolean(python.ok)
+        const pythonText = pythonOk
+          ? 'Python ' + (python.version ? String(python.version) : '（版本未知）')
+          : '未找到 Python'
+        const venvPath = String(venv.path || '')
+        const confText = !conf.exists
+          ? '还没有配置文件'
+          : conf.valid ? '配置文件已就绪' : '配置文件存在，但内容不合法'
+        const rows = lastLogLines(st && st.log, 10)
+
+        return h('section', { 'data-pb-card': '' },
+          h('div', { 'data-pb-card-head': '' },
+            h('h2', { 'data-pb-card-title': '' }, '环境'),
+            h('span', { 'data-pb-card-sub': '' }, 'Python、venv、依赖与设定；每 3 秒自动更新')),
+          err
+            ? h(Notice, {
+              tone: 'err',
+              action: h('button', { 'data-pb-btn': '', type: 'button', onClick: onReload }, '再读一次'),
+            }, '读不到安装状态：' + err)
+            : null,
+          !st && !err ? h('div', { 'data-pb-help': '' }, '正在读取安装状态…') : null,
+          st
+            ? h(React.Fragment, null,
+              h(InfoRow, { label: 'Python', value: pythonText, tone: pythonOk ? 'good' : 'err' }),
+              h(InfoRow, {
+                label: 'venv',
+                value: (venvPath || '（主机没有回报路径）') + ' · ' + (venv.exists ? '已建立' : '还没建立'),
+                tone: venv.exists ? 'good' : 'warn',
+              }),
+              h(InfoRow, {
+                label: '设定档',
+                value: confText,
+                tone: conf.exists && conf.valid ? 'good' : 'err',
+              }),
+              appDir ? h(InfoRow, { label: '应用目录', value: appDir }) : null,
+              !pythonOk
+                ? h('div', { 'data-pb-help': '' },
+                  '这台机器还没有可用的 Python。先装 python3（Windows 装 Python 3.x 并勾选 Add to PATH），装好后再按「只重跑环境安装」。')
+                : null,
+              st.appPresent === false
+                ? h('div', { 'data-pb-help': '' },
+                  '应用目录里还找不到 PawBot 的程序；一键启动会先把程序放好再继续。')
+                : null,
+              h('div', { 'data-pb-flags': '' },
+                h('span', { 'data-pb-flag': '', 'data-tone': deps.pillow ? 'good' : 'err' },
+                  (deps.pillow ? '✓ ' : '✕ ') + 'pillow'),
+                h('span', { 'data-pb-flag': '', 'data-tone': deps.websockets ? 'good' : 'err' },
+                  (deps.websockets ? '✓ ' : '✕ ') + 'websockets'),
+                h('span', {
+                  'data-pb-flag': '',
+                  'data-tone': st.appPresent === false ? 'err' : 'good',
+                }, (st.appPresent === false ? '✕ ' : '✓ ') + 'PawBot 程序')),
+              h('div', { 'data-pb-action-row': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  disabled: Boolean(busy),
+                  onClick: onRerun,
+                }, busy ? '送出中…' : '只重跑环境安装'),
+                h('span', { 'data-pb-help': '' },
+                  '只重装 venv 与依赖，不会动设定，也不会重启 PawBot。')),
+              installing
+                ? h('div', null,
+                  h('div', { 'data-pb-card-sub': '' },
+                    (st.message ? '安装进度：' + String(st.message) : '正在安装…') +
+                    '（下面是日志最后 10 行，会自动滚动）'),
+                  h('div', {
+                    'data-pb-log': '',
+                    ref: logRef,
+                    role: 'log',
+                    'aria-live': 'polite',
+                  },
+                  rows.length
+                    ? rows.map((entry, index) => h('span', {
+                      key: index,
+                      'data-pb-log-line': '',
+                      'data-stream': String(entry.stream || 'stdout'),
+                    }, entry.line === undefined || entry.line === null ? '' : String(entry.line)))
+                    : h('span', { 'data-pb-log-line': '' }, '（还没有日志）')))
+                : null)
+            : null)
+      }
+
+      function SetupNapCatCard({
+        st, appDir, err, busy, manual, notice, onSetup, onQr, onReload,
+      }) {
+        const [tokenOpen, setTokenOpen] = useState(false)
+        const [copyHint, setCopyHint] = useState('')
+        const mode = st && (st.mode === 'docker' || st.mode === 'binary' || st.mode === 'none')
+          ? st.mode
+          : 'none'
+        // 上一次「重新侦测」的提示只在模式没变时显示，避免和最新状态互相矛盾。
+        const noticeText = notice && notice.text && (!notice.mode || notice.mode === mode)
+          ? String(notice.text)
+          : ''
+        const webui = (st && st.webui) || null
+        const qr = (st && st.qr) || null
+        const qrUrl = qr && qr.kind === 'url' ? String(qr.value || '') : ''
+        const qrFile = qr && qr.kind === 'file' ? String(qr.value || '') : ''
+        const qrInAppDir = qrFile ? pathHasPrefix(qrFile, appDir) : false
+        const manualSteps = Array.isArray(manual) ? manual.filter((step) => String(step || '').trim()) : []
+
+        const copySteps = async () => {
+          const text = manualSteps.join('\n')
+          try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(text)
+              setCopyHint('已复制到剪贴板。')
+            } else {
+              setCopyHint('这个浏览器不给用剪贴板；请直接选取上面的步骤复制。')
+            }
+          } catch (error) {
+            setCopyHint('复制失败：' + String((error && error.message) || error) +
+              '；请直接选取上面的步骤复制。')
+          }
+        }
+
+        return h('section', { 'data-pb-card': '' },
+          h('div', { 'data-pb-card-head': '' },
+            h('h2', { 'data-pb-card-title': '' }, 'NapCat'),
+            h('span', { 'data-pb-card-sub': '' }, '侦测与连线；NapCat 登入后 PawBot 才收得到 QQ 消息')),
+          err
+            ? h(Notice, {
+              tone: 'err',
+              action: h('button', { 'data-pb-btn': '', type: 'button', onClick: onReload }, '再读一次'),
+            }, '读不到 NapCat 状态：' + err)
+            : null,
+          noticeText ? h(Notice, { tone: 'info' }, noticeText) : null,
+          !st && !err ? h('div', { 'data-pb-help': '' }, '正在侦测 NapCat…') : null,
+          st
+            ? h(React.Fragment, null,
+              h(InfoRow, {
+                label: '运行方式',
+                value: NAPCAT_MODE_TEXT[mode] || String(mode),
+                tone: mode === 'none' ? 'err' : 'good',
+              }),
+              mode !== 'none'
+                ? h(InfoRow, {
+                  label: '进程状态',
+                  value: st.running ? '正在运行' : '没有在运行',
+                  tone: st.running ? 'good' : 'warn',
+                })
+                : null,
+              h(InfoRow, {
+                label: '登入状态',
+                value: st.loggedIn
+                  ? '已登录，NapCat 已连上 PawBot'
+                  : (mode === 'none' ? '还没装 NapCat' : '还没登录（用手机 QQ 扫码）'),
+                tone: st.loggedIn ? 'good' : 'warn',
+              }),
+              h('div', { 'data-pb-flags': '' },
+                st.loggedIn
+                  ? h('span', { 'data-pb-flag': '', 'data-tone': 'good' },
+                    '✓ 已登录，NapCat 已连上 PawBot')
+                  : h('span', { 'data-pb-flag': '' }, '· 还没登录'),
+                mode === 'docker' ? h('span', { 'data-pb-flag': '', 'data-tone': 'good' }, 'Docker 模式') : null,
+                mode === 'binary' ? h('span', { 'data-pb-flag': '', 'data-tone': 'good' }, '本机 NapCat') : null,
+                mode === 'none' ? h('span', { 'data-pb-flag': '', 'data-tone': 'err' }, '✕ 没有 NapCat') : null),
+              mode === 'none'
+                ? h('div', null,
+                  h(Notice, { tone: 'err' },
+                    '这台机器没有 Docker，也没装 NapCat：一键启动会在第 ② 步停下，' +
+                    'PawBot 就算起来了也收不到 QQ 消息。'),
+                  manualSteps.length
+                    ? h(React.Fragment, null,
+                      h('ol', { 'data-pb-manual': '' },
+                        manualSteps.map((step, index) => h('li', { key: index }, String(step)))),
+                      h('div', { 'data-pb-action-row': '' },
+                        h('button', {
+                          'data-pb-btn': '',
+                          type: 'button',
+                          onClick: copySteps,
+                        }, '复制这些步骤'),
+                        copyHint ? h('span', { 'data-pb-help': '' }, copyHint) : null))
+                    : h('div', { 'data-pb-help': '' },
+                      '按下面的「重新侦测 / 重连 NapCat」，主机就会把这台机器要手动做的步骤列在这里。'))
+                : null,
+              webui && webui.url
+                ? h('div', { 'data-pb-action': '' },
+                  h('div', { 'data-pb-action-title': '' }, 'NapCat 登录页'),
+                  h('div', { 'data-pb-help': '' },
+                    '用要当机器人的 QQ 手机端扫码；token 已自动带在网址里，所以这个链接本身就是凭证，别转给别人。'),
+                  h('div', { 'data-pb-action-row': '' },
+                    isHttpUrl(webui.url)
+                      ? h('a', {
+                        'data-pb-btn': '',
+                        'data-primary': '',
+                        'data-link': '',
+                        href: String(webui.url),
+                        target: '_blank',
+                        rel: 'noopener noreferrer',
+                      }, '打开 NapCat 登录页')
+                      : h('code', { 'data-pb-token': '' }, String(webui.url)),
+                    h('button', {
+                      'data-pb-btn': '',
+                      type: 'button',
+                      'aria-expanded': Boolean(tokenOpen),
+                      onClick: () => setTokenOpen((value) => !value),
+                    }, tokenOpen ? '收起 token' : '查看 token')),
+                  tokenOpen
+                    ? h('code', { 'data-pb-token': '' },
+                      String(webui.token || '（主机没有回传 token）'))
+                    : null)
+                : null,
+              qrUrl
+                ? h('div', { 'data-pb-action': '' },
+                  h('div', { 'data-pb-action-title': '' }, '登录二维码'),
+                  h('div', { 'data-pb-help': '' }, '二维码是抓取当次有效的；过期就按「重新抓二维码」。'),
+                  h('div', { 'data-pb-action-row': '' },
+                    isHttpUrl(qrUrl)
+                      ? h('a', {
+                        'data-pb-btn': '',
+                        'data-link': '',
+                        href: qrUrl,
+                        target: '_blank',
+                        rel: 'noopener noreferrer',
+                      }, '打开二维码')
+                      : h('code', { 'data-pb-token': '' }, qrUrl)))
+                : null,
+              qrFile
+                ? h('div', { 'data-pb-action': '' },
+                  h('div', { 'data-pb-action-title': '' }, '登录二维码'),
+                  qrInAppDir
+                    ? h(React.Fragment, null,
+                      h('div', { 'data-pb-help': '' }, '二维码已生成：' + fileBaseName(qrFile)),
+                      h('div', { 'data-pb-help': '' },
+                        '文件在 ' + fileDirName(qrFile) + ' 下面；用文件管理器打开就看得到' +
+                        '（面板不读取图片文件，所以这里只给路径）。'))
+                    : h('div', { 'data-pb-help': '' },
+                      '二维码图片在 ' + qrFile + '；用文件管理器打开即可（面板不读取图片文件）。'))
+                : null,
+              st.hint ? h('div', { 'data-pb-help': '' }, String(st.hint)) : null,
+              h('div', { 'data-pb-action-row': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  disabled: busy === 'setup',
+                  onClick: onSetup,
+                }, busy === 'setup' ? '侦测中…' : '重新侦测 / 重连 NapCat'),
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  disabled: busy === 'qr',
+                  onClick: onQr,
+                }, busy === 'qr' ? '抓取中…' : '重新抓二维码'),
+                h('span', { 'data-pb-help': '' },
+                  '侦测只读本机状态；重连会请 PawBot 再连一次 NapCat。')))
+            : null)
+      }
+
+      function SetupTab({ active, onGoStatus, onGoConfig }) {
+        const [setupSt, setSetupSt] = useState(null)
+        const [setupErr, setSetupErr] = useState('')
+        const [setupTick, setSetupTick] = useState(0)
+        const [setupBusy, setSetupBusy] = useState(false)
+        const [bootSt, setBootSt] = useState(null)
+        const [bootErr, setBootErr] = useState('')
+        const [bootTick, setBootTick] = useState(0)
+        const [bootArmed, setBootArmed] = useState(false)
+        const [bootRequesting, setBootRequesting] = useState(false)
+        const [napcat, setNapcat] = useState(null)
+        const [napcatErr, setNapcatErr] = useState('')
+        const [napcatTick, setNapcatTick] = useState(0)
+        const [napcatBusy, setNapcatBusy] = useState('')
+        const [napcatNotice, setNapcatNotice] = useState(null)
+        const [manual, setManual] = useState([])
+        const [actErr, setActErr] = useState('')
+        const [actInfo, setActInfo] = useState('')
+        const logRef = useRef(null)
+        const actCtrl = useRef(null)
+
+        // 所有 POST 共用同一个 controller：离开这个分页就整批取消。
+        useEffect(() => {
+          const ctrl = new AbortController()
+          actCtrl.current = ctrl
+          return () => ctrl.abort()
+        }, [])
+
+        // 环境状态：只有「启动」页可见时才轮询（3 秒）。
+        useEffect(() => {
+          if (!active) return undefined
+          let alive = true
+          const ctrl = new AbortController()
+          const tick = async () => {
+            try {
+              const data = await api('GET', '/setup/status', undefined, ctrl.signal)
+              if (!alive) return
+              setSetupSt(data)
+              setSetupErr('')
+            } catch (error) {
+              if (alive && !isAbortError(error)) setSetupErr(friendlyError(error))
+            }
+          }
+          tick()
+          const timer = setInterval(tick, 3000)
+          return () => {
+            alive = false
+            clearInterval(timer)
+            ctrl.abort()
+          }
+        }, [active, setupTick])
+
+        // NapCat 状态：同一个分页可见时每 3 秒更新，登入状态才会自己变绿。
+        useEffect(() => {
+          if (!active) return undefined
+          let alive = true
+          const ctrl = new AbortController()
+          const tick = async () => {
+            try {
+              const data = await api('GET', '/napcat/status', undefined, ctrl.signal)
+              if (!alive) return
+              setNapcat((prev) => mergeNapcat(prev, data))
+              setNapcatErr('')
+            } catch (error) {
+              if (alive && !isAbortError(error)) setNapcatErr(friendlyError(error))
+            }
+          }
+          tick()
+          const timer = setInterval(tick, 3000)
+          return () => {
+            alive = false
+            clearInterval(timer)
+            ctrl.abort()
+          }
+        }, [active, napcatTick])
+
+        // 四步进度：每 1.5 秒轮询，done:true 就停。
+        useEffect(() => {
+          if (!active) return undefined
+          let alive = true
+          let timer = null
+          const ctrl = new AbortController()
+          const stop = () => {
+            if (timer !== null) {
+              clearInterval(timer)
+              timer = null
+            }
+          }
+          const tick = async () => {
+            try {
+              const data = await api('GET', '/boot/status', undefined, ctrl.signal)
+              if (!alive) return
+              setBootSt(data)
+              setBootErr('')
+              const steps = data && Array.isArray(data.steps) ? data.steps : []
+              // 只要没有任何一步在跑，就认为这次「刚送出」的状态已结算：
+              // 避免请求被中断时按钮一直卡在 disabled。
+              const running = steps.some((step) => step && step.state === 'running')
+              if (!running) setBootArmed(false)
+              if (data && data.done) stop()
+            } catch (error) {
+              if (alive && !isAbortError(error)) {
+                setBootErr(friendlyError(error))
+                setBootArmed(false)
+              }
+            }
+          }
+          tick()
+          timer = setInterval(tick, 1500)
+          return () => {
+            alive = false
+            stop()
+            ctrl.abort()
+          }
+        }, [active, bootTick])
+
+        const setupPhase = setupSt && setupSt.phase ? String(setupSt.phase) : ''
+        const installing = setupPhase === 'installing'
+        const logLength = setupSt && Array.isArray(setupSt.log) ? setupSt.log.length : 0
+
+        // 日志窗自动滚到底：像终端一样，永远看得到最新一行。
+        useEffect(() => {
+          const el = logRef.current
+          if (el) el.scrollTop = el.scrollHeight
+        }, [logLength, setupPhase])
+
+        const refreshSetup = () => setSetupTick((value) => value + 1)
+        const refreshNapcat = () => setNapcatTick((value) => value + 1)
+        const refreshBoot = () => setBootTick((value) => value + 1)
+
+        const runBoot = async () => {
+          setBootRequesting(true)
+          setActErr('')
+          setActInfo('')
+          try {
+            await api('POST', '/boot', {}, actCtrl.current && actCtrl.current.signal)
+            setBootArmed(true)
+            setBootSt((prev) => (prev ? { ...prev, done: false } : prev))
+            refreshBoot()
+            refreshSetup()
+            refreshNapcat()
+          } catch (error) {
+            if (!isAbortError(error)) {
+              setActErr('一键启动没跑起来：' + friendlyError(error) + '（可以再按一次）')
+            }
+          } finally {
+            setBootRequesting(false)
+          }
+        }
+
+        const runSetupInstall = async () => {
+          setSetupBusy(true)
+          setActErr('')
+          setActInfo('')
+          try {
+            const result = await api('POST', '/setup/run', { force: false }, actCtrl.current && actCtrl.current.signal)
+            setActInfo(result && result.started
+              ? '已开始重跑环境安装；进度会自动更新，日志会出现在下面的日志窗。'
+              : '已送出环境安装请求；进度会自动更新。')
+            refreshSetup()
+          } catch (error) {
+            if (!isAbortError(error)) setActErr('环境安装没跑起来：' + friendlyError(error))
+          } finally {
+            setSetupBusy(false)
+          }
+        }
+
+        const setupNapcat = async () => {
+          setNapcatBusy('setup')
+          setActErr('')
+          setActInfo('')
+          setNapcatNotice(null)
+          try {
+            const result = await api('POST', '/napcat/setup', {}, actCtrl.current && actCtrl.current.signal)
+            const steps = result && result.manual && Array.isArray(result.manual.steps)
+              ? result.manual.steps.map((step) => String(step))
+              : []
+            if (steps.length) setManual(steps)
+            const bits = []
+            if (result && result.mode) {
+              bits.push('侦测结果：' + (NAPCAT_MODE_TEXT[result.mode] || String(result.mode)))
+            }
+            if (result && result.hint) bits.push(String(result.hint))
+            setNapcatNotice({
+              mode: result && result.mode ? String(result.mode) : '',
+              text: bits.join('；') || '已重新侦测一次。',
+            })
+            refreshNapcat()
+            refreshBoot()
+          } catch (error) {
+            if (!isAbortError(error)) setActErr('NapCat 重连失败：' + friendlyError(error))
+          } finally {
+            setNapcatBusy('')
+          }
+        }
+
+        const fetchQr = async () => {
+          setNapcatBusy('qr')
+          setActErr('')
+          setActInfo('')
+          setNapcatNotice(null)
+          try {
+            const result = await api('POST', '/napcat/qr', {}, actCtrl.current && actCtrl.current.signal)
+            const qr = result && result.qr ? result.qr : null
+            const webui = result && result.webui ? result.webui : undefined
+            setNapcat((prev) => {
+              const base = prev && typeof prev === 'object' ? prev : {}
+              return {
+                ...base,
+                qr: qr || base.qr || null,
+                webui: webui === undefined ? base.webui : webui,
+              }
+            })
+            setNapcatNotice({
+              text: qr
+                ? '已重新抓一次二维码。'
+                : '主机没有回传二维码；可能是 NapCat 没在跑，或已经登录了。',
+            })
+            refreshNapcat()
+          } catch (error) {
+            if (!isAbortError(error)) setActErr('抓二维码失败：' + friendlyError(error))
+          } finally {
+            setNapcatBusy('')
+          }
+        }
+
+        const bootRows = normalizeBootSteps(bootSt)
+        const bootRunning = bootRows.some((row) => row.state === 'running')
+        const bootFailed = bootRows.some((row) => row.state === 'fail')
+        const bootDone = Boolean(bootSt && bootSt.done)
+        const bootBusy = bootRequesting || bootRunning || bootArmed
+        const readyRow = bootRows.find((row) => row.key === 'ready') || null
+        const showReady = Boolean(readyRow && readyRow.state === 'ok' && napcat && napcat.loggedIn === true)
+
+        return h(React.Fragment, null,
+          h('div', { 'data-pb-hero': '' },
+            h('div', { 'data-pb-hero-main': '' },
+              h('h1', { 'data-pb-title': '' }, '一键把 PawBot 跑起来'),
+              h('p', { 'data-pb-sub': '' }, '装环境 → 连 NapCat → 启动 PawBot，三步自动完成'),
+              h('div', { 'data-pb-help': '' }, bootBusy
+                ? '正在跑，进度会自动更新；这一步不用一直盯着。'
+                : bootFailed
+                  ? '有步骤失败了；修好原因后按右边的「一键启动」，或该步骤的「重试这一步」再跑一次。'
+                  : '按右边的主按钮会从第 ① 步一路跑到第 ④ 步；也可以用下面各张卡的按钮单独重跑某一步。')),
+            h('div', { 'data-pb-hero-actions': '' },
+              h('button', {
+                'data-pb-btn': '',
+                'data-primary': '',
+                'data-hero': '',
+                type: 'button',
+                disabled: bootBusy,
+                'aria-busy': bootBusy,
+                onClick: runBoot,
+              }, bootBusy ? '执行中…' : '一键启动'))),
+
+          actErr ? h(Notice, { tone: 'err' }, actErr) : null,
+          actInfo ? h(Notice, { tone: 'good' }, actInfo) : null,
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '四步进度'),
+              h('span', { 'data-pb-card-sub': '' }, bootDone
+                ? '四步都跑完了，已经停止轮询'
+                : '来自 /pawbot-ui/boot/status，每 1.5 秒自动更新；done 为 true 就停')),
+            bootErr
+              ? h(Notice, {
+                tone: 'err',
+                action: h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  onClick: refreshBoot,
+                }, '再读一次'),
+              }, '读不到启动进度：' + bootErr)
+              : null,
+            !bootSt && !bootErr ? h('div', { 'data-pb-help': '' }, '正在读取启动进度…') : null,
+            bootSt
+              ? h('div', { 'data-pb-stepper': '' },
+                bootRows.map((row) => h(SetupStepRow, {
+                  key: row.key,
+                  row,
+                  retrying: bootBusy,
+                  onRetry: runBoot,
+                })))
+              : null,
+            bootSt && !bootDone && !bootBusy
+              ? h('div', { 'data-pb-help': '' },
+                '目前没有在跑。按上面的「一键启动」会整套重跑；也可以用下面卡片上的按钮单独重跑一步。')
+              : null),
+
+          h(SetupEnvCard, {
+            st: setupSt,
+            err: setupErr,
+            busy: setupBusy,
+            installing,
+            logRef,
+            onRerun: runSetupInstall,
+            onReload: refreshSetup,
+          }),
+
+          h(SetupNapCatCard, {
+            st: napcat,
+            appDir: setupSt && setupSt.appDir ? String(setupSt.appDir) : '',
+            err: napcatErr,
+            busy: napcatBusy,
+            manual,
+            notice: napcatNotice,
+            onSetup: setupNapcat,
+            onQr: fetchQr,
+            onReload: refreshNapcat,
+          }),
+
+          showReady
+            ? h('div', { 'data-pb-ready': '', role: 'status' },
+              h('div', { 'data-pb-ready-text': '' },
+                h('div', { 'data-pb-ready-title': '' }, '✓ 都好了 — 去群里说句话试试'),
+                h('div', { 'data-pb-ready-sub': '' },
+                  '环境、NapCat 与 PawBot 进程都好了；去群里 @ 她一下，或到状态页确认连接数。')),
+              h('div', { 'data-pb-ready-actions': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  onClick: onGoStatus,
+                }, '去状态页'),
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  onClick: onGoConfig,
+                }, '去设定页')))
             : null)
       }
 
@@ -2336,18 +3165,20 @@ if (typeof window === 'undefined') {
             h('li', null, '服务器上的人设文件不会被改动，也不会变成出厂值。'))))
       }
 
-      /* ── 頂層面板：3 個分頁 ─────────────────────────────────────────────── */
+      /* ── 頂層面板：4 個分頁（启动 / 状态 / 设定 / 人设） ─────────────────── */
 
       const TABS = [
+        ['setup', '启动'],
         ['status', '状态'],
         ['config', '设置'],
         ['persona', '人设'],
       ]
 
       function Panel() {
-        const [tab, setTab] = useState('status')
+        // 「启动」排第一且预设打开：新用户第一眼就看到一键引导。
+        const [tab, setTab] = useState('setup')
         // 只掛載使用者拜訪過的分頁；之後用 CSS 隱藏而不是卸載，避免切走再回來掉草稿。
-        const [mounted, setMounted] = useState({ status: true, config: false, persona: false })
+        const [mounted, setMounted] = useState({ setup: true, status: false, config: false, persona: false })
         const [configDirty, setConfigDirty] = useState(0)
         const [tabNotice, setTabNotice] = useState('')
         const selectTab = (id) => {
@@ -2365,7 +3196,7 @@ if (typeof window === 'undefined') {
               h('div', { 'data-pb-eyebrow': '' }, 'DSH 受管服务'),
               h('h1', { 'data-pb-title': '' }, 'PawBot 控制面板'),
               h('p', { 'data-pb-sub': '' },
-                '看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。')),
+                '一键启动、看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。')),
             h('div', { 'data-pb-tabs': '', role: 'tablist', 'aria-label': 'PawBot 控制面板标签页' },
               TABS.map(([id, label]) => h('button', {
                 key: id,
@@ -2386,6 +3217,14 @@ if (typeof window === 'undefined') {
               }, '回到设置'),
             }, tabNotice)
             : null,
+          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'setup' ? '' : undefined },
+            mounted.setup
+              ? h(SetupTab, {
+                active: tab === 'setup',
+                onGoStatus: () => selectTab('status'),
+                onGoConfig: () => selectTab('config'),
+              })
+              : null),
           h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'status' ? '' : undefined },
             mounted.status ? h(StatusTab, { active: tab === 'status', onGoConfig: () => selectTab('config') }) : null),
           h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'config' ? '' : undefined },

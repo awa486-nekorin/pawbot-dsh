@@ -14,3 +14,21 @@ diag-*.mjs
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ── PawBot 本体（app/）的运行时数据与缓存：只让模板进库 ──
+app/data/sessions.json
+app/data/run.log
+app/data/backup/
+app/data/image_cache/
+app/data/stickers/
+app/data/browser/
+app/data/people/*.md
+app/data/diary/*.md
+app/data/memory/entities.jsonl
+app/data/*.before-*
+app/data/*.bak
+app/__pycache__/
+app/**/__pycache__/
+app/.venv/
+*.pyc
+app/data/napcat/

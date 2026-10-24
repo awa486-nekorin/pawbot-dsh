@@ -3,10 +3,23 @@
 一个 DSH Host bundle，把 **PawBot（QQ 机器人）** 封装成 DSH 受管服务，并把原本独立的
 `@local/pawbot-bili-watch`（大肥鱼看 B 站）合并进同一个 bundle。装这一个 bundle 就有全部功能。
 
+## 这个仓库包含什么
+
+| 部分 | 位置 | 说明 |
+| --- | --- | --- |
+| 插件本体 | `index.js` / `client.js` / `lib/` / `bili-watch/` / `locale/` | DSH Host bundle：PawBot 受管服务 + 「大肥鱼看 B 站」 |
+| **PawBot 本体** | `app/` | PawBot 的 Python 源码：`run.py`、`pawbot/`（核心包）、`plugins/`（内置插件）、`tools/`（测试与辅助脚本）、`data/`（**模板**：配置、人设、空记忆） |
+| 部署说明 | [DEPLOY.md](DEPLOY.md) | 云服务器（Linux）从零部署清单：NapCat、SESSDATA、目录与权限 |
+
+**PawBot 源码已经内附在本仓库的 `app/` 里**——装这个插件就有 PawBot 本体，不需要另外下载/上传。
+`app/data/` 里只有模板：`config.json` 的密钥字段全部为空、`memory/*.md` 是空文件、`people/` 与 `diary/`
+是空目录（只有 `.gitkeep`）。真实会话、群友档案、图片缓存、表情包、密钥都不进仓库（`.gitignore` 已排除）。
+
 ## 结构
 
 ```
 index.js                      # pawbot 受管服务插件（apply/inject/Config + 6 个工具 + /pawbot-ui 代理路由）
+client.js                     # 设置页面板（PawBot 标签页：状态/设置/人设/工具）
 lib/hostdeps.js               # 从宿主树拿 schemastery 与 defineTool（拿不到就降级）
 lib/config-utils.js           # 纯函数：遮罩 secrets / 去遮罩值 / 深合并 / 区段过滤 / 差异
 lib/webui-proxy.js            # /pawbot-ui/* 同源代理路由（status/config/persona/reload-plugins/send/restart）
@@ -15,8 +28,17 @@ bili-watch/                   # 从 @local/pawbot-bili-watch 原样复制过来�
   index.js                    #   挂成 @local/pawbot/bili-watch（subpath export）
   lib/…                       #   WBI 签名 / buvid 指纹 / view / player / subtitle / reply 等
   locale/…, icon.svg
+app/                          # ★ PawBot 本体的 Python 源码（自包含，见下节）
+  run.py                      #   启动器
+  requirements.txt            #   pillow / websockets 两个第三方依赖
+  pawbot/                     #   核心包（OneBot / LLM / 记忆 / 发送层 / WebUI …）
+  plugins/                    #   内置插件（basic / ai_chat / life_events / pixiv …）
+  tools/                      #   测试（test_*.py）+ 辅助脚本（mock_qq / selftest …）
+  data/                       #   运行时数据（只有模板进库：config.json / persona.md / 空记忆）
+  README.upstream.md, 使用指南.md, ARCHITECTURE.md   # 上游文档
 locale/en.json, locale/zh.json, icon.svg   # 本 bundle 的显示 metadata / 图标
 cordis.patch.yml              # 插入两列：pawbot 与 pawbot-bili-watch
+DEPLOY.md                     # Linux 云服务器部署清单
 ```
 
 ## 与旧 bundle 的关系（重要）
@@ -30,7 +52,8 @@ cordis.patch.yml              # 插入两列：pawbot 与 pawbot-bili-watch
 - `bili-watch/index.js` + `lib/` 原样复制进来，挂成 **subpath `@local/pawbot/bili-watch`**（id `pawbot-bili-watch`）。
 - 安装本 bundle 后，要**移除旧的 `@local/pawbot-bili-watch` bundle**，让 `bili_watch` / `bili_watch_status`
   只有一份（来自本 bundle 的 subpath）。
-- 数据目录沿用原默认 `D:/WorkBuddy/pawbot-bili-watch-data`，报告/请求/已分享状态无缝延续。
+- 数据目录：插件把 `dataRoot` 的**绝对路径**传给 PawBot；PawBot 端 `tools.bili_watch_dir` 的默认值
+  已改成相对值 `pawbot-bili-watch-data`（避免写死任何 Windows 路径），实际以插件传入的绝对路径为准。
 
 > 选「复制」而不是「引用已安装包」的原因：引用已安装包会在同一个 profile 里出现两个
 > 解析到同一模块的列 → `bili_watch` 注册两次 → 冲突；复制进 bundle 才能做到「一个 bundle 全功能」，
@@ -40,7 +63,7 @@ cordis.patch.yml              # 插入两列：pawbot 与 pawbot-bili-watch
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `projectDir` | `D:/WorkBuddy/2026-10-20-00-14-25/pawbot` | PawBot 项目根目录（run.py 所在） |
+| `projectDir` | `D:/WorkBuddy/2026-10-20-00-14-25/pawbot`（旧默认） | PawBot 项目根目录（`run.py` 所在）。**PawBot 已内附于本仓库的 `app/`，把这里指到插件安装目录下的 `app/`**（Linux 例如 `/opt/pawbot-dsh/app`） |
 | `pythonExe` | `py` | 用哪个 python 启动（`py` = Windows launcher，等同 start.bat 的 Python313） |
 | `autostart` | `true` | apply 时是否自动启动 |
 | `restartOnCrash` | `false` | 进程意外退出后是否自动重启（主动 stop 不触发） |
@@ -164,14 +187,21 @@ cordis.patch.yml              # 插入两列：pawbot 与 pawbot-bili-watch
   但「停机前强制 flush」这一步在 Windows 上无法触发。
 - **`pawbot_health` 依赖 PawBot 已启动且 WebUI port/host 正确**；PawBot 没连上 NapCat 时它仍会
   正常起 WS/WebUI，所以 `process_running=true` 不代表 QQ 已上线（要看 `/api/status` 的 `connections`）。
-- 本 bundle **不读写 PawBot 的 `data/`**、**不改任何 py**、**不改 profile 的 package.json / cordis.patch.yml**、
-  **不装其他 npm 包**。
+- 本 bundle **自带 `app/`（PawBot 源码 + `data/` 模板）**；运行时只写 `app/data/` 下的数据文件，
+  **不改 `app/pawbot/` 等源码**、**不改 profile 的 package.json / cordis.patch.yml**、**不装其他 npm 包**。
 
 ## 安装 / 验证
 
-1. `plugin_manager` `action: install_bundle`，`target` 为本目录绝对路径。
-2. 读回 `application` 与 `warnings` 决定是否生效。
-3. `cordis_inspect_query`（Config.listConfigs）确认 `@local/pawbot` 列存在。
-4. `Tool.listTools` 确认 `pawbot_status` / `pawbot_logs` / `pawbot_restart` / `pawbot_health` 已注册，
+PawBot 本体**已内附在 `app/`**，安装时不需要另外准备 Python 项目。装完要做的是让插件指向它：
+
+1. `plugin_manager` `action: install_bundle`，`target` 为本目录绝对路径（GitHub 上直接装也可以：
+   `dsh plugin add github:awa486-nekorin/pawbot-dsh`）。
+2. 把插件设置里的 `projectDir` 指到**本 bundle 内的 `app/`**（例如 `/opt/pawbot-dsh/app`；
+   装成 npm 包时就是 `node_modules/@local/pawbot/app`），`pythonExe` 用 venv 里的解释器或 `python3`。
+   依赖只有 `pillow` / `websockets`：`python3 -m venv .venv && .venv/bin/pip install -r app/requirements.txt`。
+3. 读回 `application` 与 `warnings` 决定是否生效。
+4. `cordis_inspect_query`（Config.listConfigs）确认 `@local/pawbot` 列存在。
+5. `Tool.listTools` 确认 `pawbot_status` / `pawbot_logs` / `pawbot_restart` / `pawbot_health` 已注册，
    且 `bili_watch` / `bili_watch_status` 只有一份。
-5. 移除旧的 `@local/pawbot-bili-watch` bundle（避免 bili_watch 注册两次）。
+6. 移除旧的 `@local/pawbot-bili-watch` bundle（避免 bili_watch 注册两次）。
+7. 云服务器部署（NapCat、SESSDATA、端口）见 [DEPLOY.md](DEPLOY.md)。

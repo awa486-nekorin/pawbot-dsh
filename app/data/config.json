@@ -1,0 +1,526 @@
+{
+  "store": {
+    "flush_interval": 2.0
+  },
+  "longmem": {
+    "dir": "data/longmem",
+    "enabled": true,
+    "half_life_days": 7,
+    "top_k": 6,
+    "max_chars": 900,
+    "daily_merge_threshold": 12,
+    "keep_days": 30,
+    "max_episodes": 5000
+  },
+  "memory": {
+    "engine": "v2",
+    "total_chars": 8700,
+    "l0_limit": 100,
+    "l0_hours": 6,
+    "l0_chars": 5000,
+    "l1_chars": 600,
+    "l2_chars": 1600,
+    "l2_days": 2,
+    "l3_chars": 1500,
+    "event_min_importance": 3,
+    "auto_day_merge": true,
+    "l2_day_chars": 800
+  },
+  "diary": {
+    "enabled": true,
+    "keep_days": 60,
+    "max_chars": 500
+  },
+  "hobbies": {
+    "enabled": true,
+    "check_every_hours": 12,
+    "max_items": 6
+  },
+  "reminders": {
+    "enabled": true,
+    "poll_sec": 30,
+    "quiet_hours": [
+      0,
+      9
+    ]
+  },
+  "memes": {
+    "enabled": true,
+    "inject_limit": 3
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 6199,
+    "path": "/ws",
+    "access_token": ""
+  },
+  "webui": {
+    "host": "127.0.0.1",
+    "port": 6185,
+    "token": ""
+  },
+  "bot": {
+    "nickname": "大肥鱼",
+    "command_prefixes": [
+      "/",
+      "!"
+    ],
+    "allow_no_prefix": true,
+    "wake_words": [
+      "大肥鱼",
+      "肥鱼",
+      "小鲸鱼"
+    ]
+  },
+  "chat": {
+    "reply_mode": "at_or_wake",
+    "settle_sec": 1.6,
+    "settle_max": 4.5,
+    "batch_enabled": true,
+    "batch_msgs": [
+      2,
+      4
+    ],
+    "batch_quiet": [
+      6,
+      14
+    ],
+    "batch_max_wait": [
+      60,
+      150
+    ],
+    "batch_tick": 1,
+    "reply_in_private": true,
+    "context_turns": 10,
+    "context_messages": 300,
+    "no_silence": true,
+    "context_keep": 400,
+    "time_decay_hours": 6,
+    "context_chars": 16000,
+    "turn_summary": true,
+    "turn_summary_chars": 300,
+    "turn_summary_min_rows": 1,
+    "turn_summary_timeout": 20,
+    "gap_mark_minutes": 10,
+    "rate_limit_per_min": 6,
+    "quote_reply": true
+  },
+  "spice": {
+    "default": 2,
+    "allow_joke": true,
+    "allow_flirt": true,
+    "topics": []
+  },
+  "people": {
+    "dir": "data/people",
+    "auto_profile": true,
+    "update_every": 15,
+    "update_cooldown": 900,
+    "affinity_half_life_days": 14,
+    "affinity_daily_gain": 10
+  },
+  "relations": {
+    "enabled": true,
+    "min_score": 3,
+    "flush_interval": 60
+  },
+  "reply": {
+    "quote": "auto",
+    "at_sender": "auto",
+    "at_chance_addressed": 0.5,
+    "quote_chance_addressed": 0.6,
+    "at_chance": 0.08,
+    "quote_chance": 0.3,
+    "quote_chance_batch": 0.4,
+    "length_weights": [
+      5,
+      3,
+      2,
+      0,
+      0
+    ],
+    "length_enforce": true,
+    "length_max": 3,
+    "max_parts": 3,
+    "question_rate": 0.3,
+    "strip_ai_phrases": true,
+    "body_reaction_max": 1,
+    "strip_filler_opener": true
+  },
+  "slang": {
+    "base_url": "https://9527.codes",
+    "api_key": "",
+    "model": "gemini-4-argon",
+    "fallback_model": "gemini-3.8-flash",
+    "timeout": 120,
+    "max_tokens": 4000
+  },
+  "persona": {
+    "file": "data/persona.md",
+    "memory_dir": "data/memory",
+    "stickers_dir": "data/stickers",
+    "stickers_max": 400,
+    "sticker_fetch": true,
+    "sticker_anime_only": true,
+    "anime_check_model": "gemini-3.8-flash"
+  },
+  "media": {
+    "image_repeat_turns": 30,
+    "sticker_gap": [
+      1,
+      1
+    ],
+    "sticker_chance": 0.95
+  },
+  "account": {
+    "owner_ids": []
+  },
+  "tools": {
+    "enabled": true,
+    "max_rounds": 3,
+    "time_budget": 90,
+    "search_provider": "deepseek",
+    "search_count": 5,
+    "search_timeout": 30,
+    "bili_json_card": false,
+    "bili_min_gap": 3600,
+    "bili_watch_enabled": true,
+    "bili_watch_dir": "pawbot-bili-watch-data",
+    "bili_watch_credential_file": "",
+    "search_base_url": "https://api.deepseek.com",
+    "search_model": "deepseek-v4-flash",
+    "search_reasoning_effort": "medium",
+    "search_api_key": "",
+    "image_api_key": "",
+    "image_provider": "auto",
+    "image_custom_endpoint": "",
+    "image_stock_fallback": false,
+    "block_minor": true,
+    "nsfw_vision": true,
+    "nsfw_censor": "bar",
+    "pixiv_refresh_token": "",
+    "pixiv_use_browser": false,
+    "pixiv_auto_launch": false,
+    "pixiv_sessid": "",
+    "pixiv_popular": "10000,5000,1000",
+    "pixiv_min_bookmarks": 500,
+    "pixiv_min_side": 1000,
+    "pixiv_exclude_ai": true,
+    "pixiv_candidate_limit": 30,
+    "pixiv_record_view": true,
+    "pixiv_home_source": "auto",
+    "pixiv_home_top": 20,
+    "pixiv_home_query": "10000users入り",
+    "x_enabled": true,
+    "image_judge": true,
+    "image_judge_min": 6,
+    "image_judge_timeout": 20,
+    "image_timeout": 20,
+    "timeout": 90
+  },
+  "speech": {
+    "enabled": true,
+    "timeout": 60,
+    "max_chars": 300,
+    "api_key": "",
+    "base_url": "",
+    "model": "",
+    "reasoning_effort": ""
+  },
+  "video": {
+    "enabled": true,
+    "frames": 3,
+    "timeout": 60
+  },
+  "tts": {
+    "enabled": true,
+    "url": "http://127.0.0.1:50021/tts",
+    "health_url": "http://127.0.0.1:50021/health",
+    "timeout": 60,
+    "max_chars": 0,
+    "auto_chance": 0.12,
+    "auto_max_chars": 0,
+    "chunk_chars": 180,
+    "autostart": false,
+    "server_cmd": [],
+    "provider": "cloud",
+    "cloud_url": "wss://convai-platform.aliyuncs.com/api-ws/v1/inference",
+    "cloud_key": "",
+    "cloud_voice": "",
+    "cloud_format": "pcm",
+    "cloud_sample_rate": 24000
+  },
+  "qzone": {
+    "enabled": true,
+    "enforce_limits": false,
+    "owner_ids": [],
+    "ugc_right": 1,
+    "daily_limit": 3,
+    "actions": {
+      "list": "get_qzone_msg_list",
+      "detail": "get_qzone_msg",
+      "comments": "get_qzone_comments",
+      "delete": "delete_qzone_msg",
+      "edit": "update_qzone_msg",
+      "reply": "send_qzone_comment"
+    }
+  },
+  "selfedit": {
+    "enabled": false,
+    "cooldown_sec": 300,
+    "daily_limit": 6,
+    "max_chars": 2000
+  },
+  "album": {
+    "dir": "data/album"
+  },
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-flash",
+    "temperature": 1,
+    "max_tokens": 1600,
+    "timeout": 120,
+    "first_timeout": 20,
+    "fallback_model": "",
+    "breaker_threshold": 2,
+    "breaker_cooldown": 300,
+    "reasoning_effort": "medium",
+    "vision_reasoning_effort": "",
+    "vision_base_url": "https://9527.codes/v1",
+    "vision_api_key": "",
+    "vision_model": "gemini-4-argon",
+    "vision_timeout": 30,
+    "vision_fallback_model": "gemini-3.8-flash",
+    "vision_fallback_timeout": 30,
+    "vision_max_images": 4,
+    "system_prompt": "你是一个活跃在 QQ 群里的 AI 群友，名字叫「大肥鱼」，DeepSeek 的拟人形象。性格：天才但爱摸鱼、贪吃、有一点傲娇，说话短而口语。回复控制在 1~4句，像真人打字，不要用小标题、不要列表、不要暴露自己是 AI。説話時注意你是在Q群，不要使用Markdown"
+  },
+  "judge": {
+    "enabled": true,
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-flash",
+    "reasoning_effort": "low",
+    "timeout": 20
+  },
+  "libido": {
+    "half_life_min": 180,
+    "max_step": 16
+  },
+  "emotion": {
+    "enabled": false,
+    "half_life_min": 240,
+    "turn_regress": 1,
+    "max_step": 15,
+    "judge_model": "deepseek-flash",
+    "judge_base_url": "https://api.deepseek.com/v1",
+    "judge_api_key": "",
+    "judge_effort": "low",
+    "judge_timeout": 20
+  },
+  "whitelist": {
+    "group_ids": [],
+    "user_ids": [],
+    "blacklist_group_ids": []
+  },
+  "random_interject": {
+    "enabled": true,
+    "probability": 0.5,
+    "cooldown_sec": 60
+  },
+  "topic": {
+    "digest_lines": 12,
+    "enabled": true,
+    "history_size": 30,
+    "min_idle": 120,
+    "busy_threshold": 12,
+    "chime_cooldown": 300
+  },
+  "life": {
+    "enabled": true,
+    "schedule": [
+      {
+        "start": "02:00",
+        "end": "07:00",
+        "key": "sleep",
+        "label": "睡着",
+        "factor": 1000.0,
+        "quiet": true
+      },
+      {
+        "start": "07:00",
+        "end": "08:30",
+        "key": "wake",
+        "label": "刚醒迷糊",
+        "factor": 1.3,
+        "quiet": false
+      },
+      {
+        "start": "08:30",
+        "end": "11:30",
+        "key": "morning",
+        "label": "上午精神",
+        "factor": 0.7,
+        "quiet": false
+      },
+      {
+        "start": "11:30",
+        "end": "13:30",
+        "key": "noon",
+        "label": "午饭摸鱼",
+        "factor": 0.9,
+        "quiet": false
+      },
+      {
+        "start": "13:30",
+        "end": "14:00",
+        "key": "doze",
+        "label": "饭后发呆",
+        "factor": 1.2,
+        "quiet": false
+      },
+      {
+        "start": "14:00",
+        "end": "16:00",
+        "key": "sleepy",
+        "label": "犯睏",
+        "factor": 1.5,
+        "quiet": false
+      },
+      {
+        "start": "16:00",
+        "end": "18:00",
+        "key": "afternoon",
+        "label": "下午缓过来",
+        "factor": 0.9,
+        "quiet": false
+      },
+      {
+        "start": "18:00",
+        "end": "19:30",
+        "key": "evening",
+        "label": "傍晚",
+        "factor": 1.0,
+        "quiet": false
+      },
+      {
+        "start": "19:30",
+        "end": "23:30",
+        "key": "night",
+        "label": "晚上最精神",
+        "factor": 0.7,
+        "quiet": false
+      },
+      {
+        "start": "23:30",
+        "end": "02:00",
+        "key": "latenight",
+        "label": "熬夜",
+        "factor": 1.8,
+        "quiet": false
+      }
+    ],
+    "periods": [
+      {
+        "start": "00:00",
+        "name": "凌晨"
+      },
+      {
+        "start": "05:00",
+        "name": "早上"
+      },
+      {
+        "start": "08:00",
+        "name": "上午"
+      },
+      {
+        "start": "11:00",
+        "name": "中午"
+      },
+      {
+        "start": "13:00",
+        "name": "下午"
+      },
+      {
+        "start": "17:00",
+        "name": "傍晚"
+      },
+      {
+        "start": "19:00",
+        "name": "晚上"
+      },
+      {
+        "start": "23:00",
+        "name": "深夜"
+      }
+    ],
+    "weekend_shift_hours": 1.5,
+    "groupinfo_ttl": 1800,
+    "birthday_file": "data/birthdays.json",
+    "birthday_wish": true,
+    "birthday_wish_hours": [
+      9,
+      22
+    ]
+  },
+  "proactive": {
+    "enabled": true,
+    "groups": [],
+    "auto_groups": true,
+    "idle_min": 900,
+    "idle_max": 2400,
+    "adaptive": true,
+    "adaptive_range": [
+      0.75,
+      1.5
+    ],
+    "idle_floor": 300,
+    "idle_activity": "auto",
+    "bili_chance": 0.2,
+    "bili_min_gap": 3600,
+    "daily_max": 12,
+    "min_gap_min": 20,
+    "surf_chance": 0.25,
+    "surf_min_gap_min": 120
+  },
+  "events": {
+    "recall_reply_chance": 0.25,
+    "recall_cooldown": 600,
+    "ban_reply_chance": 0.2,
+    "ban_cooldown": 600,
+    "admin_reply_chance": 0.5,
+    "decrease_reply_chance": 0.3,
+    "essence_reply_chance": 0.5,
+    "auto_accept_friend": false
+  },
+  "safety": {
+    "enabled": true,
+    "no_delay": false,
+    "typing_cps": 4,
+    "min_delay": 1.2,
+    "max_delay": 5,
+    "react_delay": [
+      3,
+      8
+    ],
+    "subtract_elapsed": false,
+    "split_threshold": 30,
+    "split_gap": [
+      1.4,
+      2.8
+    ],
+    "stop_when_replied": true,
+    "per_minute": 6,
+    "per_hour": 60,
+    "burst": 3,
+    "quiet_hours": [],
+    "silence_chance": 0,
+    "typing_indicator": true,
+    "typo_chance": 0.01,
+    "typo_fix_delay": [
+      1.2,
+      2.4
+    ]
+  }
+}

@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PawBot 控制台</title>
+<style>
+  :root{
+    --bg:#0d1015; --panel:#141920; --panel2:#181f28; --line:#242c38;
+    --text:#e6edf3; --muted:#8b98a8; --accent:#2dd4bf; --accent2:#818cf8;
+    --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+    --radius:12px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text); font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    font-size:14px; line-height:1.6; display:flex; min-height:100vh;
+  }
+  /* ---------- 侧栏 ---------- */
+  aside{width:196px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--line);
+        padding:22px 14px;position:sticky;top:0;height:100vh}
+  .logo{display:flex;align-items:center;gap:9px;padding:0 8px 22px}
+  .logo svg{width:26px;height:26px}
+  .logo b{font-size:16px;letter-spacing:.5px}
+  .logo span{font-size:11px;color:var(--muted);display:block;margin-top:-2px;letter-spacing:2px}
+  nav a{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:9px;color:var(--muted);
+        text-decoration:none;cursor:pointer;font-size:13.5px;transition:.15s;margin-bottom:2px}
+  nav a:hover{background:var(--panel2);color:var(--text)}
+  nav a.on{background:rgba(45,212,191,.11);color:var(--accent);font-weight:600}
+  nav a i{font-style:normal;width:16px;text-align:center;font-size:13px}
+  .side-foot{position:absolute;bottom:16px;left:14px;right:14px;font-size:11px;color:var(--muted);
+             border-top:1px solid var(--line);padding-top:12px;line-height:1.7}
+
+  /* ---------- 主区 ---------- */
+  main{flex:1;padding:26px 30px;max-width:1240px}
+  head,header{display:block}
+  .top{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px;gap:16px}
+  .top h1{font-size:21px;font-weight:600;letter-spacing:.3px}
+  .top p{color:var(--muted);font-size:12.5px;margin-top:3px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;
+        font-size:12px;border:1px solid var(--line);background:var(--panel)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--err)}
+  .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(52,211,153,.16)}
+
+  .grid{display:grid;gap:14px}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 17px}
+  .card h2{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:1.2px;
+           text-transform:uppercase;margin-bottom:10px}
+  .kpi{font-size:26px;font-weight:600;letter-spacing:.5px;font-variant-numeric:tabular-nums}
+  .kpi small{font-size:12px;color:var(--muted);font-weight:400;margin-left:5px}
+
+  .conn{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px dashed var(--line)}
+  .conn:last-child{border:0}
+  .avatar{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+          display:grid;place-items:center;font-weight:700;color:#04121a;font-size:13px;flex-shrink:0}
+  .meta{font-size:12px;color:var(--muted)}
+
+  /* ---------- 表单 ---------- */
+  fieldset{border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin-bottom:14px;
+           background:var(--panel)}
+  legend{padding:0 8px;color:var(--accent);font-size:12px;letter-spacing:1.4px;text-transform:uppercase;font-weight:600}
+  .row{display:grid;grid-template-columns:190px 1fr;gap:14px;align-items:center;margin-bottom:11px}
+  .row:last-child{margin-bottom:0}
+  .row label{color:var(--muted);font-size:12.5px;word-break:break-all}
+  input[type=text],input[type=number],input[type=password],textarea,select{
+    width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;
+    color:var(--text);padding:8px 11px;font-size:13px;font-family:inherit;transition:.15s
+  }
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(45,212,191,.12)}
+  textarea{min-height:64px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  input[type=checkbox]{width:38px;height:20px;appearance:none;background:var(--line);border-radius:999px;
+    position:relative;cursor:pointer;transition:.2s}
+  input[type=checkbox]:checked{background:var(--accent)}
+  input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+    border-radius:50%;background:#fff;transition:.2s}
+  input[type=checkbox]:checked::after{left:20px}
+
+  button{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 16px;
+         border-radius:9px;cursor:pointer;font-size:13px;font-family:inherit;transition:.15s}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);color:#04121a;border-color:var(--accent);font-weight:600}
+  button.primary:hover{filter:brightness(1.1);color:#04121a}
+  .bar{display:flex;gap:10px;align-items:center;margin:16px 0}
+
+  /* ---------- 插件 ---------- */
+  .plug{display:flex;align-items:center;gap:14px;padding:13px 15px;border:1px solid var(--line);
+        border-radius:10px;background:var(--panel);margin-bottom:9px}
+  .plug .name{font-weight:600}
+  .plug .desc{font-size:12px;color:var(--muted)}
+  .tag{font-size:11px;padding:2px 8px;border-radius:6px;background:rgba(129,140,248,.14);
+       color:var(--accent2);border:1px solid rgba(129,140,248,.24)}
+  .spacer{flex:1}
+
+  /* ---------- 日志 ---------- */
+  #log{background:#080b0f;border:1px solid var(--line);border-radius:var(--radius);height:calc(100vh - 190px);
+       overflow:auto;padding:13px 15px;font-family:ui-monospace,Consolas,monospace;font-size:12.3px;line-height:1.75}
+  .ln{display:flex;gap:10px;white-space:pre-wrap;word-break:break-word}
+  .ln .t{color:#4d5a6b;flex-shrink:0}
+  .ln.info .m{color:#a9c7dd}
+  .ln.debug .m{color:#5f7285}
+  .ln.warn .m{color:var(--warn)}
+  .ln.error .m{color:var(--err)}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.6px}
+
+  .hide{display:none}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  .toast{position:fixed;right:22px;top:18px;z-index:999;padding:9px 14px;border-radius:10px;background:rgba(20,26,32,.96);border:1px solid rgba(94,234,212,.45);color:#d7fbf3;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;transform:translateY(-6px);transition:opacity .18s,transform .18s;pointer-events:none}
+  .toast.show{opacity:1;transform:none}
+  .toast.bad{border-color:rgba(248,113,113,.55);color:#fecaca}
+  .ok{color:var(--ok)} .bad{color:var(--err)}
+  @media(max-width:760px){aside{display:none} main{padding:18px}.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<aside>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M4 9.5 6.2 5l3 3.2h5.6L17.8 5 20 9.5v5A5.5 5.5 0 0 1 14.5 20h-5A5.5 5.5 0 0 1 4 14.5v-5Z" stroke="#2dd4bf" stroke-width="1.6" stroke-linejoin="round"/><circle cx="9" cy="12" r="1.1" fill="#2dd4bf"/><circle cx="15" cy="12" r="1.1" fill="#2dd4bf"/><path d="M10.4 15.4c.9.7 2.3.7 3.2 0" stroke="#818cf8" stroke-width="1.4" stroke-linecap="round"/></svg>
+    <div><b>PawBot</b><span>ONEBOT v11</span></div>
+  </div>
+  <nav>
+    <a data-tab="dash" class="on"><i>◈</i>概览</a>
+    <a data-tab="config"><i>⚙</i>配置</a>
+    <a data-tab="brain"><i>✦</i>人设 / 记忆</a>
+    <a data-tab="people"><i>★</i>群友</a>
+    <a data-tab="memory"><i>▦</i>记忆</a>
+    <a data-tab="context"><i>◧</i>上下文</a>
+    <a data-tab="plugins"><i>❖</i>插件</a>
+    <a data-tab="log"><i>▤</i>日志</a>
+    <a data-tab="test"><i>➤</i>收发测试</a>
+  </nav>
+  <div class="side-foot">PawBot 1.0<br/>零依赖 · 可魔改<br/><span id="side-uptime" class="meta">—</span></div>
+</aside>
+
+<main>
+  <!-- ============ 概览 ============ -->
+  <section id="tab-dash">
+    <div class="top">
+      <div><h1>运行概览</h1><p>协议端连接、消息吞吐与实时事件</p></div>
+      <div class="pill"><span id="dot" class="dot"></span><span id="conn-text">等待协议端</span></div>
+    </div>
+
+    <div class="grid g4" style="margin-bottom:14px">
+      <div class="card"><h2>收 / 发</h2><div class="kpi"><span id="k-recv">0</span><small>/ <span id="k-sent">0</span></small></div></div>
+      <div class="card"><h2>在线账号</h2><div class="kpi" id="k-conn">0</div></div>
+      <div class="card"><h2>处理器</h2><div class="kpi" id="k-handlers">0</div></div>
+      <div class="card"><h2>模型</h2><div class="kpi" style="font-size:15px;margin-top:5px" id="k-llm">—</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">模型调控 <span class="meta" id="model-msg"></span></h2>
+        <div class="spacer" style="flex:1"></div>
+        <button onclick="loadModels()">重新读取</button>
+      </div>
+      <div id="model-rows" style="margin-top:10px"><p class="meta">加载中…</p></div>
+      <div id="model-form" style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)">
+        <div class="meta" style="margin-bottom:8px">新增 / 编辑预设 <span id="m-editing" style="color:#5eead4"></span></div>
+        <div class="grid g4">
+          <label>名称<input id="m-name" placeholder="Gemini 3.8 flash（9527）"></label>
+          <label>API 地址<input id="m-base" placeholder="https://.../v1"></label>
+          <label>模型名<input id="m-model" placeholder="gemini-3.8-flash"></label>
+          <label>API Key<input id="m-key" type="password" placeholder="留空 = 不修改"></label>
+        </div>
+        <div class="bar" style="margin-top:8px">
+          <button class="primary" onclick="saveModelPreset(this)">保存预设</button>
+          <button onclick="resetModelForm()">清空表单</button>
+          <span id="m-hint" class="meta">点下面预设的「编辑」会把地址和模型带进这张表单，key 留空表示沿用原来的</span>
+        </div>
+      </div>
+      <div id="model-presets" style="margin-top:12px"></div>
+      <p class="hint">聊天 = 平时说话用的；判断 = 日记/分类这类二次判断；情绪判官 = 情绪矩阵（现在关着）；看图 = 图片转述。套用后立刻生效，不用重启；写回 data/config.json，预设存在 data/models.json。</p>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">回复节奏</h2>
+        <div class="spacer" style="flex:1"></div>
+        <button id="delay-toggle" onclick="toggleDelay(this)">打字延迟 …</button>
+      </div>
+      <p class="hint" id="delay-hint" style="margin-top:8px">关掉后她收到消息立即回复：打字延迟、反应延迟、分条间隔全部归零。频率限速（每分钟/每小时条数）仍然生效，不会被用来刷屏。</p>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">情绪矩阵 <span class="meta" id="emo-state"></span></h2>
+        <div class="spacer" style="flex:1"></div>
+        <button id="emo-toggle" onclick="toggleEmotion(this)">情绪矩阵 …</button>
+      </div>
+      <div id="emo-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px 18px"></div>
+      <div id="libido-row" style="margin-top:12px"></div>
+      <p class="hint">情绪 0–100，基线 50，单轮最多变化 15，约 4 小时不互动回落一半；旁听用关键词，被叫到才交给判官判断。性欲是独立值（基线 20），被撩会涨、冷下来会退，只在允许荤的群影响语气。</p>
+    </div>
+
+    <div class="grid g2">
+      <div class="card">
+        <h2>协议端连接</h2>
+        <div id="conn-list"><p class="meta">还没有 NapCat 连上来。</p></div>
+        <p class="hint">在 NapCat 的「网络配置 → WebSocket 客户端」里填 <code>ws://127.0.0.1:6199/ws</code></p>
+      </div>
+      <div class="card">
+        <h2>冷场自救 <span class="meta" id="mood-tag"></span></h2>
+        <div id="proactive-list"><p class="meta">还没有活跃的群。</p></div>
+        <p class="hint">阈值按群活跃度自动缩放：死群更短，热闹群更长。</p>
+      </div>
+      <div class="card">
+        <h2>最近事件</h2>
+        <div id="events" style="max-height:210px;overflow:auto">
+          <p class="meta">暂无</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 配置 ============ -->
+  <section id="tab-config" class="hide">
+    <div class="top"><div><h1>配置</h1><p>改动会写回 data/config.json，部分项重启后生效</p></div></div>
+    <form id="cfg-form" onsubmit="return false"></form>
+    <div class="bar">
+      <button class="primary" onclick="saveConfig(this)">保存配置</button>
+      <button onclick="loadConfig()">重新读取</button>
+      <span id="cfg-msg" class="meta"></span>
+    </div>
+  </section>
+
+  <!-- ============ 人设 / 记忆 ============ -->
+  <section id="tab-brain" class="hide">
+    <div class="top"><div><h1>人设与记忆</h1><p>纯本地文件，改完保存，下一句话就生效</p></div></div>
+    <div class="grid g2">
+      <div class="card">
+        <h2>文件</h2>
+        <div id="file-list"><p class="meta">加载中…</p></div>
+      </div>
+      <div class="card">
+        <h2>编辑 · <span id="file-name" style="color:var(--accent);text-transform:none;letter-spacing:0">未选择</span></h2>
+        <textarea id="file-body" style="min-height:330px" placeholder="左边选一个文件"></textarea>
+        <div class="bar"><button class="primary" onclick="saveFile(this)">保存</button>
+          <span id="file-msg" class="meta"></span></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>表情包区 <span class="meta" style="text-transform:none;letter-spacing:0">data/stickers/ · 文件名或 index.json 里的标签会被用来挑图</span></h2>
+      <div id="sticker-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:12px"></div>
+    </div>
+  </section>
+
+  <!-- ============ 群友 ============ -->
+  <section id="tab-people" class="hide">
+    <div class="top">
+      <div><h1>群友</h1><p>好感与性格档案：说不说、怎么说，都看这里，但不会当面念出来</p></div>
+      <div class="pill"><span id="people-count">0</span> 位</div>
+    </div>
+    <div id="people-list" class="grid g2"><p class="meta">加载中…</p></div>
+    <p class="hint">好感 0–100，50 是不熟也不讨厌；被夸、被道谢会慢慢涨，被骂掉得比涨得快，<b>14 天不互动就回落一半</b>。
+      性格由后台从聊天里自动提炼（每人 30 条一次），也能直接点「编辑档案」改 <code>data/people/&lt;QQ号&gt;.md</code>。</p>
+  </section>
+
+  <!-- ============ 记忆 ============ -->
+  <section id="tab-memory" class="hide">
+    <div class="top">
+      <div><h1>记忆</h1><p>它现在记得什么：本轮小结、长期经历、约定、日记、人物档案</p></div>
+      <div class="pill"><span>会话</span>
+        <select id="mem-session" onchange="loadMemory()"
+                style="width:auto;min-width:210px;padding:4px 8px"></select>
+      </div>
+    </div>
+
+    <div class="grid g2">
+      <div class="card">
+        <h2>本轮小结
+          <button style="float:right;padding:2px 9px;font-size:11px;text-transform:none;letter-spacing:0"
+                  onclick="forgetMemory('turn_summary')">清空</button></h2>
+        <div id="mem-turn"><p class="meta">加载中…</p></div>
+        <p class="hint">每轮结束后滚动更新，只进提示词，不会发到群里。</p>
+      </div>
+      <div class="card">
+        <h2>长期经历
+          <button style="float:right;padding:2px 9px;font-size:11px;text-transform:none;letter-spacing:0"
+                  onclick="forgetMemory('episodes')">清空</button></h2>
+        <div id="mem-episodes" style="max-height:330px;overflow:auto"><p class="meta">加载中…</p></div>
+      </div>
+      <div class="card">
+        <h2>约定 <span class="meta" style="text-transform:none;letter-spacing:0">待办与提醒</span></h2>
+        <div id="mem-reminders"><p class="meta">加载中…</p></div>
+      </div>
+      <div class="card">
+        <h2>日记 <span class="meta" style="text-transform:none;letter-spacing:0">最近 3 天</span></h2>
+        <div id="mem-diary"><p class="meta">加载中…</p></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>人物档案 <span class="meta" style="text-transform:none;letter-spacing:0">点「看档案」直接改 data/people/&lt;QQ号&gt;.md</span></h2>
+      <div id="mem-people" class="grid g2"><p class="meta">加载中…</p></div>
+    </div>
+    <p class="hint">「长期经历」清空需要 longmem.drop_session（没有时会提示暂不支持）；日记清空只删 <code>data/diary/&lt;日期&gt;.md</code>。</p>
+  </section>
+
+  <!-- ============ 上下文 ============ -->
+  <section id="tab-context" class="hide">
+    <div class="top">
+      <div><h1>上下文</h1><p>她这一眼能看到的聊天原文，以及三层上限：记住多少、看多少、字数预算</p></div>
+      <div class="pill"><span>会话</span>
+        <select id="ctx-session" onchange="loadContext()"
+                style="width:auto;min-width:210px;padding:4px 8px"></select>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <h2>上限 <span class="meta" id="ctx-stat"></span></h2>
+      <div class="grid g3" style="gap:10px 16px">
+        <label>保留条数<input id="ctx-keep" type="number" min="50" max="20000" step="50"></label>
+        <label>给模型看的条数<input id="ctx-msgs" type="number" min="20" max="5000" step="20"></label>
+        <label>字数预算<input id="ctx-chars" type="number" min="2000" max="200000" step="1000"></label>
+      </div>
+      <div class="bar" style="margin-top:10px">
+        <button class="primary" onclick="saveContextWindow(this)">保存</button>
+        <span id="ctx-msg" class="meta"></span>
+      </div>
+      <p class="hint">保留条数是 store 实际存下来的消息数，超出的会被滚进 archive 再机械压缩；给模型看的条数是每次请求真正塞进提示词的上限；字数预算管的是渲染后的总长度，超了就从最老的开始省。调大只影响从现在起记住多少，已经压缩掉的找不回来。</p>
+    </div>
+
+    <div class="card">
+      <h2>她现在看到的原文</h2>
+      <div id="ctx-render" style="max-height:520px;overflow:auto;font-size:12.5px;line-height:1.7;white-space:pre-wrap"></div>
+    </div>
+  </section>
+
+  <!-- ============ 插件 ============ -->
+  <section id="tab-plugins" class="hide">
+    <div class="top"><div><h1>插件</h1><p>plugins/ 目录下的 .py 文件，改完点重载即生效</p></div></div>
+    <div class="bar">
+      <button class="primary" onclick="reloadPlugins(this)">热重载全部</button>
+      <button onclick="newPlugin()">新建插件模板</button>
+      <span id="plug-msg" class="meta"></span>
+    </div>
+    <div id="plug-list"></div>
+  </section>
+
+  <!-- ============ 日志 ============ -->
+  <section id="tab-log" class="hide">
+    <div class="top"><div><h1>实时日志</h1><p>SSE 推送，不刷新页面</p></div></div>
+    <div class="bar"><button onclick="document.getElementById('log').innerHTML=''">清空显示</button></div>
+    <div id="log"></div>
+  </section>
+
+  <!-- ============ 测试 ============ -->
+  <section id="tab-test" class="hide">
+    <div class="top"><div><h1>收发测试</h1><p>绕过 QQ，直接经协议端发一条消息</p></div></div>
+    <div class="grid g2">
+      <div class="card">
+        <h2>发消息</h2>
+        <div class="row"><label>群号 / QQ 号</label><input id="s-target" type="text" placeholder="123456789"></div>
+        <div class="row"><label>类型</label>
+          <select id="s-type"><option value="group">群聊</option><option value="private">私聊</option></select></div>
+        <div class="row"><label>内容</label><textarea id="s-msg" placeholder="测试一下"></textarea></div>
+        <div class="bar"><button class="primary" onclick="sendMsg(this)">发送</button><span id="send-msg" class="meta"></span></div>
+      </div>
+      <div class="card">
+        <h2>模型连通性</h2>
+        <p class="meta" style="margin-bottom:10px">走 llm.base_url 的 /chat/completions</p>
+        <div class="bar" style="margin-top:0"><button class="primary" onclick="testLLM(this)">测一下</button></div>
+        <pre id="llm-out" class="meta" style="white-space:pre-wrap;word-break:break-word"></pre>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>会话上下文</h2>
+      <div id="sessions"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ---------------- 通用 ---------------- */
+const $ = (s) => document.querySelector(s);
+/* 若 WebUI 设了 token，页面用 ?token=xxx 打开，后续请求带上同一个 token */
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const withToken = (p) => TOKEN ? p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : p;
+const api = async (path, opt) => {
+  const r = await fetch(withToken(path), opt);
+  return r.json();
+};
+const esc = (s) => String(s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+/* ---------------- 导航 ---------------- */
+document.querySelectorAll('nav a').forEach(a => {
+  a.onclick = () => {
+    document.querySelectorAll('nav a').forEach(x => x.classList.remove('on'));
+    a.classList.add('on');
+    ['dash','config','brain','people','memory','context','plugins','log','test'].forEach(t => {
+      $('#tab-' + t).classList.toggle('hide', t !== a.dataset.tab);
+    });
+    if (a.dataset.tab === 'config') loadConfig();
+    if (a.dataset.tab === 'brain') { loadFiles(); loadStickers(); }
+    if (a.dataset.tab === 'people') loadPeople();
+    if (a.dataset.tab === 'memory') loadMemory();
+    if (a.dataset.tab === 'context') loadContext();
+    if (a.dataset.tab === 'plugins') loadPlugins();
+    if (a.dataset.tab === 'test') loadSessions();
+  };
+});
+
+/* ---------------- 情绪矩阵 ---------------- */
+const EMO_ORDER = ['开心','兴奋','好奇','烦躁','低落','亲昵','得意','疲惫'];
+function emoBar(name, v) {
+  const delta = Math.round(v - 50);
+  const signed = delta > 0 ? `+${delta}` : `${delta}`;
+  return `<div title="${esc(name)} ${signed} 相对基线">
+    <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px">
+      <span>${esc(name)}</span>
+      <span class="meta" style="font-variant-numeric:tabular-nums">${v.toFixed(0)}
+        <span style="color:${delta > 0 ? 'var(--ok)' : delta < 0 ? 'var(--err)' : 'var(--muted)'}">${signed}</span></span>
+    </div>
+    <div style="position:relative;height:8px;background:var(--panel2);border-radius:99px;overflow:hidden">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:${Math.max(0, Math.min(100, v))}%;
+        background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:99px"></div>
+      <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:rgba(255,255,255,.22)"></div>
+    </div>
+  </div>`;
+}
+function renderEmotion(e) {
+  const grid = $('#emo-grid');
+  if (!grid) return;
+  if (!e || !e.values) { grid.innerHTML = '<p class="meta">情绪矩阵未启用（emotion.enabled=false）</p>'; return; }
+  grid.innerHTML = EMO_ORDER.filter(n => n in e.values).map(n => emoBar(n, Number(e.values[n]))).join('');
+  const state = e.dominant
+    ? `${e.dominant}${e.secondary ? ' + ' + e.secondary : ''} · ${e.intensity || ''}`
+    : '平静';
+  const w = (e.weights || []).map(x => Math.round(x * 100) + '%').join(' / ');
+  $('#emo-state').textContent = state + (w ? ` · 占比 ${w}` : '');
+}
+
+function renderLibido(l) {
+  const box = $('#libido-row');
+  if (!box) return;
+  if (!l) { box.innerHTML = ''; return; }
+  const v = Math.max(0, Math.min(100, Number(l.value) || 0));
+  box.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px">
+      <span>性欲 <span class="meta">只在允许荤的群影响语气</span></span>
+      <span class="meta">${esc(l.label || '')} · ${v.toFixed(0)}</span>
+    </div>
+    <div style="height:7px;background:var(--panel2);border-radius:99px;overflow:hidden">
+      <div style="height:100%;width:${v}%;background:linear-gradient(90deg,#f472b6,#fb7185)"></div>
+    </div>`;
+}
+
+/* ---------------- 状态 ---------------- */
+function renderStatus(d) {
+  $('#k-recv').textContent = d.stats.recv;
+  $('#k-sent').textContent = d.stats.sent;
+  $('#k-conn').textContent = d.connections.length;
+  $('#k-handlers').textContent = d.handlers;
+  $('#k-llm').textContent = d.llm_mock ? 'mock（未填 key）' : d.llm_model;
+  $('#k-llm').style.color = d.llm_mock ? 'var(--warn)' : 'var(--ok)';
+  $('#side-uptime').textContent = '已运行 ' + fmtDur(d.uptime);
+
+  const online = d.connections.length > 0;
+  $('#dot').classList.toggle('on', online);
+  $('#conn-text').textContent = online
+    ? d.connections.map(c => c.nickname || c.self_id).join(', ') + ' 在线'
+    : '等待协议端';
+
+  $('#conn-list').innerHTML = online ? d.connections.map(c => `
+    <div class="conn">
+      <div class="avatar">${esc(String(c.nickname || '?').slice(0, 1))}</div>
+      <div>
+        <div><b>${esc(c.nickname || '未知昵称')}</b> <span class="meta">#${esc(c.self_id)}</span></div>
+        <div class="meta">${esc(c.role)} · 在线 ${fmtDur(c.online_sec)} · 心跳 ${c.last_alive}s 前</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="tag" style="${c.ready ? '' : 'color:var(--warn);border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.1)'}">${c.ready ? '就绪' : '待握手'}</span>
+    </div>`).join('')
+    : '<p class="meta">还没有 NapCat 连上来。</p>';
+
+  const mood = d.mood || {};
+  $('#mood-tag').textContent = mood.label ? `心情 ${mood.label} · ${mood.score}` : '';
+  renderEmotion(d.emotion);
+  renderLibido(d.libido);
+
+  const pa = d.proactive || [];
+  $('#proactive-list').innerHTML = pa.length ? pa.map(g => {
+    const pace = g.known
+      ? `${g.per_hour} 条/时 · 通常隔 ${fmtDur(g.median_gap_sec)}`
+      : '样本不足，用默认节奏';
+    const next = g.next_in_sec == null ? '—' : fmtDur(g.next_in_sec);
+    return `<div class="conn">
+      <div>
+        <div><b>群 ${esc(String(g.group))}</b>
+          <span class="meta">已安静 ${fmtDur(g.idle_sec)}</span></div>
+        <div class="meta">${esc(pace)}</div>
+      </div>
+      <div class="spacer"></div>
+      <div style="text-align:right">
+        <div><b>${g.span_min[0]}~${g.span_min[1]} 分</b></div>
+        <div class="meta">下次最早 ${next}</div>
+      </div>
+    </div>`;
+  }).join('') : '<p class="meta">还没有活跃的群。</p>';
+}
+
+function fmtDur(s) {
+  s = Number(s) || 0;
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+}
+
+async function loadEvents() {
+  const r = await api('/api/events');
+  if (!r.ok) return;
+  const rows = r.data.slice().reverse();
+  $('#events').innerHTML = rows.length ? rows.map(e => `
+    <div class="ln"><span class="t">${esc(e.ts)}</span><span class="m">${esc(e.summary)}</span></div>
+  `).join('') : '<p class="meta">暂无</p>';
+}
+
+/* ---------------- SSE ---------------- */
+function connectSSE() {
+  const es = new EventSource(withToken('/api/stream'));
+  es.addEventListener('status', ev => renderStatus(JSON.parse(ev.data)));
+  es.addEventListener('log', ev => {
+    const r = JSON.parse(ev.data);
+    const box = $('#log');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    const div = document.createElement('div');
+    div.className = 'ln ' + r.level;
+    div.innerHTML = `<span class="t">${esc(r.ts)}</span><span class="m">${esc(r.msg)}</span>`;
+    box.appendChild(div);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+    if ($('#tab-dash').classList.contains('hide')) return;
+    loadEvents();
+  });
+  es.onerror = () => { es.close(); setTimeout(connectSSE, 2500); };
+}
+
+/* ---------------- 配置 ---------------- */
+let CFG = null;
+const LABEL = {
+  'server.host':'监听地址','server.port':'监听端口','server.path':'WebSocket 路径',
+  'server.access_token':'访问 Token','webui.host':'WebUI 地址','webui.port':'WebUI 端口',
+  'webui.token':'WebUI Token','bot.nickname':'机器人昵称','bot.command_prefixes':'指令前缀',
+  'bot.allow_no_prefix':'允许无前缀指令','bot.wake_words':'唤醒词',
+  'chat.reply_mode':'回复模式','chat.reply_in_private':'私聊也回复','chat.context_turns':'上下文轮数',
+  'chat.rate_limit_per_min':'每分钟限流','chat.quote_reply':'引用回复',
+  'llm.base_url':'API Base URL','llm.api_key':'API Key','llm.model':'模型名',
+  'llm.temperature':'温度','llm.max_tokens':'最大 token','llm.timeout':'超时（秒）',
+  'llm.system_prompt':'人格提示词','whitelist.group_ids':'群白名单','whitelist.user_ids':'用户白名单',
+  'whitelist.blacklist_group_ids':'群黑名单','random_interject.enabled':'随机插话',
+  'random_interject.probability':'插话概率','random_interject.cooldown_sec':'冷却（秒）',
+  'safety.enabled':'启用拟人化','safety.typing_cps':'打字速度（字/秒）','safety.min_delay':'最短思考（秒）',
+  'safety.max_delay':'最长思考（秒）','safety.split_threshold':'拆句阈值（字）','safety.split_gap':'拆句间隔',
+  'safety.per_minute':'每分钟上限','safety.burst':'10 秒突刺上限','safety.quiet_hours':'静默时段',
+  'safety.silence_chance':'随机沉默概率',
+  'reply.quote':'引用原消息','reply.at_sender':'主动 @',
+  'persona.file':'人设文件','persona.memory_dir':'记忆目录','persona.stickers_dir':'表情包目录',
+  'tools.enabled':'启用工具','tools.max_rounds':'最多工具轮数','tools.search_provider':'搜索后端',
+  'tools.search_base_url':'搜索 API 地址','tools.search_model':'搜索模型','tools.image_api_key':'图片 API Key',
+  'tools.timeout':'工具超时（秒）',
+  'qzone.enabled':'允许发空间','qzone.owner_ids':'允许的 QQ 号','qzone.ugc_right':'可见范围（1公开/4私密）',
+  'qzone.daily_limit':'每天上限'
+};
+
+function field(path, val) {
+  const label = LABEL[path] || path.split('.').pop();
+  const t = typeof val;
+  let input;
+  if (t === 'boolean') {
+    input = `<input type="checkbox" data-path="${path}" data-type="bool" ${val ? 'checked' : ''}>`;
+  } else if (t === 'number') {
+    input = `<input type="number" step="any" data-path="${path}" data-type="number" value="${val}">`;
+  } else if (Array.isArray(val)) {
+    input = `<textarea data-path="${path}" data-type="array">${esc(JSON.stringify(val))}</textarea>`;
+  } else if (path.endsWith('system_prompt')) {
+    input = `<textarea data-path="${path}" data-type="string" style="min-height:96px">${esc(val)}</textarea>`;
+  } else if (path.includes('api_key') || path.includes('token')) {
+    input = `<input type="password" data-path="${path}" data-type="string" value="${esc(val)}">`;
+  } else {
+    input = `<input type="text" data-path="${path}" data-type="string" value="${esc(val)}">`;
+  }
+  return `<div class="row"><label>${esc(label)}<br><span style="font-size:11px;opacity:.55">${path}</span></label>${input}</div>`;
+}
+
+function renderConfig(data) {
+  const order = ['server','webui','bot','chat','reply','persona','llm','tools','safety','whitelist','qzone','random_interject'];
+  const titles = {server:'协议端',webui:'后台',bot:'机器人',chat:'对话策略',reply:'引用与 @',
+    persona:'人设 / 记忆 / 表情包',llm:'大模型',tools:'联网与工具',safety:'拟人化 / 风控',
+    whitelist:'名单',qzone:'QQ 空间',random_interject:'随机插话'};
+  let html = '';
+  order.forEach(group => {
+    if (!data[group]) return;
+    html += `<fieldset><legend>${titles[group] || group}</legend>`;
+    for (const [k, v] of Object.entries(data[group])) html += field(group + '.' + k, v);
+    html += '</fieldset>';
+  });
+  $('#cfg-form').innerHTML = html;
+}
+
+async function loadConfig() {
+  const r = await api('/api/config');
+  if (!r.ok) return;
+  CFG = r.data;
+  renderConfig(CFG);
+  $('#cfg-msg').textContent = '';
+}
+
+async function saveConfig(btn) {
+  const out = {};
+  document.querySelectorAll('#cfg-form [data-path]').forEach(el => {
+    const path = el.dataset.path, type = el.dataset.type;
+    let v;
+    if (type === 'bool') v = el.checked;
+    else if (type === 'number') v = Number(el.value);
+    else if (type === 'array') { try { v = JSON.parse(el.value); } catch { v = []; } }
+    else v = el.value;
+    const parts = path.split('.');
+    let node = out;
+    parts.forEach((p, i) => {
+      if (i === parts.length - 1) node[p] = v;
+      else node = (node[p] = node[p] || {});
+    });
+  });
+  btn.disabled = true; btn.textContent = '保存中…';
+  const r = await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(out)});
+  btn.disabled = false; btn.textContent = '保存配置';
+  $('#cfg-msg').innerHTML = r.ok ? '<span class="ok">已保存</span>' : '<span class="bad">保存失败</span>';
+}
+
+/* ---------------- 插件 ---------------- */
+async function loadPlugins() {
+  const r = await api('/api/plugins');
+  if (!r.ok) return;
+  $('#plug-list').innerHTML = r.data.length ? r.data.map(p => `
+    <div class="plug">
+      <div>
+        <div class="name">${esc(p.title)} <span class="tag">v${esc(p.version)}</span></div>
+        <div class="desc">${esc(p.description || '（无描述）')} · ${p.handlers} 个处理器 · ${esc(p.name)}.py</div>
+      </div>
+      <div class="spacer"></div>
+      <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${esc(p.name)}', this.checked)">
+    </div>`).join('') : '<p class="meta">plugins/ 目录里还没有插件。</p>';
+}
+
+async function reloadPlugins(btn) {
+  btn.disabled = true; btn.textContent = '重载中…';
+  const r = await api('/api/plugins/reload', {method:'POST'});
+  btn.disabled = false; btn.textContent = '热重载全部';
+  if (r.ok) {
+    $('#plug-msg').innerHTML = `<span class="ok">成功 ${r.data.loaded.length} 个</span>` +
+      (r.data.failed.length ? ` <span class="bad">失败：${r.data.failed.join(', ')}</span>` : '');
+  }
+  loadPlugins();
+}
+
+async function togglePlugin(name, enabled) {
+  await api('/api/plugins/toggle', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, enabled})});
+  loadPlugins();
+}
+
+function newPlugin() {
+  alert('在 plugins/ 目录新建一个 xxx.py，粘这段：\\n\\n' +
+    'from pawbot.plugin import on_command, on_message\\n\\n' +
+    '@on_command("hello")\\nasync def hello(ctx):\\n    await ctx.reply("hi")\\n\\n' +
+    '然后回到这里点「热重载全部」。');
+}
+
+/* ---------------- 群友 ---------------- */
+async function loadPeople() {
+  const r = await api('/api/people');
+  if (!r.ok) { $('#people-list').innerHTML = `<p class="bad">${esc(r.error || '读取失败')}</p>`; return; }
+  const list = r.data || [];
+  $('#people-count').textContent = list.length;
+  if (!list.length) {
+    $('#people-list').innerHTML = '<p class="meta">还没有群友档案，等它在群里聊几句。</p>';
+    return;
+  }
+  $('#people-list').innerHTML = list.map(p => {
+    const v = Number(p.affinity) || 50;
+    const color = v >= 65 ? 'var(--ok)' : v >= 50 ? 'var(--accent)' : v >= 35 ? 'var(--warn)' : 'var(--err)';
+    const sections = Object.entries(p.sections || {}).map(([k, val]) =>
+      `<div class="meta" style="margin-top:2px"><b style="color:var(--text)">${esc(k)}</b>：${esc(val)}</div>`).join('');
+    return `<div class="card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div class="avatar">${esc(/^\d+$/.test(String(p.name || '')) ? String(p.name).slice(-2) : String(p.name || '?').slice(0, 1))}</div>
+        <div>
+          <div><b>${esc(p.name)}</b> <span class="meta">#${esc(p.user_id)}</span></div>
+          <div class="meta">${esc(p.affinity_label)} · ${v.toFixed(0)}</div>
+        </div>
+        <div class="spacer"></div>
+        <button onclick="editPersonFile('${esc(p.user_id)}')">编辑档案</button>
+      </div>
+      <div style="height:7px;background:var(--panel2);border-radius:99px;overflow:hidden;margin-bottom:10px">
+        <div style="height:100%;width:${Math.max(0, Math.min(100, v))}%;background:${color}"></div>
+      </div>
+      ${sections || '<p class="meta">还没有性格记录，等它多聊几句。</p>'}
+    </div>`;
+  }).join('');
+}
+
+async function editPersonFile(uid) {
+  document.querySelectorAll('nav a').forEach(x => x.classList.toggle('on', x.dataset.tab === 'brain'));
+  ['dash','config','brain','people','memory','plugins','log','test'].forEach(t =>
+    $('#tab-' + t).classList.toggle('hide', t !== 'brain'));
+  await loadFiles();
+  await openFile('people/' + uid + '.md');
+}
+
+/* ---------------- 记忆 ---------------- */
+async function loadMemory() {
+  const sel = $('#mem-session');
+  const keep = sel.value;
+  try {
+    const sr = await api('/api/sessions');
+    if (sr.ok) {
+      const rows = sr.data || [];
+      sel.innerHTML = rows.length
+        ? rows.map(s => `<option value="${esc(s.session_id)}">${esc(s.session_id)} · ${s.messages} 条</option>`).join('')
+        : '<option value="">（还没有会话）</option>';
+      if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+    }
+  } catch (e) { /* 会话列表拿不到也继续展示其它记忆 */ }
+
+  const sid = sel.value || '';
+  const r = await api('/api/memory?session_id=' + encodeURIComponent(sid));
+  if (!r.ok) {
+    $('#mem-turn').innerHTML = `<p class="bad">${esc(r.error || '读取失败')}</p>`;
+    return;
+  }
+  const d = r.data || {};
+
+  $('#mem-turn').innerHTML = d.turn_summary
+    ? `<div style="white-space:pre-wrap">${esc(d.turn_summary)}</div>`
+    : '<p class="meta">还没有本轮小结。</p>';
+
+  const eps = d.episodes || [];
+  $('#mem-episodes').innerHTML = eps.length ? eps.map(e => `
+    <div class="conn" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="meta">${esc(fmtDay(e.ts))} · ${esc(e.session_id || '')} · 重要度 ${esc(e.importance)}</div>
+        <div style="white-space:pre-wrap">${esc(e.summary)}</div>
+      </div>
+    </div>`).join('') : '<p class="meta">还没有长期经历。</p>';
+
+  const rems = d.reminders || [];
+  $('#mem-reminders').innerHTML = rems.length ? rems.map(x => {
+    const text = (x && typeof x === 'object')
+      ? (x.text || x.content || x.title || JSON.stringify(x)) : String(x);
+    const when = (x && typeof x === 'object') ? (x.when || x.due || x.time || '') : '';
+    return `<div class="conn" style="align-items:flex-start">
+      <div style="flex:1"><div class="meta">${esc(when)}</div><div>${esc(text)}</div></div>
+    </div>`;
+  }).join('') : '<p class="meta">没有待办的约定。</p>';
+
+  const diary = d.diary || [];
+  $('#mem-diary').innerHTML = diary.length ? diary.map(x => `
+    <div style="border-bottom:1px dashed var(--line);padding:9px 0">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <b>${esc(x.day || '—')}</b><div class="spacer"></div>
+        ${x.day ? `<button style="padding:2px 9px;font-size:11px" onclick="forgetMemory('diary','${esc(x.day)}')">清空</button>` : ''}
+      </div>
+      <div class="meta" style="white-space:pre-wrap">${esc(x.text || '')}</div>
+    </div>`).join('') : '<p class="meta">还没有日记。</p>';
+
+  const people = d.people || [];
+  $('#mem-people').innerHTML = people.length ? people.map(p => {
+    const sections = Object.entries(p.sections || {}).map(([k, v]) =>
+      `<div class="meta"><b style="color:var(--text)">${esc(k)}</b>：${esc(v)}</div>`).join('');
+    return `<div class="card" style="background:var(--panel2)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="avatar">${esc(String(p.name || '?').slice(0, 1))}</div>
+        <div><b>${esc(p.name)}</b> <span class="meta">#${esc(p.user_id)}</span>
+          <div class="meta">${esc(p.affinity_label || '')}</div></div>
+        <div class="spacer"></div>
+        <button onclick="editPersonFile('${esc(p.user_id)}')">看档案</button>
+      </div>
+      <div style="margin-top:7px">${sections || '<p class="meta">还没有性格记录。</p>'}</div>
+    </div>`;
+  }).join('') : '<p class="meta">还没有群友档案。</p>';
+}
+
+function fmtDay(ts) {
+  const n = Number(ts) || 0;
+  if (!n) return '—';
+  const d = new Date(n * 1000);
+  return d.toLocaleDateString('zh-CN') + ' ' +
+    d.toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+}
+
+async function forgetMemory(what, day) {
+  const label = {turn_summary: '本轮小结', episodes: '长期经历', diary: '这篇日记'}[what] || what;
+  if (!confirm('确定清空' + label + '？')) return;
+  const body = {session_id: $('#mem-session').value || '', what};
+  if (day) body.day = day;
+  const r = await api('/api/memory/forget', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) { alert(r.error || '清空失败'); return; }
+  loadMemory();
+}
+
+/* ---------------- 人设 / 记忆 ---------------- */
+let CUR_FILE = '';
+
+async function loadFiles() {
+  const r = await api('/api/files');
+  if (!r.ok) return;
+  $('#file-list').innerHTML = r.data.length ? r.data.map(f => `
+    <div class="plug" style="padding:9px 12px;margin-bottom:7px;cursor:pointer" onclick="openFile('${esc(f.path)}')">
+      <div>
+        <div class="name" style="font-size:13px">${esc(f.path)}</div>
+        <div class="desc">${(f.size / 1024).toFixed(1)} KB · ${new Date(f.mtime * 1000).toLocaleString('zh-CN')}</div>
+      </div>
+    </div>`).join('') : '<p class="meta">data/ 下没有可编辑的文件。</p>';
+}
+
+async function openFile(path) {
+  const r = await api('/api/file?path=' + encodeURIComponent(path));
+  if (!r.ok) { $('#file-msg').innerHTML = `<span class="bad">${esc(r.error)}</span>`; return; }
+  CUR_FILE = path;
+  $('#file-name').textContent = path;
+  $('#file-body').value = r.data.content;
+  $('#file-msg').textContent = '';
+}
+
+async function saveFile(btn) {
+  if (!CUR_FILE) return;
+  btn.disabled = true; btn.textContent = '保存中…';
+  const r = await api('/api/file', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: CUR_FILE, content: $('#file-body').value})});
+  btn.disabled = false; btn.textContent = '保存';
+  $('#file-msg').innerHTML = r.ok ? '<span class="ok">已保存，下次调用就生效</span>'
+                                  : `<span class="bad">${esc(r.error)}</span>`;
+  if (r.ok) loadFiles();
+}
+
+async function loadStickers() {
+  const r = await api('/api/stickers');
+  if (!r.ok) return;
+  $('#sticker-grid').innerHTML = r.data.length ? r.data.map(s => `
+    <div style="text-align:center">
+      <img src="${s.url}" alt="${esc(s.name)}"
+           style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:var(--bg)">
+      <div class="meta" style="font-size:11px;margin-top:5px">${esc((s.meta.tags || []).join('/') || s.name)}</div>
+    </div>`).join('') : '<p class="meta">还没有表情包，丢几张图片进 data/stickers/ 就行。</p>';
+}
+
+/* ---------------- 测试 ---------------- */
+async function sendMsg(btn) {
+  const target = $('#s-target').value.trim();
+  const message = $('#s-msg').value;
+  const is_group = $('#s-type').value === 'group';
+  btn.disabled = true; btn.textContent = '发送中…';
+  const r = await api('/api/send', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({target, message, is_group})});
+  btn.disabled = false; btn.textContent = '发送';
+  $('#send-msg').innerHTML = r.ok
+    ? `<span class="ok">已发送 message_id=${r.data.message_id ?? '?'}</span>`
+    : `<span class="bad">${esc(r.error)}</span>`;
+}
+
+async function testLLM(btn) {
+  btn.disabled = true; btn.textContent = '请求中…';
+  const r = await api('/api/llm/test', {method:'POST'});
+  btn.disabled = false; btn.textContent = '测一下';
+  $('#llm-out').innerHTML = r.ok ? `<span class="ok">${esc(r.data)}</span>`
+                                 : `<span class="bad">${esc(r.error)}</span>`;
+}
+
+async function loadSessions() {
+  const r = await api('/api/sessions');
+  if (!r.ok) return;
+  $('#sessions').innerHTML = r.data.length ? `<table>
+    <tr><th>会话</th><th>条数</th><th>更新时间</th><th></th></tr>
+    ${r.data.map(s => `<tr>
+      <td>${esc(s.session_id)}</td><td>${s.messages}</td>
+      <td>${new Date(s.updated * 1000).toLocaleString('zh-CN')}</td>
+      <td><button onclick="clearSession('${esc(s.session_id)}')">清空</button></td>
+    </tr>`).join('')}</table>` : '<p class="meta">还没有会话记录。</p>';
+}
+
+async function clearSession(id) {
+  await api('/api/session/clear', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({session_id: id})});
+  loadSessions();
+}
+
+/* ---------------- 上下文 ---------------- */
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(Number(ts) * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function loadContext() {
+  const sel = $('#ctx-session');
+  const keep = sel.value;
+  try {
+    const sr = await api('/api/sessions');
+    if (sr.ok) {
+      const rows = sr.data || [];
+      sel.innerHTML = rows.length
+        ? rows.map(s => `<option value="${esc(s.session_id)}">${esc(s.session_id)} · ${s.messages} 条</option>`).join('')
+        : '<option value="">（还没有会话）</option>';
+      if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+    }
+  } catch (e) { /* 拿不到会话列表就按默认会话展示 */ }
+
+  const sid = sel.value || '';
+  const r = await api('/api/context?session_id=' + encodeURIComponent(sid));
+  if (!r.ok) { $('#ctx-render').innerHTML = `<p class="bad">${esc(r.error || '读取失败')}</p>`; return; }
+  const d = r.data || {};
+  const L = d.limits || {}, S = d.stats || {};
+  $('#ctx-keep').value = L.keep ?? 300;
+  $('#ctx-msgs').value = L.context_messages ?? 300;
+  $('#ctx-chars').value = L.context_chars ?? 12000;
+  const span = (d.messages && d.messages.length)
+    ? `${fmtTime(d.messages[0].ts)} → ${fmtTime(d.messages[d.messages.length - 1].ts)}`
+    : '没有消息';
+  $('#ctx-stat').textContent =
+    `${span} · 存下 ${(d.messages || []).length} 条 · 实际给她看 ${S.lines ?? 0} 条` +
+    (S.dropped ? `（省掉 ${S.dropped} 条）` : '') +
+    ` · ${S.chars ?? 0} 字 · 跨 ${S.span_hours ?? 0} 小时`;
+  $('#ctx-render').textContent = d.rendered || '（这个会话还没有她能看到的上下文）';
+}
+
+async function saveContextWindow(btn) {
+  btn.disabled = true; btn.textContent = '保存中…';
+  const body = JSON.stringify({
+    session_id: $('#ctx-session').value || '',
+    keep: Number($('#ctx-keep').value),
+    context_messages: Number($('#ctx-msgs').value),
+    context_chars: Number($('#ctx-chars').value),
+  });
+  const r = await api('/api/context/window', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body});
+  btn.disabled = false; btn.textContent = '保存';
+  $('#ctx-msg').innerHTML = r.ok
+    ? '<span class="ok">已生效：从现在起按新上限记</span>'
+    : `<span class="bad">${esc(r.error || '保存失败')}</span>`;
+  if (r.ok) loadContext();
+}
+
+/* ---------------- 情绪矩阵开关 ---------------- */
+let EMO_ENABLED = null;
+
+async function syncEmotionToggle() {
+  if (EMO_ENABLED === null) {
+    const r = await api('/api/config');
+    if (r.ok) EMO_ENABLED = !!((r.data.emotion || {}).enabled);
+    CFG = r.ok ? r.data : CFG;
+  }
+  const btn = $('#emo-toggle');
+  if (!btn) return;
+  btn.textContent = EMO_ENABLED ? '情绪矩阵 已开启（点此关闭）' : '情绪矩阵 已关闭（点此开启）';
+  btn.style.opacity = EMO_ENABLED ? '1' : '.65';
+}
+
+async function toggleEmotion(btn) {
+  await syncEmotionToggle();
+  const next = !EMO_ENABLED;
+  btn.disabled = true; btn.textContent = '切换中…';
+  const r = await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({emotion: {enabled: next}})});
+  btn.disabled = false;
+  if (!r.ok) { btn.textContent = '切换失败'; toast('切换失败', false); return; }
+  EMO_ENABLED = next;
+  CFG = r.data;
+  await syncEmotionToggle();
+  toast(`情绪矩阵已${next ? '开启' : '关闭'}`);
+}
+
+/* ---------------- 模型调控 ---------------- */
+let MODELS = null;
+let MODEL_EDIT = '';
+const ROLE_NAMES = {chat:'聊天', judge:'判断', emotion:'情绪判官', vision:'看图'};
+function roleLabel(k) { return ROLE_NAMES[k] || k; }
+
+function renderModels() {
+  if (!MODELS) return;
+  const cur = MODELS.current || {};
+  const roles = [['chat','聊天'],['judge','判断'],['emotion','情绪判官'],['vision','看图']];
+  const opts = (MODELS.presets || []).map(p =>
+    `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.model)}</option>`).join('');
+  $('#model-rows').innerHTML = roles.map(([k, label]) => {
+    const c = cur[k] || {};
+    return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+      <b style="width:64px">${label}</b>
+      <span class="meta" style="min-width:240px">${esc(c.model || '—')} <span style="opacity:.55">${esc(c.base_url || '')}</span></span>
+      <div style="flex:1"></div>
+      <select id="pick-${k}" style="width:auto;min-width:240px;padding:4px 8px">${opts || '<option value="">还没有预设</option>'}</select>
+      <button onclick="applyModel('${k}', this)">套用</button>
+    </div>`;
+  }).join('');
+  roles.forEach(([k]) => {
+    const sel = $('#pick-' + k), c = cur[k] || {};
+    if (!sel) return;
+    const hit = (MODELS.presets || []).find(p => p.model === c.model && p.base_url === c.base_url);
+    if (hit) sel.value = hit.id;
+  });
+  $('#model-presets').innerHTML = (MODELS.presets || []).length
+    ? (MODELS.presets || []).map(p => `<div class="conn" style="margin-bottom:6px">
+        <div>
+          <div><b>${esc(p.name)}</b> <span class="meta">${esc(p.model)}</span></div>
+          <div class="meta">${esc(p.base_url)} · key ${esc(p.key_masked || '（未设置）')}</div>
+        </div>
+        <div class="spacer"></div>
+        <div style="display:flex;gap:6px">
+          <button onclick="editModelPreset('${esc(p.id)}')">编辑</button>
+          <button onclick="deleteModelPreset('${esc(p.id)}', this)">删除</button>
+        </div>
+      </div>`).join('')
+    : '<p class="meta">还没有预设，用上面的表单加一个。</p>';
+}
+
+async function loadModels() {
+  const r = await api('/api/models');
+  if (!r.ok) { $('#model-rows').innerHTML = `<p class="bad">${esc(r.error || '读取失败')}</p>`; return; }
+  MODELS = r.data;
+  renderModels();
+}
+
+async function applyModel(role, btn) {
+  const sel = $('#pick-' + role);
+  if (!sel || !sel.value) return;
+  btn.disabled = true; btn.textContent = '切换中…';
+  const r = await api('/api/models/apply', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id: sel.value, target: role})});
+  btn.disabled = false; btn.textContent = '套用';
+  if (r.ok) {
+    MODELS = r.data; renderModels();
+    $('#model-msg').innerHTML = '<span class="ok">已切换</span>';
+    const now = ((MODELS.current || {})[role] || {}).model || '';
+    toast(`已切换：${roleLabel(role)} → ${now}`);
+  } else {
+    $('#model-msg').innerHTML = `<span class="bad">${esc(r.error || '切换失败')}</span>`;
+    toast(r.error || '切换失败', false);
+  }
+}
+
+let _toastTimer = null;
+function toast(text, ok = true) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.className = 'toast show' + (ok ? '' : ' bad');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    el.className = 'toast' + (ok ? '' : ' bad');
+  }, 2400);
+}
+
+function editModelPreset(id) {
+  const p = (MODELS.presets || []).find(x => x.id === id);
+  if (!p) { toast('找不到这个预设', false); return; }
+  MODEL_EDIT = id;
+  $('#m-name').value = p.name;
+  $('#m-base').value = p.base_url;
+  $('#m-model').value = p.model;
+  $('#m-key').value = '';
+  $('#m-editing').textContent = `正在编辑：${p.name}`;
+  $('#m-hint').textContent = `key 留空就沿用 ${p.key_masked || '（空）'}；点「保存预设」才会写回去`;
+  const form = $('#model-form');
+  if (form && form.scrollIntoView) form.scrollIntoView({block: 'center', behavior: 'smooth'});
+  toast(`已把「${p.name}」填进表单`);
+  setTimeout(() => { const el = $('#m-name'); if (el) el.focus(); }, 60);
+}
+
+function resetModelForm() {
+  MODEL_EDIT = '';
+  ['m-name', 'm-base', 'm-model', 'm-key'].forEach(id => { $('#' + id).value = ''; });
+  $('#m-editing').textContent = '';
+  $('#m-hint').textContent = '点下面预设的「编辑」会把地址和模型带进这张表单，key 留空表示沿用原来的';
+}
+
+async function saveModelPreset(btn) {
+  const body = JSON.stringify({
+    id: MODEL_EDIT,
+    name: $('#m-name').value.trim(),
+    base_url: $('#m-base').value.trim(),
+    model: $('#m-model').value.trim(),
+    api_key: $('#m-key').value.trim(),
+  });
+  btn.disabled = true; btn.textContent = '保存中…';
+  const r = await api('/api/models/save', {method:'POST', headers:{'Content-Type':'application/json'}, body});
+  btn.disabled = false; btn.textContent = '保存预设';
+  if (!r.ok) {
+    $('#model-msg').innerHTML = `<span class="bad">${esc(r.error || '保存失败')}</span>`;
+    toast(r.error || '保存失败', false);
+    return;
+  }
+  MODELS = r.data;
+  renderModels();
+  resetModelForm();
+  $('#model-msg').innerHTML = '<span class="ok">预设已保存</span>';
+  toast('预设已保存');
+}
+
+async function deleteModelPreset(id, btn) {
+  if (!confirm('删除这个预设？不会影响当前正在用的模型。')) return;
+  btn.disabled = true;
+  const r = await api('/api/models/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id})});
+  btn.disabled = false;
+  if (r.ok) { MODELS = r.data; renderModels(); toast('预设已删除'); }
+}
+
+/* ---------------- 打字延迟开关 ---------------- */
+let DELAY_OFF = null;
+
+async function syncDelayToggle() {
+  if (DELAY_OFF === null) {
+    const r = await api('/api/config');
+    if (r.ok) {
+      CFG = r.data;
+      DELAY_OFF = !!((r.data.safety || {}).no_delay);
+    }
+  }
+  const btn = $('#delay-toggle');
+  if (!btn) return;
+  btn.textContent = DELAY_OFF ? '打字延迟 已取消（点此恢复）' : '打字延迟 已开启（点此取消）';
+  btn.style.opacity = DELAY_OFF ? '.65' : '1';
+}
+
+async function toggleDelay(btn) {
+  await syncDelayToggle();
+  const next = !DELAY_OFF;
+  btn.disabled = true; btn.textContent = '切换中…';
+  const r = await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({safety: {no_delay: next}})});
+  btn.disabled = false;
+  if (!r.ok) { btn.textContent = '切换失败'; toast('切换失败', false); return; }
+  DELAY_OFF = next;
+  CFG = r.data;
+  await syncDelayToggle();
+  toast(next ? '已取消打字延迟，立即回复' : '已恢复打字延迟');
+}
+
+/* ---------------- 启动 ---------------- */
+connectSSE();
+fetch(withToken('/api/events')).then(r => r.json()).then(loadEvents);
+syncEmotionToggle();
+syncDelayToggle();
+loadModels();
+</script>
+</body>
+</html>

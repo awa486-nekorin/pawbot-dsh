@@ -6,8 +6,9 @@
   "panel": {
     "nav": "PawBot",
     "title": "PawBot 控制面板",
-    "subtitle": "看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。",
+    "subtitle": "一键启动、看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。",
     "tabs": {
+      "setup": "启动",
       "status": "状态",
       "config": "设置",
       "persona": "人设"
