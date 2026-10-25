@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "name": "葬送的芙莉莲",
+      "kind": "anime",
+      "keywords": [
+        "芙莉莲",
+        "Frieren",
+        "葬送的芙莉莲"
+      ],
+      "added_ts": 1792943992.529313,
+      "last_checked": 0.0,
+      "last_news": ""
+    },
+    {
+      "name": "胆大党",
+      "kind": "anime",
+      "keywords": [
+        "胆大党",
+        "当哒当",
+        "Dandadan"
+      ],
+      "added_ts": 1792943992.529313,
+      "last_checked": 0.0,
+      "last_news": ""
+    },
+    {
+      "name": "鸣潮",
+      "kind": "game",
+      "keywords": [
+        "鸣潮",
+        "Wuthering Waves"
+      ],
+      "added_ts": 1792943992.529313,
+      "last_checked": 0.0,
+      "last_news": ""
+    }
+  ]
+}
