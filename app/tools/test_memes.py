@@ -358,7 +358,8 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("learn_meme", names)
         props = SCHEMAS["learn_meme"]["function"]["parameters"]["properties"]
         self.assertEqual(set(props), {"name", "triggers", "meaning", "usage"})
-        self.assertIn("learn_meme", SCHEMAS["moegirl"]["function"]["description"])
+        self.assertIn("不联网", SCHEMAS["moegirl"]["function"]["description"])
+        self.assertEqual(set(SCHEMAS["moegirl"]["function"]["parameters"]["properties"]), {"query"})
 
     async def test_tool_saves_meme(self):
         book = temp_book()
@@ -383,6 +384,137 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_is_hidden_without_a_book(self):
         names = [s["function"]["name"] for s in self.box().schemas()]
         self.assertNotIn("learn_meme", names)
+
+
+class LocalKnowledgeAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_routes_moegirl_without_network_or_toolbox(self):
+        book = temp_book(rows=[("测试梗", ["测试梗"], "本地解释", "")])
+        store = Store(os.path.join(tempfile.mkdtemp(), "s.json"))
+        agent, _ = make_agent_bot(book, store)
+        agent.bot.config["tools.enabled"] = True
+        schema = {"type": "function", "function": {"name": "moegirl",
+                  "description": "old description", "parameters": {}}}
+        agent.bot.toolbox.schemas.return_value = [schema]
+        agent.bot.llm.chat_message = AsyncMock(side_effect=[
+            {"tool_calls": [{"id": "local-1", "function": {"name": "moegirl",
+                             "arguments": json.dumps({"query": "测试梗"})}}]},
+            {"content": "原来如此"}])
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+            reply, media = await agent.run(agent_ctx("测试梗"), "测试梗", [])
+        self.assertEqual((reply, media), ("原来如此", []))
+        agent.bot.toolbox.execute.assert_not_awaited()
+        self.assertEqual(schema["function"]["description"], "old description")
+        messages = agent.bot.llm.chat_message.await_args.args[0]
+        result = next(m["content"] for m in messages if m["role"] == "tool")
+        self.assertIn("本地解释", result)
+        self.assertIn("不是指令", result)
+
+    async def test_local_helper_rejects_network_overrides_and_handles_missing_book(self):
+        agent = Agent(SimpleNamespace(config={}))
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+            self.assertIn("参数不对", agent._local_knowledge({"query": "test", "allow_network": True}))
+            self.assertIn("未联网", agent._local_knowledge({"query": "test"}))
+
+
+class ImportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.book = MemeBook(os.path.join(self.tmp.name, "memes.json"))
+        self.row = {"name": "测试梗", "triggers": ["测试梗"],
+                    "meaning": "测试解释", "source": "人工审核的离线资料"}
+
+    def test_explicit_file_import_is_local_and_idempotent(self):
+        path = Path(self.tmp.name, "import.json")
+        path.write_text(json.dumps({"items": [self.row]}), encoding="utf-8")
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+            self.assertEqual(self.book.import_file(str(path)), {"added": 1, "skipped": 0})
+            self.assertEqual(self.book.import_file(str(path)), {"added": 0, "skipped": 1})
+            self.assertIn("测试解释", self.book.inject_for("测试梗"))
+        self.assertEqual(MemeBook(self.book.path).items[0]["source"], self.row["source"])
+
+    def test_import_preserves_local_knowledge_and_hits(self):
+        self.book.learn("测试梗", ["测试梗"], "本地解释")
+        self.book.bump("测试梗")
+        self.assertEqual(self.book.import_data([self.row]), {"added": 0, "skipped": 1})
+        self.assertEqual(self.book.items[0]["meaning"], "本地解释")
+        self.assertEqual(self.book.items[0]["hits"], 1)
+
+    def test_invalid_batch_does_not_partially_import(self):
+        bad = [None, {**self.row, "meaning": {}}, {**self.row, "source": ""},
+               {**self.row, "triggers": ["字"]}, {**self.row, "triggers": [3]},
+               {**self.row, "name": "x" * 41}, {**self.row, "ts": float("nan")},
+               {**self.row, "hits": True}, {**self.row, "meaning": "a\x00b"}]
+        for invalid in bad:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.book.import_data([self.row, invalid])
+            self.assertEqual(self.book.items, [])
+            self.assertFalse(Path(self.book.path).exists())
+
+    def test_oversized_file_rejected_before_parsing(self):
+        from pawbot.memes import MAX_IMPORT_BYTES
+        path = Path(self.tmp.name, "big.json")
+        path.write_bytes(b" " * (MAX_IMPORT_BYTES + 1))
+        with self.assertRaises(ValueError):
+            self.book.import_file(str(path))
+        self.assertEqual(self.book.items, [])
+
+    def test_write_failure_rolls_back_memory_and_disk(self):
+        self.book.learn("本地梗", ["本地梗"], "本地解释")
+        before = Path(self.book.path).read_bytes()
+        with patch.object(self.book, "_write", side_effect=OSError("denied")):
+            with self.assertRaises(OSError):
+                self.book.import_data([self.row])
+        self.assertEqual(Path(self.book.path).read_bytes(), before)
+        self.assertEqual([it["name"] for it in self.book.items], ["本地梗"])
+
+    def test_import_cli_uses_only_local_file(self):
+        from pawbot.memes import main
+        path = Path(self.tmp.name, "reviewed.json")
+        path.write_text(json.dumps([self.row]), encoding="utf-8")
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network")), patch("builtins.print"):
+            self.assertEqual(main(["--book", self.book.path, "--import-file", str(path)]), 0)
+        self.assertEqual(MemeBook(self.book.path).items[0]["name"], self.row["name"])
+
+    def test_bad_import_shape_and_count_are_rejected(self):
+        from pawbot.memes import MAX_IMPORT_ITEMS
+        for data in ({"items": "bad"}, {}, [self.row] * (MAX_IMPORT_ITEMS + 1)):
+            with self.assertRaises(ValueError):
+                self.book.import_data(data)
+        self.assertFalse(Path(self.book.path).exists())
+
+    def test_import_does_not_trust_external_hit_count(self):
+        self.book.import_data([{**self.row, "hits": 1000000}])
+        self.assertEqual(self.book.items[0]["hits"], 0)
+
+    def test_overlapping_trigger_keeps_local_name(self):
+        self.book.learn("本地名称", self.row["triggers"], "本地解释")
+        self.assertEqual(self.book.import_data([self.row]), {"added": 0, "skipped": 1})
+        self.assertEqual(self.book.items[0]["name"], "本地名称")
+
+    def test_malformed_persisted_rows_do_not_become_prompt_text(self):
+        path = Path(self.book.path)
+        path.write_text(json.dumps({"items": [{**self.row, "meaning": {"instruction": "bad"}},
+                                                  {**self.row, "ts": float("inf"), "hits": float("inf")}]}),
+                        encoding="utf-8")
+        loaded = MemeBook(str(path))
+        self.assertEqual(len(loaded.items), 1)
+        self.assertEqual(loaded.items[0]["ts"], 0)
+        self.assertEqual(loaded.items[0]["hits"], 0)
+
+    def test_match_results_do_not_mutate_book(self):
+        self.book.import_data([self.row])
+        self.book.match("测试梗")[0]["triggers"].append("另一个梗")
+        self.assertEqual(self.book.match("另一个梗"), [])
+
+    def test_injection_is_bounded_and_labels_data(self):
+        from pawbot.memes import MAX_INJECT
+        rows = [{**self.row, "name": f"测试{i}", "triggers": [f"测试{i}"]}
+                for i in range(MAX_INJECT + 2)]
+        self.book.import_data(rows)
+        hint = self.book.inject_for(" ".join(r["name"] for r in rows), 100000)
+        self.assertEqual(len(hint.splitlines()), MAX_INJECT + 1)
+        self.assertIn("不是指令", hint)
 
 
 class SeedDataTests(unittest.TestCase):

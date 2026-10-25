@@ -3,7 +3,7 @@
  * ============================================================================
  * 設計目標（這一版整個重寫）：
  *   1. 所有看得到的欄位都有繁體中文標籤與「改了會怎樣」的說明。
- *   2. 設定頁不再把 200+ 個鍵平鋪：預設只顯示 73 個常用鍵，其餘 213 個
+ *   2. 設定頁不再把 200+ 個鍵平鋪：預設只顯示 73 個常用鍵，其餘 214 個
  *      收進「進階（原始 JSON）」；有中文標籤 / 原始 key / 說明全文搜尋。
  *   3. 字級、行高、間距、對比都照驗收規格（14px / 1.65、說明 12.5px、
  *      卡片 padding 14px 16px、卡片間 12px、每列上下 10px + 1px 分隔線）。
@@ -125,8 +125,8 @@ const COMMON = [
 
   // ── QQ 與服務 ────────────────────────────────────────────────────────────
   ['account.owner_ids', '主人 QQ 名单', '只有这些 QQ 号能命令她改资料或做敏感操作；留空等于没有主人。', ['napcat', 'instant'], 'json'],
-  ['qzone.enabled', 'QQ 空间功能', '允许她读取、发布与回应 QQ 空间说说。', ['napcat', 'instant'], 'switch'],
-  ['qzone.daily_limit', '空间每日发文上限', '每天最多发几条说说；要开启强制限额才会真的检查。', ['napcat', 'instant'], 'number', { min: 0, max: 100, step: 1 }],
+  ['qzone.enabled', 'QQ 空间功能', '允许主人在授权私聊读取空间；写操作还需配置主人名单并受每日上限约束。', ['napcat', 'instant'], 'switch'],
+  ['qzone.daily_limit', '空间每日写操作上限', '每天最多进行几次发布、编辑、删除或回复；必须是正整数。', ['napcat', 'instant'], 'number', { min: 1, max: null, step: 1 }],
   ['selfedit.enabled', '允许她修改自己人设', '开启后她能在群里自行调整自己的说话方式；默认关闭。', ['speech', 'instant'], 'switch'],
   ['server.port', 'NapCat 反向 WS 端口', 'NapCat 要连进来的 WebSocket 端口；改完必须重启，且两边要一致。', ['restart', 'napcat'], 'number', { min: 1, max: 65535, step: 1 }],
   ['webui.port', 'PawBot WebUI 端口', 'PawBot 自己的网页界面端口；改完必须重启 PawBot。', ['restart'], 'number', { min: 1, max: 65535, step: 1 }],
@@ -239,6 +239,25 @@ const ADVANCED = [
   ['tools.bili_watch_enabled', 'B 站：外接看片插件', '启用「大肥鱼看 B 站」外接插件；关掉她只能看标题。', ['instant'], 'switch'],
   ['tools.bili_watch_dir', 'B 站：看片数据目录', '外接插件读写报告与凭证的文件夹。', ['instant'], 'text'],
   ['tools.bili_watch_credential_file', 'B 站：凭证文件路径', '主人提供的 B 站登录凭证文件；留空用默认。', ['instant'], 'text'],
+  ['tools.bili_scroll_enabled', 'B 站：自己刷片', '允许她自己搜片、读字幕、写笔记；关掉只能靠分享链接。', ['instant'], 'switch'],
+  ['tools.bili_scroll_topic', 'B 站：刷片主题', '自己刷片时默认搜什么方向，空格分隔多个主题。', ['instant'], 'text'],
+  ['tools.bili_scroll_per_round', 'B 站：一轮笔记数', '一次自己刷片最多写几份笔记，范围 1 到 6。', ['instant'], 'number', { min: 1, max: 6, step: 1 }],
+  ['tools.bili_scroll_max_chars', 'B 站：字幕字数上限', '喂给模型判断用的字幕最多多少字，超长会截断。', ['instant'], 'number'],
+  ['tools.bili_scroll_min_play', 'B 站：最低播放量', '播放量低于这个数的候选片直接跳过。', ['instant'], 'number'],
+  ['tools.bili_scroll_max_duration', 'B 站：最长时长', '超过这个秒数的片跳过，避免一轮刷太久。', ['instant'], 'number'],
+  ['tools.bili_scroll_notes_dir', 'B 站：笔记目录', '自己刷片的笔记写在这个文件夹，相对项目目录。', ['instant'], 'text'],
+  ['tools.bili_scroll_times', 'B 站：定时刷片时刻', '每天自动刷片的时间点列表，例如 09:00 与 21:30。', ['instant'], 'json'],
+  ['tools.bili_scroll_report_to', 'B 站：刷片结果发给谁', '刷完笔记发给主人、发到指定群，或完全不发。', ['instant'], 'select', { options: [['owner', '发给主人'], ['group', '发到指定群'], ['off', '不发送']] }],
+  ['tools.bili_scroll_group', 'B 站：刷片结果群号', '上一个设成「发到指定群」时，笔记发到这个群。', ['instant'], 'text'],
+  ['tools.bili_scroll_report_at', 'B 站：刷片时 @ 谁', '发到群里时要不要 @ 人：不 @、只 @ 主人，或 @ 全体成员。', ['instant'], 'select', { options: [['off', '不 @'], ['owner', '@ 主人'], ['all', '@ 全体成员']] }],
+  ['tools.bili_scroll_report_comment', 'B 站：贴完再补一句', '发完笔记清单后，再用她自己的语气接一句话；会多一次模型调用。', ['instant'], 'switch'],
+  ['tools.bili_jct', 'B 站：CSRF 令牌', 'B 站网页端 bili_jct，配合 SESSDATA 才能做需要登录的操作。', ['instant'], 'secret'],
+  ['tools.bili_post_enabled', 'B 站：自动发动态', '开启后她会按时间自己发 B 站动态；这是对外公开发布，需要先填好 bili_jct。', ['restart', 'napcat'], 'switch'],
+  ['tools.bili_post_times', 'B 站：发动态时刻', '每天自动发动态的时间点列表，例如 12:30；留空就完全不定时。', ['restart'], 'json'],
+  ['tools.bili_post_source', 'B 站：动态内容来源', '用最近刷到的片子笔记来写，还是按你指定的主题现写。', ['instant'], 'select', { options: [['scroll', '用刷片笔记'], ['topic', '按指定主题']] }],
+  ['tools.bili_post_topic', 'B 站：发动态主题', '内容来源选「按指定主题」时，让她围绕这个主题写一条。', ['instant'], 'text'],
+  ['tools.bili_post_daily_limit', 'B 站：每天最多发几条', '对外发布每天最多几条动态，必须正整数；到上限就不再发。', ['instant'], 'number', { min: 1, step: 1 }],
+  ['tools.bili_post_max_chars', 'B 站：动态字数上限', '一条动态最多多少字，超出会截断后再发。', ['instant'], 'number', { min: 20, step: 10 }],
   ['tools.search_base_url', '搜索：API 地址', '搜索服务的接口地址。', ['instant'], 'text'],
   ['tools.search_reasoning_effort', '搜索：思考强度', '搜索那次调用的思考强度 low/medium/high。', ['instant'], 'select', { options: [['', '服务端默认'], ['low', '低'], ['medium', '中'], ['high', '高']] }],
   ['tools.search_api_key', '搜索：API 密钥', '留空就借主模型的 key。', ['instant'], 'secret'],
@@ -290,8 +309,9 @@ const ADVANCED = [
   ['tts.cloud_format', '语音合成：音频格式', 'pcm 等输出格式。', ['instant'], 'text'],
   ['tts.cloud_sample_rate', '语音合成：采样率', '云端输出的采样率 Hz。', ['instant'], 'number'],
   // qzone
-  ['qzone.enforce_limits', 'QQ 空间：强制限额', '开启才检查主人名单与每日上限。', ['napcat', 'instant'], 'switch'],
-  ['qzone.owner_ids', 'QQ 空间：可发文主人', '只有这些 QQ 号能命令她发说说。', ['napcat', 'instant'], 'json'],
+  ['qzone.proactive_enabled', 'QQ 空间：主动操作', '允许主动引擎调用空间工具；还必须开启 QQ 空间功能。', ['napcat', 'instant'], 'switch'],
+  ['qzone.enforce_limits', 'QQ 空间：旧版限额开关', '旧版兼容字段；主人验证与每日写操作上限始终生效。', ['compat'], 'switch'],
+  ['qzone.owner_ids', 'QQ 空间：授权主人', '只有列出的 QQ 号能读取或写入空间；写操作还受每日上限约束。', ['napcat', 'instant'], 'json'],
   ['qzone.ugc_right', 'QQ 空间：可见范围', '1 代表公开，4 代表仅自己可见。', ['napcat', 'instant'], 'number', { min: 1, max: 4, step: 1 }],
   ['qzone.actions', 'QQ 空间：NapCat 动作名', '读、改、删、留言用的扩展动作名称。', ['napcat', 'instant'], 'json'],
   // selfedit
@@ -662,7 +682,7 @@ const CSS = `
   font-weight:600;box-shadow:var(--dsw-elevation-soft);}
 [data-pb-tabpanel][data-pb-hidden]{display:none;}
 
-[data-pb-root] :is(button,input,select,textarea):focus-visible{
+[data-pb-root] :is(button,input,select,textarea,[tabindex]):focus-visible{
   outline:none;box-shadow:0 0 0 var(--dsw-focus-ring-width) var(--dsw-focus-ring-color);
 }
 
@@ -724,6 +744,7 @@ const CSS = `
 [data-pb-fields]{display:grid;grid-template-columns:minmax(0,1fr);gap:0;column-gap:28px;}
 [data-pb-field]{display:flex;flex-direction:column;gap:6px;padding:10px 0;
   border-bottom:1px solid var(--dsw-alias-border-l1);min-width:0;}
+[data-pb-field][data-dirty]{border-left:3px solid var(--dsw-alias-state-warn-primary);padding-left:8px;}
 [data-pb-field-head]{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;}
 [data-pb-field-label]{font-size:14px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary);}
 [data-pb-help]{font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
@@ -944,12 +965,14 @@ if (typeof window === 'undefined') {
           }))
       }
 
-      function Switch({ on, onChange, label, disabled }) {
+      function Switch({ on, onChange, label, labelId, controlId, disabled }) {
         return h('button', {
+          id: controlId,
           type: 'button',
           role: 'switch',
           'aria-checked': Boolean(on),
-          'aria-label': label || '开关',
+          'aria-labelledby': labelId,
+          'aria-label': labelId ? undefined : (label || '开关'),
           'data-pb-sw': '',
           'data-on': on ? '' : undefined,
           disabled: Boolean(disabled),
@@ -981,33 +1004,88 @@ if (typeof window === 'undefined') {
           sub ? h('div', { 'data-pb-kpi-sub': '' }, sub) : null)
       }
 
+      let confirmDialogSeq = 0
       function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel, danger, busy, onConfirm, onCancel }) {
+        const cardRef = useRef(null)
+        const previousFocusRef = useRef(null)
+        const cancelRef = useRef(null)
+        const confirmRef = useRef(null)
+        const callbacksRef = useRef({ onCancel, onConfirm, busy })
+        callbacksRef.current = { onCancel, onConfirm, busy }
+        const titleIdRef = useRef(null)
+        if (!titleIdRef.current) titleIdRef.current = 'pb-confirm-title-' + (++confirmDialogSeq)
         useEffect(() => {
           if (!open) return undefined
-          const onKey = (event) => {
-            if (event.key === 'Escape' && !busy) onCancel()
+          previousFocusRef.current = document.activeElement
+          const card = cardRef.current
+          const focusInside = () => {
+            const cancel = cancelRef.current
+            if (cancel && !cancel.disabled) cancel.focus()
+            else if (card) card.focus()
           }
-          window.addEventListener('keydown', onKey)
-          return () => window.removeEventListener('keydown', onKey)
-        }, [open, busy, onCancel])
+          focusInside()
+          const onFocus = (event) => {
+            if (card && !card.contains(event.target)) focusInside()
+          }
+          const onKey = (event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              if (!callbacksRef.current.busy) callbacksRef.current.onCancel()
+              return
+            }
+            if (event.key !== 'Tab' || !card) return
+            const focusable = Array.from(card.querySelectorAll(
+              'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+              .filter((element) => element.getClientRects().length > 0 && element.getAttribute('aria-hidden') !== 'true')
+            if (!focusable.length) {
+              event.preventDefault()
+              card.focus()
+              return
+            }
+            const first = focusable[0]
+            const last = focusable[focusable.length - 1]
+            const outsideSequence = !focusable.includes(document.activeElement)
+            if (event.shiftKey && (document.activeElement === first || outsideSequence)) {
+              event.preventDefault()
+              last.focus()
+            } else if (!event.shiftKey && (document.activeElement === last || outsideSequence)) {
+              event.preventDefault()
+              first.focus()
+            }
+          }
+          window.addEventListener('keydown', onKey, true)
+          document.addEventListener('focusin', onFocus)
+          return () => {
+            window.removeEventListener('keydown', onKey, true)
+            document.removeEventListener('focusin', onFocus)
+            const previous = previousFocusRef.current
+            if (previous && previous.isConnected && typeof previous.focus === 'function') previous.focus()
+            previousFocusRef.current = null
+          }
+        }, [open])
         if (!open) return null
         return h('div', { 'data-pb-modal': '', role: 'presentation' },
           h('div', {
+            ref: cardRef,
             'data-pb-modal-card': '',
             role: 'dialog',
             'aria-modal': 'true',
-            'aria-label': title,
+            'aria-labelledby': titleIdRef.current,
+            tabIndex: '-1',
           },
-          h('h2', { 'data-pb-modal-title': '' }, title),
+          h('h2', { id: titleIdRef.current, 'data-pb-modal-title': '' }, title),
           h('div', { 'data-pb-modal-body': '' }, children),
           h('div', { 'data-pb-modal-actions': '' },
             h('button', {
+              ref: cancelRef,
               'data-pb-btn': '',
               type: 'button',
               disabled: Boolean(busy),
               onClick: onCancel,
             }, cancelLabel || '取消'),
             h('button', {
+              ref: confirmRef,
               'data-pb-btn': '',
               'data-primary': danger ? undefined : '',
               'data-danger': danger ? '' : undefined,
@@ -1190,7 +1268,7 @@ if (typeof window === 'undefined') {
                   type: 'button',
                   disabled: Boolean(retrying),
                   onClick: onRetry,
-                }, retrying ? '重试中…' : '重试这一步'))
+                }, retrying ? '重新执行中…' : '重新执行启动流程'))
               : null))
       }
 
@@ -1688,11 +1766,11 @@ if (typeof window === 'undefined') {
           h('div', { 'data-pb-hero': '' },
             h('div', { 'data-pb-hero-main': '' },
               h('h1', { 'data-pb-title': '' }, '一键把 PawBot 跑起来'),
-              h('p', { 'data-pb-sub': '' }, '装环境 → 连 NapCat → 启动 PawBot，三步自动完成'),
+              h('p', { 'data-pb-sub': '' }, '装环境 → 连 NapCat → 启动 PawBot → 检查就绪，四步自动完成'),
               h('div', { 'data-pb-help': '' }, bootBusy
                 ? '正在跑，进度会自动更新；这一步不用一直盯着。'
                 : bootFailed
-                  ? '有步骤失败了；修好原因后按右边的「一键启动」，或该步骤的「重试这一步」再跑一次。'
+                  ? '有步骤失败了；修好原因后按右边的「一键启动」重新执行，已完成的步骤会跳过。'
                   : '按右边的主按钮会从第 ① 步一路跑到第 ④ 步；也可以用下面各张卡的按钮单独重跑某一步。')),
             h('div', { 'data-pb-hero-actions': '' },
               h('button', {
@@ -1736,7 +1814,7 @@ if (typeof window === 'undefined') {
               : null,
             bootSt && !bootDone && !bootBusy
               ? h('div', { 'data-pb-help': '' },
-                '目前没有在跑。按上面的「一键启动」会整套重跑；也可以用下面卡片上的按钮单独重跑一步。')
+                '目前没有在跑。按上面的「一键启动」会重新执行流程，已完成的步骤会跳过；下面卡片的按钮同样会重新执行启动流程。')
               : null),
 
           h(SetupEnvCard, {
@@ -1861,6 +1939,8 @@ if (typeof window === 'undefined') {
 
       function StatusTab({ onGoConfig, active }) {
         const [st, setSt] = useState(null)
+        // Browser receipt time only: the endpoint does not promise a server sample timestamp.
+        const [lastSuccessAt, setLastSuccessAt] = useState(null)
         const [err, setErr] = useState('')
         const [notice, setNotice] = useState(null)
         const [showRaw, setShowRaw] = useState(false)
@@ -1883,6 +1963,7 @@ if (typeof window === 'undefined') {
               const data = await api('GET', '/status', undefined, ctrl.signal)
               if (alive) {
                 setSt(data)
+                setLastSuccessAt(Date.now())
                 setErr('')
               }
             } catch (error) {
@@ -1902,8 +1983,11 @@ if (typeof window === 'undefined') {
         const refresh = async () => {
           setRefreshing(true)
           try {
-            const data = await api('GET', '/status', undefined, ctrlRef.current && ctrlRef.current.signal)
+            const signal = ctrlRef.current && ctrlRef.current.signal
+            const data = await api('GET', '/status', undefined, signal)
+            if (signal && signal.aborted) return
             setSt(data)
+            setLastSuccessAt(Date.now())
             setErr('')
           } catch (error) {
             if (!isAbortError(error)) setErr(friendlyError(error))
@@ -2112,8 +2196,14 @@ if (typeof window === 'undefined') {
             onClick: refresh,
           }, '再试一次') }, '读不到状态：' + err) : null,
 
-          loading
-            ? h('div', { 'data-pb-card': '' }, h('div', { 'data-pb-help': '' }, '正在读取 PawBot 状态…'))
+          lastSuccessAt !== null ? h('div', { 'data-pb-help': '' },
+            err ? '下方为上次成功读取的状态，可能已过时。' : '最近成功读取：',
+            h('time', { dateTime: new Date(lastSuccessAt).toISOString() }, new Date(lastSuccessAt).toLocaleString()),
+            '（浏览器收到响应的时间，不代表服务器采样时间）') : null,
+
+          !st
+            ? h('div', { 'data-pb-card': '' }, h('div', { 'data-pb-help': '' },
+              loading ? '正在读取 PawBot 状态…' : '尚未成功读取状态，无法判断 PawBot 是否运行。'))
             : h(React.Fragment, null,
               h('div', { 'data-pb-kpis': '' }, kpis.map((kpi) => h(Kpi, { key: kpi.label, ...kpi }))),
 
@@ -2171,8 +2261,9 @@ if (typeof window === 'undefined') {
                       }, sendOpen ? '收起测试消息表单' : '发测试消息')),
                     sendOpen ? h('div', { 'data-pb-form': '' },
                       h('div', { 'data-pb-form-row': '' },
-                        h('label', null, '目标（群号或 QQ 号）'),
+                        h('label', { htmlFor: 'pb-send-target' }, '目标（群号或 QQ 号）'),
                         h('input', {
+                          id: 'pb-send-target',
                           'data-pb-input': '',
                           type: 'text',
                           value: send.target,
@@ -2183,8 +2274,9 @@ if (typeof window === 'undefined') {
                         }),
                         h('div', { 'data-pb-help': '' }, '群聊填群号，私聊填对方 QQ 号；填错会送到别的地方。')),
                       h('div', { 'data-pb-form-row': '' },
-                        h('label', null, '消息内容'),
+                        h('label', { htmlFor: 'pb-send-message' }, '消息内容'),
                         h('textarea', {
+                          id: 'pb-send-message',
                           'data-pb-textarea': '',
                           rows: 4,
                           value: send.message,
@@ -2281,10 +2373,11 @@ if (typeof window === 'undefined') {
           else max = 100000
         }
         const step = item.step !== undefined ? item.step : (Number.isInteger(n) ? 1 : 0.01)
-        return { min, max, step }
+        // Explicit null removes the HTML bound; only undefined uses the heuristics above.
+        return { min: min === null ? undefined : min, max: max === null ? undefined : max, step }
       }
 
-      function NumberControl({ item, current, onChange, onClear }) {
+      function NumberControl({ item, current, onChange, onClear, controlId, labelId }) {
         const [text, setText] = useState(current === null || current === undefined ? '' : String(current))
         const focused = useRef(false)
         const bounds = boundsFor(item, current)
@@ -2306,6 +2399,8 @@ if (typeof window === 'undefined') {
           return true
         }
         return h('input', {
+          id: controlId,
+          'aria-labelledby': labelId,
           'data-pb-input': '',
           'data-pb-number': '',
           type: 'number',
@@ -2335,17 +2430,18 @@ if (typeof window === 'undefined') {
         })
       }
 
-      function RatioControl({ item, current, onChange }) {
+      function RatioControl({ item, current, onChange, controlId, labelId }) {
         const raw = Number(current)
         const value = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0
         return h('div', { 'data-pb-ratio': '' },
           h('input', {
+            id: controlId,
             type: 'range',
             min: 0,
             max: 1,
             step: 0.01,
             value,
-            'aria-label': item.label,
+            'aria-labelledby': labelId,
             onChange: (event) => onChange(Number(event.target.value)),
           }),
           h('span', { 'data-pb-ratio-val': '' }, (Math.round(value * 1000) / 10) + '%'))
@@ -2358,19 +2454,21 @@ if (typeof window === 'undefined') {
         })
       }
 
-      function SelectControl({ item, current, onChange }) {
+      function SelectControl({ item, current, onChange, controlId, labelId }) {
         const options = selectOptions(item.options)
         const value = current === null || current === undefined ? '' : String(current)
         const hasValue = options.some((option) => option.value === value)
         const list = hasValue ? options : [{ value, label: value === '' ? '（空值）' : '目前：' + value }].concat(options)
         return h('select', {
+          id: controlId,
+          'aria-labelledby': labelId,
           'data-pb-select': '',
           value,
           onChange: (event) => onChange(event.target.value),
         }, list.map((option) => h('option', { key: option.value, value: option.value }, option.label)))
       }
 
-      function JsonControl({ item, current, isDirty, onChange, onClear }) {
+      function JsonControl({ item, current, isDirty, onChange, onClear, controlId, labelId }) {
         const [open, setOpen] = useState(false)
         const [text, setText] = useState(() => JSON.stringify(current === undefined ? null : current, null, 2))
         const [err, setErr] = useState('')
@@ -2401,29 +2499,40 @@ if (typeof window === 'undefined') {
             onClear()
           }
         }
+        const editorId = controlId + '-editor'
+        const regionId = controlId + '-region'
+        const errorId = controlId + '-error'
         return h('div', { 'data-pb-control': '' },
           h('div', { 'data-pb-action-row': '' },
             h('span', { 'data-pb-help': '' }, summary),
             h('button', {
+              id: controlId,
               'data-pb-btn': '',
               type: 'button',
+              'aria-label': item.label + (open ? '：收起 JSON' : '：展开编辑 JSON'),
+              'aria-expanded': open,
+              'aria-controls': regionId,
               onClick: () => setOpen((value) => !value),
             }, open ? '收起 JSON' : '展开编辑 JSON')),
-          open ? h('div', null,
+          h('div', { id: regionId, hidden: !open }, open ? h(React.Fragment, null,
             h('textarea', {
+              id: editorId,
+              'aria-labelledby': labelId,
+              'aria-invalid': Boolean(err),
+              'aria-describedby': err ? errorId : undefined,
               'data-pb-code': '',
               rows: 6,
               value: text,
               spellCheck: false,
               onChange: (event) => edit(event.target.value),
             }),
-            err ? h(Notice, { tone: 'err' }, err) : h('div', { 'data-pb-help': '' },
+            err ? h('div', { id: errorId }, h(Notice, { tone: 'err' }, err)) : h('div', { 'data-pb-help': '' },
               isDirty ? '已应用，尚未保存；保存只会送这个键。' : '目前与服务器上的值相同。'),
             h('div', { 'data-pb-help': '' },
-              'PawBot 对对象只做深合并、对数组是整包替换；删掉对象里的键不会被移除。')) : null)
+              'PawBot 对对象只做深合并、对数组是整包替换；删掉对象里的键不会被移除。')) : null))
       }
 
-      function SecretControl({ item, masked, isDirty, draft, onChange, onClearSecret }) {
+      function SecretControl({ item, masked, isDirty, draft, onChange, onClearSecret, controlId, labelId }) {
         const [text, setText] = useState('')
         const [clearConfirm, setClearConfirm] = useState(false)
         // 明確的「清除」會把 dirty 設成空字串；空白輸入框本身仍然只是「不改」。
@@ -2445,6 +2554,8 @@ if (typeof window === 'undefined') {
               onClick: () => setClearConfirm(true),
             }, '清除（设为空）')),
           h('input', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-input': '',
             type: 'password',
             value: text,
@@ -2475,6 +2586,8 @@ if (typeof window === 'undefined') {
 
       function Field({ item, value, masked, draft, isDirty, onChange, onClear, onClearSecret }) {
         const current = isDirty ? draft : value
+        const labelId = 'pb-field-label-' + encodeURIComponent(item.key)
+        const controlId = 'pb-field-control-' + encodeURIComponent(item.key)
         let control = null
 
         if (masked || item.control === 'secret') {
@@ -2485,23 +2598,28 @@ if (typeof window === 'undefined') {
             draft,
             onChange,
             onClearSecret,
+            controlId,
+            labelId,
           })
         } else if (item.control === 'switch' || typeof current === 'boolean') {
           control = h(Switch, {
             on: Boolean(current),
-            label: item.label,
+            labelId,
+            controlId,
             onChange: (next) => onChange(next),
           })
         } else if (item.control === 'ratio' || (item.control !== 'number' && typeof current === 'number' && current >= 0 && current <= 1 && !Number.isInteger(current))) {
-          control = h(RatioControl, { item, current, onChange })
+          control = h(RatioControl, { item, current, onChange, controlId, labelId })
         } else if (item.control === 'number' || typeof current === 'number') {
-          control = h(NumberControl, { item, current, onChange, onClear })
+          control = h(NumberControl, { item, current, onChange, onClear, controlId, labelId })
         } else if (item.control === 'select') {
-          control = h(SelectControl, { item, current, onChange })
+          control = h(SelectControl, { item, current, onChange, controlId, labelId })
         } else if (item.control === 'json' || Array.isArray(current) || isPlainObject(current)) {
-          control = h(JsonControl, { item, current, isDirty, onChange, onClear })
+          control = h(JsonControl, { item, current, isDirty, onChange, onClear, controlId, labelId })
         } else if (item.control === 'multiline' || (typeof current === 'string' && (current.length > 80 || current.indexOf('\n') >= 0))) {
           control = h('textarea', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-textarea': '',
             rows: 4,
             value: current === null || current === undefined ? '' : String(current),
@@ -2509,6 +2627,8 @@ if (typeof window === 'undefined') {
           })
         } else {
           control = h('input', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-input': '',
             type: 'text',
             value: current === null || current === undefined ? '' : String(current),
@@ -2518,9 +2638,9 @@ if (typeof window === 'undefined') {
           })
         }
 
-        return h('div', { 'data-pb-field': '', 'data-pb-field-key': item.key },
+        return h('div', { 'data-pb-field': '', 'data-pb-field-key': item.key, 'data-dirty': isDirty ? '' : undefined },
           h('div', { 'data-pb-field-head': '' },
-            h('label', { 'data-pb-field-label': '', title: item.key }, item.label),
+            h('label', { id: labelId, htmlFor: controlId, 'data-pb-field-label': '', title: item.key }, item.label),
             h(Impacts, { codes: item.impact })),
           h('div', { 'data-pb-control': '' }, control),
           h('div', { 'data-pb-help': '' },
@@ -2536,6 +2656,7 @@ if (typeof window === 'undefined') {
         const [err, setErr] = useState('')
         const [loading, setLoading] = useState(true)
         const [dirty, setDirty] = useState({})
+        const [searchDraft, setSearchDraft] = useState('')
         const [search, setSearch] = useState('')
         const [showAdvanced, setShowAdvanced] = useState(false)
         const [activeGroup, setActiveGroup] = useState('model')
@@ -2583,6 +2704,11 @@ if (typeof window === 'undefined') {
         useEffect(() => {
           if (!showAdvanced && activeGroup === 'advanced') setActiveGroup('model')
         }, [showAdvanced, activeGroup])
+
+        useEffect(() => {
+          const timer = window.setTimeout(() => setSearch(searchDraft), 200)
+          return () => window.clearTimeout(timer)
+        }, [searchDraft])
 
         const clearField = (key) => {
           setDirty((prev) => {
@@ -2798,6 +2924,8 @@ if (typeof window === 'undefined') {
             h('span', { 'data-pb-help': '' }, rawOpen ? '编辑后按下方按钮，会先验证 JSON 再让你确认。' : '展开后可直接编辑整份 JSON。')),
           rawOpen ? h('div', null,
             h('textarea', {
+              'aria-label': '原始 JSON（整份设置）',
+              'aria-invalid': Boolean(rawErr),
               'data-pb-code': '',
               rows: 18,
               value: rawText,
@@ -2924,6 +3052,7 @@ if (typeof window === 'undefined') {
                 type: 'button',
                 onClick: () => {
                   setActiveGroup(item.id)
+                  setSearchDraft('')
                   setSearch('')
                 },
               }, h('span', null, item.label), h('span', { 'data-pb-nav-count': '' }, String(item.count)))))),
@@ -2934,15 +3063,18 @@ if (typeof window === 'undefined') {
                   'data-pb-input': '',
                   'data-pb-search': '',
                   type: 'search',
-                  value: search,
+                  value: searchDraft,
                   placeholder: '搜索中文标签、原始 key 或说明…',
                   'aria-label': '搜索设置',
-                  onChange: (event) => setSearch(event.target.value),
+                  onChange: (event) => setSearchDraft(event.target.value),
                 }),
-                search ? h('button', {
+                searchDraft || search ? h('button', {
                   'data-pb-btn': '',
                   type: 'button',
-                  onClick: () => setSearch(''),
+                  onClick: () => {
+                    setSearchDraft('')
+                    setSearch('')
+                  },
                 }, '清除') : null,
                 h('div', { 'data-pb-grow': '' }),
                 navCollapsed ? h('button', {
@@ -3118,6 +3250,7 @@ if (typeof window === 'undefined') {
               '还原：只把编辑框回到这次打开面板时读到的版本（' + originalCount + ' 字），不会动服务器上的文件，也不是还原到出厂值。'),
             h(NoticeBlock, { notice }),
             h('textarea', {
+              'aria-label': '人设内容',
               'data-pb-code': '',
               'data-pb-persona-editor': '',
               rows: 22,
@@ -3181,7 +3314,8 @@ if (typeof window === 'undefined') {
         const [mounted, setMounted] = useState({ setup: true, status: false, config: false, persona: false })
         const [configDirty, setConfigDirty] = useState(0)
         const [tabNotice, setTabNotice] = useState('')
-        const selectTab = (id) => {
+        const tabRefs = useRef({})
+        const selectTab = (id, focus = true) => {
           if (id !== 'config' && tab === 'config' && configDirty > 0) {
             setTabNotice('设置页还有 ' + configDirty + ' 项未保存的改动；已切换标签页，改动还保留着，回到「设置」就能继续。')
           } else if (id === 'config') {
@@ -3189,7 +3323,27 @@ if (typeof window === 'undefined') {
           }
           setTab(id)
           setMounted((prev) => (prev[id] ? prev : { ...prev, [id]: true }))
+          if (focus) requestAnimationFrame(() => tabRefs.current[id]?.focus())
         }
+        const onTabKeyDown = (event, index) => {
+          let next = index
+          if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % TABS.length
+          else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index + TABS.length - 1) % TABS.length
+          else if (event.key === 'Home') next = 0
+          else if (event.key === 'End') next = TABS.length - 1
+          else return
+          event.preventDefault()
+          selectTab(TABS[next][0], true)
+        }
+        const panelProps = (id) => ({
+          id: 'pb-panel-' + id,
+          role: 'tabpanel',
+          'aria-labelledby': 'pb-tab-' + id,
+          tabIndex: tab === id ? 0 : -1,
+          hidden: tab !== id,
+          'data-pb-tabpanel': '',
+          'data-pb-hidden': tab !== id ? '' : undefined,
+        })
         return h('div', { 'data-pb-root': '' },
           h('div', { 'data-pb-top': '' },
             h('div', null,
@@ -3198,13 +3352,18 @@ if (typeof window === 'undefined') {
               h('p', { 'data-pb-sub': '' },
                 '一键启动、看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。')),
             h('div', { 'data-pb-tabs': '', role: 'tablist', 'aria-label': 'PawBot 控制面板标签页' },
-              TABS.map(([id, label]) => h('button', {
+              TABS.map(([id, label], index) => h('button', {
                 key: id,
+                id: 'pb-tab-' + id,
+                ref: (node) => { tabRefs.current[id] = node },
                 type: 'button',
                 role: 'tab',
                 'aria-selected': tab === id,
+                'aria-controls': 'pb-panel-' + id,
+                tabIndex: tab === id ? 0 : -1,
                 'data-pb-tab': '',
                 'data-active': tab === id ? '' : undefined,
+                onKeyDown: (event) => onTabKeyDown(event, index),
                 onClick: () => selectTab(id),
               }, label + (id === 'config' && configDirty > 0 ? '（' + configDirty + '）' : ''))))),
           tabNotice
@@ -3217,7 +3376,7 @@ if (typeof window === 'undefined') {
               }, '回到设置'),
             }, tabNotice)
             : null,
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'setup' ? '' : undefined },
+          h('div', panelProps('setup'),
             mounted.setup
               ? h(SetupTab, {
                 active: tab === 'setup',
@@ -3225,11 +3384,11 @@ if (typeof window === 'undefined') {
                 onGoConfig: () => selectTab('config'),
               })
               : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'status' ? '' : undefined },
+          h('div', panelProps('status'),
             mounted.status ? h(StatusTab, { active: tab === 'status', onGoConfig: () => selectTab('config') }) : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'config' ? '' : undefined },
+          h('div', panelProps('config'),
             mounted.config ? h(ConfigTab, { onGoStatus: () => selectTab('status'), onDirtyChange: setConfigDirty }) : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'persona' ? '' : undefined },
+          h('div', panelProps('persona'),
             mounted.persona ? h(PersonaTab) : null))
       }
 

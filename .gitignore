@@ -32,6 +32,19 @@ app/**/__pycache__/
 app/.venv/
 *.pyc
 app/data/napcat/
+# 其他运行时状态：都是「机器上长出来的」，更新时不能被仓库版本盖掉
+app/data/memes.json
+app/data/reminders.json
+app/data/relations.json
+app/data/emotion.json
+app/data/mood.json
+app/data/libido.json
+app/data/spice.json
+app/data/topic.json
+app/data/media_ledger.json
+app/data/proactive_state.json
+app/data/bili_post.json
+app/data/album/
 # B 站刷站（bili_scroll）产物与凭证：只留程式，不留资料
 app/data/bili_notes/
 app/data/bili_scroll_seen.json

@@ -37,6 +37,8 @@ _默认 = {
     "notes_dir": "data/bili_notes",
     "times": [],            # 每天几点刷一轮，如 ["12:40", "20:00"]；空 = 不定时
     "report_to": "owner",   # owner / group / off
+    "report_at": "off",     # 发到群里时 @ 谁：off / owner / all
+    "report_comment": False,  # 贴完清单后再用她自己的语气补一句
 }
 
 _搜过的词: dict[str, float] = {}
@@ -537,12 +539,56 @@ async def _report(bot, 结果: dict, 时: str = "") -> None:
         if str(_cfg(bot, "report_to", "owner")).lower() == "group":
             群 = str(_cfg(bot, "group", "") or "").strip()
             if 群:
-                await bot.manual_send(群, 文本, True)
+                await bot.manual_send(群, _at_prefix(bot, owners) + 文本, True)
+                await _comment(bot, 群, True, 结果)
                 return
         if owners:
             await bot.manual_send(owners[0], 文本, False)
+            await _comment(bot, owners[0], False, 结果)
     except Exception as e:
         log.warn(f"B站刷完汇报发不出去：{type(e).__name__} {e}")
+
+
+def _at_prefix(bot, owners: list[str]) -> str:
+    """群里汇报时按 tools.bili_scroll_report_at 决定要不要 @ 人。"""
+    谁 = str(_cfg(bot, "report_at", "off") or "off").strip().lower()
+    if 谁 in ("all", "everyone"):
+        return "[CQ:at,qq=all] "
+    if 谁 in ("owner", "master") and owners:
+        return f"[CQ:at,qq={owners[0]}] "
+    return ""
+
+
+async def _comment(bot, 目标: str, 是群: bool, 结果: dict) -> None:
+    """tools.bili_scroll_report_comment：贴完清单再用她自己的语气补一句。
+
+    失败一律静默跳过——汇报本身已经发出去了，不能因为补一句而报错。
+    """
+    if not _cfg(bot, "report_comment", False):
+        return
+    笔记 = 结果.get("notes") or []
+    if not 笔记:
+        return
+    标题 = "、".join(str(n.get("title") or "").strip() for n in 笔记[:3])
+    想 = (f"你刚刷完 B 站，挑出这些：《{标题}》。"
+          "用你自己的语气补一句感想或勾人的话，一两句，别复述标题、别列清单、别用 emoji。")
+    try:
+        try:
+            系统 = bot.persona.build(group_id=int(目标)) if 是群 else bot.persona.build()
+        except Exception:
+            系统 = bot.persona.build()
+        回复 = await asyncio.wait_for(
+            bot.llm.chat_message([{"role": "system", "content": 系统},
+                                  {"role": "user", "content": 想}], None),
+            timeout=45)
+        话 = str((回复 or {}).get("content") or "").strip()
+        if not 话:
+            return
+        await bot.manual_send(目标, 话[:200], 是群)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.warn(f"B站汇报补一句失败（已跳过）：{type(e).__name__} {e}")
 
 
 async def scheduler(bot) -> None:

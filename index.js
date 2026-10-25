@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createPawbotProxy } from './lib/webui-proxy.js'
+import { BRIDGE_PATH, createToolBridge, redactBridgeText, stripBridgeEnv } from './lib/dsh-tool-bridge.js'
 import { maskSecrets, pickUpdatable, pickSection, diffKeys } from './lib/config-utils.js'
 import {
   createBootOrchestrator,
@@ -66,6 +67,8 @@ export const Config = (() => {
       projectDir: z.string().default(isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot').extra('volatile', true),
       /** 用哪個 python 起（Windows 是 `py` launcher；Linux/macOS 用 `python3`） */
       pythonExe: z.string().default(isWin ? 'py' : 'python3').extra('volatile', true),
+      /** Opt-in read-only child→DSH bridge. Reload plugin/restart child after changing. */
+      dshBridgeEnabled: z.boolean().default(false),
       /** apply 時是否自動啟動 */
       autostart: z.boolean().default(true).extra('volatile', true),
       /** 進程意外退出後是否自動重啟（有意 stop 不會觸發） */
@@ -101,6 +104,7 @@ export function apply(ctx, config) {
     projectDir: isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot',
     pythonExe: isWin ? 'py' : 'python3',
     autostart: true,
+    dshBridgeEnabled: false,
     restartOnCrash: false,
     logLines: 200,
     webuiHost: '127.0.0.1',
@@ -133,7 +137,7 @@ export function apply(ctx, config) {
   const refreshCfg = () => Object.assign(cfg, normalize(config, DEFAULTS))
 
   const log = (msg) => {
-    const line = `[pawbot] ${msg}`
+    const line = `[pawbot] ${redactBridgeText(msg)}`
     try {
       if (ctx.logger?.info) ctx.logger.info(line)
       else console.log(line)
@@ -147,7 +151,7 @@ export function apply(ctx, config) {
   const MAX_BUFFER = 5000
   const ring = [] // { ts, stream, line }
   const pushLine = (stream, line) => {
-    ring.push({ ts: Date.now(), stream, line })
+    ring.push({ ts: Date.now(), stream, line: redactBridgeText(line) })
     if (ring.length > MAX_BUFFER) ring.splice(0, ring.length - MAX_BUFFER)
   }
   const tail = (n) => ring.slice(-Math.max(0, n))
@@ -177,7 +181,7 @@ export function apply(ctx, config) {
   const SETUP_LOG_TAIL = 60
   const setupRing = []
   const setupLog = (msg) => {
-    const text = String(msg == null ? '' : msg)
+    const text = redactBridgeText(msg == null ? '' : msg)
     if (!text) return
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trimEnd()
@@ -206,6 +210,15 @@ export function apply(ctx, config) {
   // UI 打不開時 pawbot_status 會回這個，先看它再猜。
   let uiRouteState = 'pending'
   const timers = new Set()
+
+  // Separate from browser dispatch/CSRF. No route or credentials exist by default.
+  let bridgeRouteReady = false
+  const bridge = cfg.dshBridgeEnabled ? createToolBridge({
+    execute: (input) => ctx.tools.execute(input),
+    getOrigin: () => ctx.webServer.getOrigin(),
+    isEnabled: () => !disposed && bridgeRouteReady && config?.dshBridgeEnabled === true,
+    audit: ({ tool, outcome, elapsed_ms }) => log(`bridge tool=${tool} outcome=${outcome} elapsed_ms=${elapsed_ms}`),
+  }) : null
 
   const isRunning = (c) => !!(c && c.exitCode === null && c.signalCode === null)
 
@@ -287,6 +300,7 @@ export function apply(ctx, config) {
    *   - stopped:false,alive:false 本來就沒在跑
    */
   const stopChild = async () => {
+    bridge?.revoke()
     const child = currentChild
     if (!child) return { stopped: false, alive: false }
     const pid = child.pid
@@ -341,14 +355,17 @@ export function apply(ctx, config) {
     }
     let child
     try {
+      const baseEnv = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' }
+      const childEnv = bridge ? bridge.childEnv(baseEnv) : stripBridgeEnv(baseEnv)
       child = spawn(exe, ['run.py'], {
         cwd,
-        env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       })
     } catch (e) {
-      const msg = `spawn 抛错：${e?.message}`
+      bridge?.revoke()
+      const msg = redactBridgeText(`spawn 抛错：${e?.message}`)
       lastSpawnError = msg
       lastError = msg
       log(msg)
@@ -367,7 +384,8 @@ export function apply(ctx, config) {
     child.stdout?.on('data', (d) => feed('stdout', d))
     child.stderr?.on('data', (d) => feed('stderr', d))
     child.on('error', (err) => {
-      const msg = `进程错误：${err?.message}`
+      if (currentChild === child) bridge?.revoke()
+      const msg = redactBridgeText(`进程错误：${err?.message}`)
       lastError = msg
       lastSpawnError = msg
       pushLine('stderr', msg)
@@ -379,6 +397,7 @@ export function apply(ctx, config) {
         log(`忽略旧子进程（pid=${child.pid}）晚到的 exit（currentChild=${currentChild?.pid ?? 'null'}）`)
         return
       }
+      bridge?.revoke()
       flushBuf()
       lastExit = { code, signal, at: Date.now() }
       pushLine('stderr', `[pawbot] process exited code=${code} signal=${signal}`)
@@ -443,11 +462,12 @@ export function apply(ctx, config) {
 
   /* ── DSH 工具 ── */
   const safe = (v) => {
-    if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+    if (typeof v === 'string') return redactBridgeText(v)
+    if (v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean') return v
     try {
-      return JSON.parse(JSON.stringify(v))
+      return JSON.parse(redactBridgeText(JSON.stringify(v)))
     } catch {
-      return String(v)
+      return redactBridgeText(String(v))
     }
   }
   const textOutput = {
@@ -1343,10 +1363,21 @@ export function apply(ctx, config) {
     }
   }, 'pawbot: /pawbot-ui 同源代理路由')
 
+  if (bridge) ctx.effect(() => {
+    const unregister = ctx.webServer.register({ kind: 'exact', path: BRIDGE_PATH, handler: bridge.dispatch })
+    bridgeRouteReady = true
+    return () => {
+      bridgeRouteReady = false
+      bridge.dispose()
+      unregister()
+    }
+  }, 'pawbot: private read-only DSH bridge')
+
   /* ── 回收：子進程 + 定時器都經 ctx.effect（dispose 時收整棵樹） ── */
   ctx.effect(
     () => () => {
       disposed = true
+      bridge?.dispose()
       stopping = true
       for (const t of timers) clearTimeout(t)
       timers.clear()

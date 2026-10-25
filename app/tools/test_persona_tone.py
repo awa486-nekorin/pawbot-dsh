@@ -134,5 +134,72 @@ class ParticipationHintTests(unittest.TestCase):
         self.assertNotIn("帮上忙才加入", out)
 
 
+class DraftingHintTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = Agent(SimpleNamespace(config={}))
+
+    def test_qq_message_and_notice_get_scoped_tone(self):
+        from pawbot.event import MessageEvent, NoticeEvent
+        for event in (MessageEvent(post_type="message"), NoticeEvent(post_type="notice")):
+            with self.subTest(event=type(event).__name__):
+                hint = self.agent._drafting_hint(SimpleNamespace(event=event))
+                self.assertIn("QQ 对话成稿", hint)
+                self.assertIn("沿用既有人设", hint)
+                self.assertIn("不每句加喵", hint)
+                self.assertIn("不展示草稿", hint)
+
+    def test_non_dialogue_context_does_not_get_tone_overlay(self):
+        from pawbot.event import Event, RequestEvent
+        for ctx in (None, SimpleNamespace(), SimpleNamespace(event=Event("meta_event")),
+                    SimpleNamespace(event=RequestEvent("request"))):
+            self.assertEqual(self.agent._drafting_hint(ctx), "")
+
+    def test_tone_does_not_override_facts_permissions_or_local_storage(self):
+        from pawbot.event import MessageEvent
+        hint = self.agent._drafting_hint(SimpleNamespace(event=MessageEvent("message")))
+        for text in ("事实", "工具参数保持准确", "授权", "发送范围", "<pass>",
+                     "不为了接梗自动联网补库"):
+            self.assertIn(text, hint)
+
+    def test_existing_style_cleanups_still_apply(self):
+        from pawbot import style
+        self.assertEqual(style.polish("<pass>"), "<pass>")
+        self.assertNotIn("😀", style.strip_emoji("回来了😀"))
+        self.assertEqual(style.polish("第一句‖第二句‖第三句", max_parts=2).count("‖"), 1)
+
+    def test_local_knowledge_rule_overrides_legacy_online_rule(self):
+        agent = Agent(SimpleNamespace(config={}, stickers=SimpleNamespace(files=lambda: [])))
+        hint = agent._tool_hint(True)
+        self.assertIn("本地优先", hint)
+        self.assertIn("人工审核", hint)
+        self.assertIn("覆盖旧提示", hint)
+        self.assertNotIn("只要有一点点可能是梗", hint)
+
+
+class DraftingExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dialogue_draft_reuses_completion_and_preserves_pass(self):
+        from unittest.mock import AsyncMock, Mock, patch
+        from pawbot.event import MessageEvent
+
+        event = MessageEvent("message", group_id=1, message_type="group")
+        ctx = SimpleNamespace(event=event, group_id=1, sender_name="群友",
+                              user_id=1, session_id="group_1", is_group=True, state={})
+        bot = SimpleNamespace(config={"tools.enabled": False},
+                              llm=SimpleNamespace(chat_message=AsyncMock(return_value={"content": "<pass>"})),
+                              persona=SimpleNamespace(build=Mock(return_value="existing persona")),
+                              toolbox=SimpleNamespace(schemas=Mock(return_value=[])))
+        agent = Agent(bot)
+        agent._legacy_context = lambda *args: []
+        agent._user_message = lambda *args: {"role": "user", "content": "普通聊天"}
+        for name in ("_participation_hint", "_sense_hint", "_life_hint", "_mood_hint", "_spice_hint"):
+            setattr(agent, name, lambda *args: "")
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+            text, media = await agent.run(ctx, "普通聊天", [])
+        self.assertEqual((text, media), ("<pass>", []))
+        bot.llm.chat_message.assert_awaited_once()
+        self.assertIn("QQ 对话成稿", bot.persona.build.call_args.kwargs["extra"])
+        self.assertEqual(bot.llm.chat_message.await_args.args[1], None)
+
+
 if __name__ == "__main__":
     unittest.main()

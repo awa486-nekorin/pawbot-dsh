@@ -49,7 +49,7 @@ class LookupTests(unittest.TestCase):
 
     def test_lookup_returns_extract_and_alternatives(self):
         with patch.object(moegirl, "_get", router()):
-            out = moegirl.lookup("寄")
+            out = moegirl.lookup("寄", allow_network=True)
         self.assertTrue(out["ok"])
         self.assertEqual(out["title"], "永远的神")
         self.assertIn("永远滴神", out["extract"])
@@ -61,7 +61,7 @@ class LookupTests(unittest.TestCase):
     def test_lookup_without_hits(self):
         empty = json.dumps(["abc", [], [], []])
         with patch.object(moegirl, "_get", router(opensearch=empty)):
-            out = moegirl.lookup("abc")
+            out = moegirl.lookup("abc", allow_network=True)
         self.assertFalse(out["ok"])
         self.assertIn("没有这个条目", out["error"])
 
@@ -69,16 +69,79 @@ class LookupTests(unittest.TestCase):
         def boom(url, timeout=15):
             raise OSError("connection reset")
         with patch.object(moegirl, "_get", boom):
-            out = moegirl.lookup("寄")
+            out = moegirl.lookup("寄", allow_network=True)
         self.assertFalse(out["ok"])
         self.assertIn("OSError", out["error"])
 
     def test_entry_without_intro_still_returns_link(self):
         with patch.object(moegirl, "_get", router(extract=json.dumps({"query": {"pages": {}}}))):
-            out = moegirl.lookup("寄")
+            out = moegirl.lookup("寄", allow_network=True)
         self.assertTrue(out["ok"])
         self.assertEqual(out["extract"], "")
         self.assertTrue(out["url"])
+
+
+class ValidationTests(unittest.TestCase):
+    def test_malformed_search_shapes_are_ignored(self):
+        for value in ({}, ["q", "not a list", [], []],
+                      ["q", [None, {}, 7, "x\x00y"], [], []]):
+            with self.subTest(value=value), patch.object(moegirl, "_api", return_value=value):
+                self.assertEqual(moegirl.search_titles("测试"), [])
+
+    def test_untrusted_urls_are_not_forwarded(self):
+        value = ["q", ["测试", "测试"], [], ["javascript:alert(1)", "https://evil.test"]]
+        with patch.object(moegirl, "_api", return_value=value):
+            hits = moegirl.search_titles("测试")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["url"], moegirl._page_url("测试"))
+
+    def test_malformed_extract_shapes_are_ignored(self):
+        for value in ([], {"query": []}, {"query": {"pages": []}},
+                      {"query": {"pages": {"1": {"extract": {"text": "bad"}}}}},
+                      {"query": {"pages": {"1": None}}}):
+            with self.subTest(value=value), patch.object(moegirl, "_api", return_value=value):
+                self.assertEqual(moegirl.intro("测试"), {})
+
+    def test_extract_bound_and_redirect_source_are_preserved(self):
+        with patch.object(moegirl, "_get", router()):
+            out = moegirl.lookup("yyds", chars=4, allow_network=True)
+        self.assertEqual(len(out["extract"]), 4)
+        self.assertTrue(out["truncated"])
+        self.assertEqual(out["origin"], "moegirl")
+        self.assertEqual(out["url"], moegirl._page_url(out["title"]))
+
+    def test_invalid_query_never_fetches(self):
+        with patch.object(moegirl, "_api") as api:
+            for query in (None, {}, 7, "x" * 201):
+                self.assertFalse(moegirl.lookup(query)["ok"])
+            api.assert_not_called()
+
+    def test_local_first_lookup_never_fetches_or_mutates(self):
+        import tempfile
+        from pawbot.memes import MemeBook
+        with tempfile.TemporaryDirectory() as tmp:
+            book = MemeBook(str(Path(tmp, "memes.json")))
+            book.learn("测试梗", ["测试梗"], "离线解释")
+            before = Path(book.path).read_bytes()
+            with patch.object(moegirl, "_get", side_effect=AssertionError("network")):
+                out = moegirl.lookup("测试梗", book=book)
+                miss = moegirl.lookup("另一个梗", book=book, allow_network=False)
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["origin"], "local")
+            self.assertEqual(out["source"], "群友")
+            self.assertEqual(out["url"], "")
+            self.assertFalse(miss["ok"])
+            self.assertEqual(Path(book.path).read_bytes(), before)
+
+    def test_http_response_size_is_bounded(self):
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b"x" * (moegirl.MAX_RESPONSE_BYTES + 1)
+        with patch.object(moegirl.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                moegirl._get(moegirl.API)
+        response.read.assert_called_once_with(moegirl.MAX_RESPONSE_BYTES + 1)
 
 
 class ToolWiringTests(unittest.IsolatedAsyncioTestCase):

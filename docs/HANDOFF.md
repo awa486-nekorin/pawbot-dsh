@@ -3,7 +3,7 @@
 > **给下一个 Agent**：你没有之前的对话上下文。这份文档是自包含的——读完你应该知道：
 > 这个项目是什么、代码在哪、现在做到哪一步、哪些硬规则不能碰、下一步该干什么、哪些坑已经踩过。
 >
-> 最后更新：2026-10-26 · 对应 commit `ff19c36`
+> 最后更新：2026-10-26 · 2.0.1 改动**尚未提交**，基于 commit `ba7c665`
 
 ---
 
@@ -12,7 +12,7 @@
 ```
 仓库（同时也是 DSH bundle 源码）  D:\WorkBuddy\pawbot-dsh
 GitHub                           https://github.com/awa486-nekorin/pawbot-dsh  (public, MIT, main)
-当前 HEAD                         ff19c36  (6 commits)
+当前 HEAD                         ba7c665  (7 commits；2.0.1 改动还在工作区未提交)
 DSH profile 里的安装形态           link:D:/WorkBuddy/pawbot-dsh → node_modules/@local/pawbot
 Python 本体（随仓库自带）           app/   （180 个被追踪文件 / 2.06 MB）
 共享数据目录                       D:/WorkBuddy/pawbot-bili-watch-data
@@ -40,7 +40,7 @@ node test/setup-offline.mjs        # 期望 57 passed
 | 组成 | 位置 | 干什么 |
 |---|---|---|
 | **Host 插件** | `index.js` + `lib/*.js` | 把 PawBot 当受管子进程（起停/日志/健康检查）；一键安装（建 venv、装依赖）；NapCat 编排；注册 `/pawbot-ui/*` 同源代理路由；暴露 8 个工具 |
-| **Client 面板** | `client.js` | DSH 设置页里 4 个分页：**启动 / 状态 / 设定 / 人设**。286 个 config key 的中文表单、人设编辑器、一键启动四步引导 |
+| **Client 面板** | `client.js` | DSH 设置页里 4 个分页：**启动 / 状态 / 设定 / 人设**。306 个 config key 的中文表单、人设编辑器、一键启动四步引导 |
 | **B 站子插件** | `bili-watch/` | 「真的去看 B 站」：抓字幕+热评 → 一次 LLM → 结构化报告；判重三层、候选池、笔记 md。同时注册 `bili_watch` / `bili_watch_status` |
 | **PawBot 本体** | `app/` | Python 项目自带在仓库里（`app/pawbot/` 核心 + `app/plugins/` 12 个内置插件 + `app/tools/` 66 个测试 + `app/web/` 自带 WebUI 页） |
 
@@ -53,7 +53,7 @@ D:\WorkBuddy\pawbot-dsh\
 ├─ package.json              # name=@local/pawbot；files 含 app/lib/bili-watch/DEPLOY.md；dsh.bundle.patch + dsh.client
 ├─ cordis.patch.yml          # ⚠ 服务器上被本地改过（见 §9.3）；仓库版本只有两行 insert：pawbot + pawbot-bili-watch
 ├─ index.js                  # ★ Host 主文件（~1300 行）：子进程管理、一键安装编排、NapCat 编排、8 个工具、路由注册
-├─ client.js                 # ★ Client 面板（~3200 行）：4 分页 + 286 key 的中文 METADATA（label/help/impact 徽章）
+├─ client.js                 # ★ Client 面板（~3700 行）：4 分页 + 306 key 的中文 METADATA（label/help/impact 徽章）
 ├─ lib/
 │  ├─ hostdeps.js            # 从宿主树解析 schemastery / defineTool（拿不到就降级）
 │  ├─ config-utils.js        # maskSecrets / pickUpdatable / deepMerge / pickSection / diffKeys（MASK = '***已设定***'）
@@ -63,7 +63,7 @@ D:\WorkBuddy\pawbot-dsh\
 ├─ test/
 │  ├─ offline.mjs            # 19 条：config-utils 纯函数 + 代理动作 + CSRF/413/415/502
 │  ├─ setup-offline.mjs      # 57 条：装环境、NapCat 编排、boot 四步状态机、路由接线（全用假 run()/假 fetch）
-│  └─ client-meta-check.mjs  # 18 条：拿真 config（6185 或 app/data/config.json）校验 286 key 的中文字典
+│  └─ client-meta-check.mjs  # 31 条：纯离线读 config.py DEFAULT 校验 306 key 中文字典
 ├─ bili-watch/               # ★ B 站子插件（22 个文件）
 │  ├─ index.js               # 抓取编排、请求队列、候选池、自动备货、2 个工具
 │  ├─ lib/{bili,http,cookie,credential,wbi,subtitle,report,notes,seen,pool,queue,inflight,request-lifecycle,model-guard,atomic,hostdeps}.js
@@ -231,34 +231,55 @@ top_comments[{text,like}], take, share_worthy, share_reason, created_at, source_
 |---|---|---|
 | PawBot 包成 DSH Host 插件（起停/日志/健康） | ✅ 可用 | Windows 用 `taskkill /T /F`（优雅停止在 Windows 不可得）；Linux 走 SIGTERM |
 | `/pawbot-ui` 同源代理 + CSRF + secrets 遮罩 | ✅ 可用并实测 | 跨源 403 / 非 JSON 415 / send ok:false→502 |
-| DSH 设置页面板（4 分页、286 key 中文表单） | ✅ 代码完成 | **真浏览器渲染未验证过**；面板改动需刷新页面或重载 bundle |
+| DSH 设置页面板（4 分页、306 key 中文表单） | ✅ 代码完成 | a11y 关联/键盘分页/搜索 debounce/状态新鲜度已实现并通过静态检查；**真浏览器与读屏实测未验证** |
 | 一键安装（venv + 依赖 + 配置） | ✅ 逻辑完成 + 离线单测 | **真跑一次 venv+pip 未验证** |
 | NapCat 编排（docker / binary / 手动步骤） | ⚠ 代码完成，**完全未实机验证** | 本机无 docker、无 NapCat |
 | B 站看片（抓字幕+热评→报告） | ✅ 可用 | 无 SESSDATA 时 `watched_level` 停在 `desc_comments`（如实降级） |
-| 判重三层 + 候选池 + 失败重试/隔离 | ✅ 可用 | 8 线程并发写 shared.json 已修（0 异常、240 笔不丢） |
+| 判重三层 + 候选池 + 失败重试/隔离 | ✅ 可用 | 8 线程并发写 shared.json 已修（0 异常、240 笔不丢）；仅送达视频段落后写 shared |
 | 模型白名单（只准 flash） | ✅ 可用 | 实测 8 种 pro 写法全部被收敛 |
-| 认人/时间戳/图片归属/去 AI 味/记忆来源标注 | ✅ 可用 | 66 个 Python 测试，65 通过 |
-| 服务器侧「自己刷 B 站」(`bili_scroll` + `bili_mcp`) | ✅ 已并入仓库 | 可选依赖 `app/requirements-bili.txt` **未纳入一键安装** |
+| 知识库导入 / 本地优先检索 | ✅ 代码完成 | 显式离线 JSON 导入；聊天 Moegirl 查找不联网、不自动写库 |
+| QQ 空间权限与写入账本 | ✅ 离线测试覆盖 | 主人 + message + whitelist；私聊读取；正每日额度、持久化预留、一次调用/回执确认；未实机验证 NapCat 扩展动作 |
+| DSH→PawBot 状态桥 | ✅ 离线测试覆盖 | 仅 `bili_watch_status`，默认关闭、loopback/token、限速/超时、投影敏感字段；未验证运行中的 DSH bridge |
+| QQ 对话草稿风格 | ✅ 代码完成 | 仅 QQ 上下文提示，不改成人向模板、不额外调用模型 |
+| 服务器侧「自己刷 B 站」(`bili_scroll` + `bili_mcp`) | ✅ 已并入仓库 | 汇报可选「@ 谁」（off/owner/all）与「贴完再补一句」；可选依赖 `app/requirements-bili.txt` **未纳入一键安装** |
+| 自动发 B 站动态 (`bili_post`) | ✅ 离线测试覆盖，**默认关** | 需 `tools.bili_jct`；正每日上限、先预留再发、只调一次、回执要 `success is True`；同天不重发同文；**真机发布未验证** |
 | 跨会话记忆桥 (`mem/bridge.py`) | ✅ 已并入 | 默认单向 群→私聊 |
 
 **已知失败（不是这次引入的）**：`app/tools/test_pixiv_session.py::test_filters_and_sorting`
 （图片排序断言 `['9','8','7','10'] != ['9','8','2','7']`）。`pixiv_session.py` 没人改过，与主线无关。
+另有 `test/setup-offline.mjs`（32 过 / 25 失败）与 `bili-watch/selfcheck.mjs`（46 过 / 6 失败）全部是
+`EPERM: mkdtemp 'C:\dsh-temp\pawbot-*'`：这两个测试硬编码了 `C:\dsh-temp`，在本机沙箱下建不了目录，与代码无关。
+
+### 7.1 2.0.1 的未验证面（**别当成已验收**）
+
+- **QQ 空间真机零验证**：`get_qzone_msg_list` / `get_qzone_comments` / `update_qzone_msg` /
+  `send_qzone_comment` 都是 NapCat 扩展接口，没有官方保证；所有权限、额度、回执逻辑只用假连接测过
+- **DSH bridge 端到端未跑过**：Host 路由、子进程环境变量注入、真实 Host→PawBot 往返都没在运行中的 DSH 里验证；
+  两侧只有各自的离线测试
+- **面板只有静态检查**：真浏览器渲染、读屏、键盘焦点顺序都没实测
+- **B 站真实凭据流程未验证**：没有 SESSDATA，`watched_level` 停在 `desc_comments` 属如实降级
+- **自动发 B 站动态从未真机跑过**：`bili_post` 只用假后端测过；真实发布要 `tools.bili_jct`，
+  且 B 站风控可能让 `success` 为 false（代码会记 `unconfirmed`、照样扣额度，不会重试）
+- `app/data/config.json` 里没有 `qzone.proactive_enabled`，但 `config.py` DEFAULT 有且为 `false`；
+  运行时按 DEFAULT 合并，**不要**为了让面板「看得见」去手改运行时数据文件
 
 ---
 
 ## 8. 测试与验证
 
 ```powershell
-# JS（在 D:\WorkBuddy\pawbot-dsh）
-node test/offline.mjs             # 19 passed — 代理动作 + CSRF/413/415/502
-node test/setup-offline.mjs       # 57 passed — 装环境/NapCat/boot 状态机/路由接线（全假依赖）
-node test/client-meta-check.mjs   # 18 passed — 286 key 中文字典 vs 真 config（6185 或 app/data/config.json）
-node bili-watch/selfcheck.mjs     # 52 passed — 抓取/判重/守门/超时/去敏
+# JS（在 D:\WorkBuddy\pawbot-dsh）— 以下是 2.0.1 实跑结果
+node test/offline.mjs              # 19 passed, 0 failed
+node test/client-meta-check.mjs    # 31 passed, 0 failed — 306 key（73 常用 + 233 进阶）vs config.py DEFAULT，纯离线
+node --test test/dsh-tool-bridge-offline.mjs  # 15 passed, 0 failed
+node test/dsh-tool-bridge-host.mjs            # 3 passed, 0 failed
+node test/setup-offline.mjs        # 32 passed / 25 failed — 全部因 EPERM mkdtemp C:\dsh-temp（环境限制，非代码）
+node bili-watch/selfcheck.mjs      # 46 passed / 6 failed — 同上 EPERM，非代码
 
-# Python（在 D:\WorkBuddy\pawbot-dsh\app，先 $env:PYTHONPATH="."）
-py -m compileall -q pawbot plugins run.py
-py tools/test_mem.py …            # 66 个测试文件；一次全跑约 3~5 分钟（基线 65 过 / 1 个既有失败）
-Get-ChildItem tools/test_*.py | ForEach-Object { cmd /c "py $($_.FullName) 2>&1" }
+# Python（在 D:\WorkBuddy\pawbot-dsh\app，先 $env:PYTHONPATH="."）— 2.0.1 实跑结果
+py -m unittest discover -s tools -p 'test_*.py' -q   # 1230 ran, 1 failure（既有 pixiv 排序）, 4 skipped
+py -m unittest tools.test_bili_post tools.test_bili_scroll_report -q   # 27 ran, OK（自动发动态 + 刷片汇报开关）
+py -m unittest tools.test_dsh_bridge tools.test_qzone tools.test_qzone_security tools.test_qzone_tools tools.test_qzone_proactive tools.test_album tools.test_bili_post tools.test_bili_scroll_report tools.test_bili_delivery tools.test_whitelist -q  # 117 ran, OK
 ```
 
 > 坑：PowerShell 里 `py test.py 2>&1 | Select-String "OK"` 会因 stderr 噪音误判。
@@ -329,9 +350,10 @@ git archive --format=tar.gz -o pawbot-dsh-update.tgz --prefix=pawbot-dsh/ HEAD -
 
 ### P2
 
-5. `proactive.py` 的「只看标题」分支仍不写 `shared.json`（工具路径已写）→ 可能重复推荐同一条
+5. `proactive.py` 的「只看标题」回退分支（`bilibili.pick_lively` 那条，非报告路径）仍不写 `shared.json`
+   → 可能重复推荐同一条；报告路径和工具路径都已写
 6. SESSDATA 没有 UI 入口：`bili_watch.save_sessdata()` 只能从脚本调；面板缺「贴凭据」按钮
-7. 面板 a11y（label `htmlFor`、对话框 focus trap）、286 栏每次按键全量重绘、TTL 三处写死 72h、locale 文件未接上（文字硬编码）
+7. 面板真实浏览器/读屏实测（label `htmlFor` 与 focus trap 已实现，只过静态检查）、搜索时 ConfigTab 仍每次按键重绘（debounce 只延迟过滤）、TTL 三处写死 72h、locale 文件未接上（文字硬编码）
 8. `app/data/persona.md` 含成人向内容且在**公开仓库**里 → 是否换成中性示例，需用户拍板
 9. `setup.js` 的 timer 只在 apply 时算一次：改 `pollSec`/`autoIntervalMin` 要重启 PawBot 才生效，面板没有任何提示
 

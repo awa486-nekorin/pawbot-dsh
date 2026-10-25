@@ -209,8 +209,18 @@ DEFAULT = {
         "bili_scroll_times": [],
         "bili_scroll_report_to": "owner",   # owner / group / off
         "bili_scroll_group": "",            # report_to=group 时发到哪个群
+        "bili_scroll_report_at": "off",     # 群里汇报时 @ 谁：off / owner / all
+        "bili_scroll_report_comment": False,  # 贴完清单后再用她自己的语气补一句
         # B 站写操作（发评论/动态/投稿/私信）要的 CSRF token；只填 SESSDATA 只能读
         "bili_jct": "",
+        # ---- 自动发 B 站动态（对外发布，默认关）----
+        # 需要 bili_jct；每天有硬上限；内容来自刷片笔记或指定主题。
+        "bili_post_enabled": False,
+        "bili_post_daily_limit": 1,      # 每天最多发几条，必须正整数
+        "bili_post_times": [],           # 每天几点发（HH:MM），空 = 不定时
+        "bili_post_source": "scroll",    # scroll=用刷片笔记 / topic=按主题现写
+        "bili_post_topic": "",           # source=topic 时的主题
+        "bili_post_max_chars": 180,      # 一条动态最多多少字
         "search_base_url": "https://api.deepseek.com",
         # 实测：只有 pro 会真的发 web_search_call，flash 收下参数但不搜
         "search_model": "deepseek-v4-flash",  # 不用 v4-pro；实测 flash 在 Responses 上不真搜
@@ -271,27 +281,33 @@ DEFAULT = {
         "auto_max_chars": 0,         # 0 = 不限（保留兼容）
         "chunk_chars": 180,          # 一条语音最多念多少字，多出来接着发下一条
         "autostart": True,           # 启动时 /health 不通就拉起一次服务
+        # 云端 TTS（阿里云语音合成）备用通道；provider=local 时不用这些。
+        "provider": "local",         # local=本地飞鱼；cloud=阿里云
+        "cloud_url": "wss://convai-platform.aliyuncs.com/api-ws/v1/inference",
+        "cloud_key": "",             # 阿里云 AccessKey，留空等于不启用云端
+        "cloud_voice": "",           # 云端音色名
+        "cloud_format": "pcm",       # 云端返回的音频格式
+        "cloud_sample_rate": 24000,  # 云端采样率
         # 本地 CosyVoice 服务的启动命令，例如
         # ["/path/to/CosyVoice/.venv/bin/python", "/path/to/CosyVoice/tools/feiyu_server.py"]。
         # 默认留空：没有本地服务就不自动拉起，TTS 走云端或静默降级为打字。
         "server_cmd": [],
     },
     "qzone": {
-        "enabled": False,            # 默认关：发空间是对外发布，别误触
-        # ⚠ 两道闸默认不生效（跟「按要求移除」时的行为一致）。想收紧就把 enforce_limits 打开。
-        "enforce_limits": False,     # true 才校验 owner_ids 和 daily_limit
-        "owner_ids": [],             # 只有这些 QQ 号能命令它发说说
+        "enabled": False,            # 默认关：空间内容涉及私人信息和对外发布
+        "proactive_enabled": False,  # 自主引擎的空间操作另行默认关闭
+        "enforce_limits": False,     # 旧版兼容；主人验证与正每日额度始终生效
+        "owner_ids": [],             # 只有这些 QQ 号能读取或写入空间
         "ugc_right": 1,              # 1=公开，4=仅自己可见
-        "daily_limit": 3,            # 每天最多几条（enforce_limits 打开才生效；0=不限）
-        # 读/改/删/留言用的 NapCat 扩展动作名。默认值只是「先试这些」，
-        # 实际以启动后的探测结果为准；后端换了名字就在这里改，不用改代码。
+        "daily_limit": 3,            # 每天最多几次写操作，必须为正整数
+        # 读接口可配置；写接口没有默认猜测值，需显式确认后配置。
         "actions": {
             "list": "get_qzone_msg_list",
             "detail": "get_qzone_msg",
             "comments": "get_qzone_comments",
-            "delete": "delete_qzone_msg",
-            "edit": "update_qzone_msg",
-            "reply": "send_qzone_comment",
+            "delete": "",
+            "edit": "",
+            "reply": "",
         },
     },
     # 自主改提示词（自由度第一步）。默认关：开了她就能在群里自己调自己的说话方式。
@@ -358,10 +374,11 @@ DEFAULT = {
         "judge_effort": "low",        # 判官的思考强度：low / medium / high
         "judge_timeout": 10,          # 等判官给情绪增减的上限（秒）；中转比官方慢
     },
+    # 仅过滤 message 事件；两项白名单按 AND 组合，不把主人身份当作通行证。
     "whitelist": {
-        "group_ids": [],    # 空 = 不限制
-        "user_ids": [],
-        "blacklist_group_ids": [],
+        "group_ids": [],    # 空 = 不限制群；私聊不受此项限制
+        "user_ids": [],     # 空 = 不限制用户；非空时同时限制群聊和私聊
+        "blacklist_group_ids": [],  # 群消息命中即拒绝，白名单/主人均不能越过
     },
     "random_interject": {
         "enabled": False,

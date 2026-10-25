@@ -163,6 +163,13 @@ class Bot:
                 _bili_scroll.scheduler(self), name="bili-scroll")
         except Exception as e:
             log.warn(f"B站定时刷启动失败：{type(e).__name__} {e}")
+        # 自动发 B 站动态（tools.bili_post_times）；默认关，没配时间就自己退掉
+        try:
+            from . import bili_post as _bili_post
+            self._bili_post_task = asyncio.create_task(
+                _bili_post.scheduler(self), name="bili-post")
+        except Exception as e:
+            log.warn(f"B站自动发动态启动失败：{type(e).__name__} {e}")
 
     async def _flush_store_loop(self):
         interval = max(0.1, float(self.config.get("store.flush_interval", 2.0) or 2.0))
@@ -183,6 +190,14 @@ class Bot:
             except (asyncio.CancelledError, Exception):
                 pass
             self._bili_scroll_task = None
+        发动态 = getattr(self, "_bili_post_task", None)
+        if 发动态 is not None:
+            发动态.cancel()
+            try:
+                await 发动态
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bili_post_task = None
         reminder_service = getattr(self, "reminder_service", None)
         if reminder_service is not None:
             await reminder_service.stop()
@@ -398,6 +413,12 @@ class Bot:
 
     # ------------------------------------------------------------ 流水线
     def _pass_filter(self, ev) -> bool:
+        """消息准入：群黑名单优先，用户与群白名单按 AND 组合。
+
+        每个空白名单只放开自己的维度；私聊不检查群白名单。
+        非 message 事件沿用原有放行规则。account.owner_ids 仅供主人专属
+        操作授权，不是这里的通行证，也不能越过群黑名单。
+        """
         if ev.type != "message":
             return True
         uid = str(getattr(ev, "user_id", 0))
