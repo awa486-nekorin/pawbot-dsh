@@ -132,7 +132,11 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
         块.append({"role": "system", "content": _头["L1"] + "\n" + l1文本.strip()})
     if l0文本.strip():
         # L0 的 header 归 A 统一维护（ctxwin.L0_HEADER）；A 还没加时退回这份内联文字。
-        头l0 = getattr(ctxwin, "L0_HEADER", None) or (
+        # 私聊用另一份 header：不然她会把一对一的话当成「群里有人说」。
+        头l0 = None
+        if not getattr(ctx, "is_group", False):
+            头l0 = getattr(ctxwin, "L0_HEADER_PRIVATE", None)
+        头l0 = 头l0 or getattr(ctxwin, "L0_HEADER", None) or (
             "## 这个群最近的聊天记录（从旧到新）\n"
             "看语气和话题用，不要逐条回应，也不要引用下面的话来证明你记得。"
             "括号里是 QQ 尾号，按尾号认人。"
@@ -140,6 +144,18 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
         # ⚠️ L0_HEADER 結尾沒有換行，這裡必須自己補，否則第一條記錄會黏在說明最後一行上。
         块.append({"role": "system",
                    "content": 头l0.rstrip() + "\n" + l0文本.strip()})
+
+    # 跨会话桥：私聊里补一段「群里刚才在聊什么」。
+    # ⚠ 它不属于四层记忆（四层都按本会话取数），单独一块、单独计数。
+    桥文本 = ""
+    try:
+        from . import bridge as 桥
+        桥文本 = 桥.build(bot, ctx, now=now) or ""
+    except Exception as e:
+        桥文本 = ""
+        log.debug(f"跨会话桥跳过：{type(e).__name__}")
+    if 桥文本.strip():
+        块.append({"role": "system", "content": 桥文本.strip()})
 
     # 梗 / 黑话：只在最近几条或这一句命中触发词时才注入，平时不占预算。
     # 它不属于四层记忆（不是「发生过的事」），所以单独一块、单独计数。
@@ -167,6 +183,7 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
         "分配": 分配,
         "请求": 请求,
         "梗库": len(梗文本),
+        "跨会话": len(桥文本),
         "总字数": sum(len(m["content"]) for m in 块),
         "砍": 砍,
         "L0": l0统计,

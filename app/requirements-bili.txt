@@ -1,0 +1,12 @@
+# bili_scroll（自己刷 B 站 + 读字幕）的可选依赖
+#
+# 只有要用「读字幕原文 / 发评论动态」时才需要装。不装也能刷，只是拿不到字幕，
+# 报告会降级成「只看标题和简介」——那是如实降级，不是坏掉。
+#
+# 装法（在插件自己的 venv 里）：
+#   Linux:   app/.venv/bin/pip install -r app/requirements-bili.txt
+#   Windows: app\.venv\Scripts\pip.exe install -r app\requirements-bili.txt
+#
+# ⚠️ mcp 必须锁 <2：2.x 起不来（上游 bilibili-mcp 的既有约束）
+mcp<2
+bilibili-api-python

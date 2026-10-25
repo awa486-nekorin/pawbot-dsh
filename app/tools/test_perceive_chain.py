@@ -44,11 +44,13 @@ class FakeConn:
         return self.messages[message_id]
 
 
-async def fake_read_images(segments, config):
-    return [str(seg["data"]["file"]).encode("utf-8") for seg in segments]
+def fake_bytes_tagged(segments):
+    # 实现改成「每张图带回是不是表情包」，测试桩跟着换；
+    # 这里统一当普通图片（sticker=False），表情包分支由 test_sticker_mode 单独覆盖。
+    return [(str(seg["data"]["file"]).encode("utf-8"), False) for seg in segments]
 
 
-async def fake_see(raws, config):
+async def fake_see(raws, config, mode=""):
     name = raws[0].decode("utf-8")
     return f"描述-{name}", [f"data:image/fake;base64,{name}"]
 
@@ -69,7 +71,7 @@ class PerceiveChainTests(unittest.IsolatedAsyncioTestCase):
                             reply_id=reply_id, plain="测试")
 
     async def enrich(self, ev, conn):
-        with patch.object(perceive, "_read_images", new=fake_read_images), \
+        with patch.object(perceive, "_image_bytes_tagged", new=fake_bytes_tagged), \
                 patch.object(perceive, "_see", new=fake_see):
             await perceive.enrich(self.bot, conn, ev)
 

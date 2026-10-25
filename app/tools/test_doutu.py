@@ -212,7 +212,12 @@ class IndexHygieneTests(unittest.TestCase):
         self.assertEqual(sorted(set(idx) - files), [])
 
     def test_self_drawn_placeholders_are_gone(self):
-        idx = json.loads((STICKER_DIR / "index.json").read_text(encoding="utf-8"))
+        # 仓库里不带运行时数据（app/data 只在部署时生成），没有表情包库就跳过，
+        # 而不是报 FileNotFoundError —— 这条测的是「库里的脏条目」，前提是库存在。
+        index_path = STICKER_DIR / "index.json"
+        if not index_path.exists():
+            self.skipTest("没有真实表情包库")
+        idx = json.loads(index_path.read_text(encoding="utf-8"))
         for name in ("开心.png", "无语.png", "晚安.png", "猫.png", "我要看小萝莉.jpg"):
             self.assertNotIn(name, idx)
             self.assertFalse((STICKER_DIR / name).exists(), name)

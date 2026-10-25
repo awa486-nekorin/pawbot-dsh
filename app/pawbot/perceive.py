@@ -363,18 +363,43 @@ async def _transcribe_record(bot, conn, seg: dict) -> str:
 _RECENT_MAX = 6                     # 每个会话留最近几张图，供「上面那种图」回看
 
 
+def _is_sticker(seg: dict) -> bool:
+    """判断这个 image 段是不是表情包 / 梗图。
+
+    NapCat 会在 data 里带 sub_type=1（表情包）或者 summary="[动画表情]"；
+    有的版本还会带 emoji_id / emoji_package_id。任一条命中就算表情包。
+    """
+    if not isinstance(seg, dict):
+        return False
+    data = seg.get("data") or {}
+    sub = str(data.get("sub_type") or data.get("subType") or "").strip()
+    if sub in ("1", "sticker", "emoji"):
+        return True
+    summary = str(data.get("summary") or "")
+    if "表情" in summary:
+        return True
+    if str(data.get("emoji_id") or "").strip():
+        return True
+    return False
+
+
 def _image_bytes(segments: list[dict]) -> list[bytes]:
     """读出图片段的原始字节（下载 / 本地路径 / base64 都走 vision 那套）。"""
-    raws: list[bytes] = []
+    return [raw for raw, _sticker in _image_bytes_tagged(segments)]
+
+
+def _image_bytes_tagged(segments: list[dict]) -> list[tuple[bytes, bool]]:
+    """同上，但每张图带回「是不是表情包」，供看图时选不同的提示词。"""
+    out: list[tuple[bytes, bool]] = []
     for seg in segments:
         if not isinstance(seg, dict) or seg.get("type") != "image":
             continue
         for src in vision._segment_sources(seg):
             raw = vision._load_bytes(src)
             if raw:
-                raws.append(raw)
+                out.append((raw, _is_sticker(seg)))
                 break
-    return raws
+    return out
 
 
 async def _read_images(segments: list[dict], config) -> list[bytes]:
@@ -386,7 +411,7 @@ async def _read_images(segments: list[dict], config) -> list[bytes]:
         return []
 
 
-async def _see(raws: list[bytes], config) -> tuple[str, list[str]]:
+async def _see(raws: list[bytes], config, mode: str = "") -> tuple[str, list[str]]:
     """一次看完这串图，返回 (转述, 给主模型看的 data URL)。
 
     多张图由 vision.see 拼成宫格只打一次模型，不再逐张串行；
@@ -423,7 +448,8 @@ async def _see(raws: list[bytes], config) -> tuple[str, list[str]]:
         desc = await asyncio.wait_for(
             loop.run_in_executor(
                 None, lambda: vision.see(raws, key, base, model, budget, effort,
-                                         fallback, fallback_budget, fallback_key)),
+                                         fallback, fallback_budget, fallback_key,
+                                         mode=mode)),
             timeout=total)
         return str(desc or ""), urls
     except Exception as e:
@@ -441,15 +467,20 @@ async def _describe_images(segments: list[dict], config) -> tuple[str, list[str]
 
 async def _image_details(segments: list[dict], config,
                          describe_budget: int) -> list[dict]:
-    """逐张转述，保留每张图自己的 data URL；描述预算之外的图仍保留原图。"""
+    """逐张转述，保留每张图自己的 data URL；描述预算之外的图仍保留原图。
+
+    表情包（sub_type=1 / summary 含「表情」）走 sticker 模式：只要「表达什么意思」，
+    不要画面描述 —— 群里没人想看「一只橘猫举着牌子写着…」这种转述。
+    """
     if not segments:
         return []
-    raws = await _read_images(segments, config)
+    tagged = await asyncio.get_running_loop().run_in_executor(
+        None, _image_bytes_tagged, segments)
     details: list[dict] = []
     loop = asyncio.get_running_loop()
-    for pos, raw in enumerate(raws[:vision.MAX_GRID_IMAGES]):
+    for pos, (raw, sticker) in enumerate(tagged[:vision.MAX_GRID_IMAGES]):
         if pos < describe_budget:
-            desc, urls = await _see([raw], config)
+            desc, urls = await _see([raw], config, mode="sticker" if sticker else "")
         else:
             desc = ""
             try:
@@ -457,7 +488,8 @@ async def _image_details(segments: list[dict], config,
             except Exception as e:
                 log.debug(f"生成图片预览失败：{type(e).__name__}")
                 urls = []
-        details.append({"desc": str(desc or "").strip(), "urls": urls})
+        details.append({"desc": str(desc or "").strip(), "urls": urls,
+                        "sticker": bool(sticker)})
     return details
 
 
@@ -727,7 +759,8 @@ async def enrich(bot, conn, ev) -> None:
             item["display_desc"] = f"【图{idx}】{desc}" if total > 1 and desc else desc
             ev.image_items.append({"idx": idx, "desc": item["display_desc"],
                                    "source": source, "data_url": item["data_url"],
-                                   "from": item["from"], "self": item["self"]})
+                                   "from": item["from"], "self": item["self"],
+                                   "sticker": bool(item.get("sticker"))})
 
     own_urls = [url for item in own_images for url in item["urls"] if url]
     if own_urls:

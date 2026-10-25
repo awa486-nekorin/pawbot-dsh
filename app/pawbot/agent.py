@@ -474,15 +474,21 @@ class Agent:
 
             own_raw = bool(getattr(ev, "image_data", None))
             own_desc = _join_desc(own_items)
+            own_sticker = bool(own_items) and all(it.get("sticker") for it in own_items)
             if own_desc or own_raw:
-                if own_desc:
-                    bits.append(f"（这条消息的图是 {sender} 发的，附了一段尽可能详细的转述：「{own_desc}」"
-                                + ("；原图也一并发给你了：先自己把原图和转述对着看一遍，以原图为准，"
-                                   "转述只当辅助，别把转述里没有的细节当成看到了。" if own_raw else "")
-                                + "）")
+                if own_sticker and own_desc:
+                    bits.append(f"（这条是 {sender} 发的表情包。它的意思：「{own_desc}」。"
+                                "你只要领会这个意思、顺着情绪接话就行："
+                                "**不要描述画面，也不要把这个标签念出来**，更别说「你发了个表情包」。）")
+                elif own_desc:
+                    bits.append(f"（这条消息的图是 {sender} 发的，附了一段转述：「{own_desc}」"
+                                + ("；原图也一并发给你了：以原图为准，转述只当辅助。" if own_raw else "")
+                                + " 转述是给你自己理解用的："
+                                  "**除非对方问你这张图是什么，否则不要在回复里描述图、也不要复述转述**，"
+                                  "知道了就直接接着聊。）")
                 else:
                     bits.append(f"（这条消息的图是 {sender} 发的，原图已经一并发给你了：自己看原图，"
-                                "转述没出来，别假装看到的是别的东西。）")
+                                "转述没出来，别假装看到的是别的东西。看懂了就接着聊，别主动描述图。）")
 
             quote_raw = bool(getattr(ev, "quote_image_data", None))
             quote_desc = _join_desc(quote_items)
@@ -511,10 +517,9 @@ class Agent:
             img = getattr(ev, "image_desc", "")
             raw_imgs = getattr(ev, "image_data", None) or []
             if img:
-                bits.append(f"（这条消息的图，附了一段尽可能详细的转述：「{img}」"
-                            + ("原图也一并发给你了：先自己把原图和转述对着看一遍，以原图为准，"
-                               "转述只当辅助，别把转述里没有的细节当成看到了。" if raw_imgs else "")
-                            + "）")
+                bits.append(f"（这条消息的图，附了一段转述：「{img}」"
+                            + ("原图也一并发给你了：以原图为准，转述只当辅助。" if raw_imgs else "")
+                            + " 转述只是给你自己理解用的，除非对方问图里是什么，不要复述。）")
             elif raw_imgs:
                 bits.append("（这条消息带图，原图已经一并发给你了：自己看原图，"
                             "转述没出来，别假装看到的是别的东西。）")

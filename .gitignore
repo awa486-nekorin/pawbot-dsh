@@ -32,3 +32,8 @@ app/**/__pycache__/
 app/.venv/
 *.pyc
 app/data/napcat/
+# B 站刷站（bili_scroll）产物与凭证：只留程式，不留资料
+app/data/bili_notes/
+app/data/bili_scroll_seen.json
+app/pawbot/bili_mcp/bili_credential.json
+app/pawbot/bili_mcp/.venv/

@@ -156,6 +156,13 @@ class Bot:
         await self.server.start()
         await self.proactive.start()
         await self.reminder_service.start()
+        # 定时刷 B 站（tools.bili_scroll_times，如 12:40 / 20:00）；没配时间就自己退掉
+        try:
+            from . import bili_scroll as _bili_scroll
+            self._bili_scroll_task = asyncio.create_task(
+                _bili_scroll.scheduler(self), name="bili-scroll")
+        except Exception as e:
+            log.warn(f"B站定时刷启动失败：{type(e).__name__} {e}")
 
     async def _flush_store_loop(self):
         interval = max(0.1, float(self.config.get("store.flush_interval", 2.0) or 2.0))
@@ -168,6 +175,14 @@ class Bot:
 
     async def stop(self):
         # 部分测试用 Bot.__new__ 造壳，没走 __init__，这里容错一下
+        刷站 = getattr(self, "_bili_scroll_task", None)
+        if 刷站 is not None:
+            刷站.cancel()
+            try:
+                await 刷站
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bili_scroll_task = None
         reminder_service = getattr(self, "reminder_service", None)
         if reminder_service is not None:
             await reminder_service.stop()

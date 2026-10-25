@@ -335,6 +335,14 @@ def describe(segments: list[dict], api_key: str, base_url: str, model: str,
     return "".join(parts)
 
 
+STICKER_PROMPT = (
+    "这是一张聊天里的表情包 / 梗图。**不要描述画面内容**：不要说画了什么角色、什么颜色、"
+    "什么构图、有什么文字排版。只需要判断它表达什么意思或情绪。"
+    "输出格式固定为「表情包：X」，X 是一到三个词的语义标签（例如「无语」「在笑你」「敷衍」"
+    "「震惊」「委屈巴巴」）。如果它明显是在接某个具体的人或场面，最多再用半句话说明。"
+    "总共不超过 20 个字，不要客套，不要解释。"
+)
+
 GRID_PROMPT = (
     "这张图是把多张图片拼在一起的宫格，每格左上角有一个黄色序号。"
     "请按序号逐格转述，每格单独一段，并以「第1张：」「第2张：」这样的开头标出是第几张。"
@@ -348,8 +356,11 @@ GRID_PROMPT = (
 
 def see(raws: list[bytes], api_key: str, base_url: str, model: str,
         timeout: int = 30, effort: str = "", fallback: str = "",
-        fallback_timeout: int = 30, fallback_api_key: str = "") -> str:
+        fallback_timeout: int = 30, fallback_api_key: str = "",
+        mode: str = "") -> str:
     """一次看完一串图，返回纯描述文本（不带 [图片：] 包装）。
+
+    mode="sticker" 时改用 STICKER_PROMPT：只判断表情包表达什么意思，不描述画面内容。
 
     1 张：直接转述。
     多张：用 Pillow 拼成 3 列宫格、左上角标序号，只调一次模型，让它逐格转述；
@@ -360,7 +371,8 @@ def see(raws: list[bytes], api_key: str, base_url: str, model: str,
     if not raws or not api_key:
         return ""
 
-    digest = "".join(hashlib.sha1(r).hexdigest() for r in raws)
+    digest = (str(mode or "") + "|" +
+              "".join(hashlib.sha1(r).hexdigest() for r in raws))
     if digest in _cache:
         return _cache[digest]
 
@@ -369,8 +381,14 @@ def see(raws: list[bytes], api_key: str, base_url: str, model: str,
         if not shrunk:
             return ""
         b64 = base64.b64encode(shrunk[0]).decode()
-        prompt = PROMPT
-        budget = 900
+        if str(mode or "") == "sticker":
+            prompt = STICKER_PROMPT
+            # 思考型模型（deepseek-flash）先烧 reasoning：400 实测不够，
+            # 会白走两轮"翻倍重试"，直接给 900
+            budget = 900
+        else:
+            prompt = PROMPT
+            budget = 900
     else:
         grid = _grid_bytes(raws)
         if not grid:

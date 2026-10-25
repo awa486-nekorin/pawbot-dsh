@@ -68,6 +68,7 @@ class 假Bot:
 
 
 class 假Ctx:
+    is_group = True
     def __init__(self, uid="1000000002", gid="200000001"):
         self.session_id = "group_" + str(gid)
         self.user_id = uid

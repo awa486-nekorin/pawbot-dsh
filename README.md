@@ -205,3 +205,18 @@ PawBot 本体**已内附在 `app/`**，安装时不需要另外准备 Python 项
    且 `bili_watch` / `bili_watch_status` 只有一份。
 6. 移除旧的 `@local/pawbot-bili-watch` bundle（避免 bili_watch 注册两次）。
 7. 云服务器部署（NapCat、SESSDATA、端口）见 [DEPLOY.md](DEPLOY.md)。
+
+## 11. 服务器上的「自己刷 B 站」（bili_scroll）
+
+`app/pawbot/bili_scroll.py` 让 PawBot 自己刷站：搜/热门 → 去重 → **读字幕原文**（走内置的
+`app/pawbot/bili_mcp/`，即 [bilibili-mcp](https://github.com/adoresever/bilibili-mcp)，MIT）→ 判断值不值得看
+→ 每条写一份笔记到 `app/data/bili_notes/<标题>-<YYMMDD>.md`。
+
+- **可选依赖**：字幕要 `app/requirements-bili.txt`（`mcp<2` + `bilibili-api-python`）。不装也能刷，
+  只是没有字幕、笔记降级成标题+简介。
+- **凭据**：SESSDATA 从 `tools.bili_sessdata` / `bili.sessdata` 配置或 bili-watch 共享目录的
+  `credential.json` 读取，同步到 `app/pawbot/bili_mcp/bili_credential.json`。
+  ⚠️ 那个文件已在 `.gitignore` 里，**永远不要提交**。
+- **配置**：`app/data/config.json` 的 `tools.bili_scroll_*`（主题、每轮条数、最低播放量、时长上限、
+  笔记目录、定时时段 `bili_scroll_times`、报告发给谁）。
+- **工具**：`bili_scroll`（现在刷一轮）、`bili_notes`（看笔记）、`bili_action`（B 站写操作，需 `bili_jct`）。

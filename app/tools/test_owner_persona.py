@@ -30,7 +30,7 @@ class OwnerLineTests(unittest.TestCase):
 
     def test_single_owner_lists_tail_and_dad_role(self):
         line = self._persona(["1000000001"]).owner_line()
-        self.assertIn("6295", line)
+        self.assertIn("0001", line)
         self.assertIn("老爹", line)
         self.assertIn("生活费", line)
         self.assertIn("token", line)
@@ -40,8 +40,8 @@ class OwnerLineTests(unittest.TestCase):
 
     def test_multiple_owners_all_listed(self):
         line = self._persona(["1000000001", "1000000002"]).owner_line()
-        self.assertIn("6295", line)
-        self.assertIn("7770", line)
+        self.assertIn("0001", line)
+        self.assertIn("0002", line)
 
     def test_no_owner_ids_injects_nothing(self):
         self.assertEqual(self._persona([]).owner_line(), "")
@@ -50,7 +50,7 @@ class OwnerLineTests(unittest.TestCase):
     def test_build_includes_owner_line_when_present(self):
         out = self._persona(["1000000001"]).build(group_id=1, sender="阿明")
         self.assertIn("## 你的主人", out)
-        self.assertIn("6295", out)
+        self.assertIn("0001", out)
 
     def test_build_without_owner_has_no_owner_section(self):
         out = self._persona([]).build(group_id=1, sender="阿明")

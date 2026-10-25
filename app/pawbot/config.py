@@ -196,6 +196,21 @@ DEFAULT = {
         "bili_watch_dir": "pawbot-bili-watch-data",
         # 主人贴的 B 站 SESSDATA 凭证落点。留空 = 用 <bili_watch_dir>/credential.json。
         "bili_watch_credential_file": "",
+        # ---- 自己刷 B 站（整合自 @jojoman2024/dsh-bili-scroll）----
+        # 字幕走 bili_mcp（bilibili-api + SESSDATA），没凭证就只看标题/简介。
+        "bili_scroll_enabled": True,
+        "bili_scroll_topic": "科技 数码 生活 冷知识",  # 默认主题，她也能临时改
+        "bili_scroll_per_round": 3,     # 一轮最多产出几份笔记（1-6）
+        "bili_scroll_max_chars": 12000,  # 喂给模型判断的字幕上限
+        "bili_scroll_min_play": 5000,   # 播放量低于这个的候选直接不要
+        "bili_scroll_max_duration": 3600,  # 超过 1 小时的片跳过
+        "bili_scroll_notes_dir": "data/bili_notes",
+        # 每天定时刷几轮（HH:MM，24 小时制）。空数组 = 不定时，只在她/你要求时刷。
+        "bili_scroll_times": [],
+        "bili_scroll_report_to": "owner",   # owner / group / off
+        "bili_scroll_group": "",            # report_to=group 时发到哪个群
+        # B 站写操作（发评论/动态/投稿/私信）要的 CSRF token；只填 SESSDATA 只能读
+        "bili_jct": "",
         "search_base_url": "https://api.deepseek.com",
         # 实测：只有 pro 会真的发 web_search_call，flash 收下参数但不搜
         "search_model": "deepseek-v4-flash",  # 不用 v4-pro；实测 flash 在 Responses 上不真搜

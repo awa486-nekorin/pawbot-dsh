@@ -20,6 +20,7 @@ from . import message as msg
 from .log import log
 from . import bilibili
 from . import bili_watch
+from . import bili_scroll
 from . import perceive
 from . import reminders
 from . import spice
@@ -208,6 +209,58 @@ SCHEMAS: dict[str, dict] = {
                                         "服务端还会再核一遍原话，传错了也没用"},
         },
         [],
+    ),
+    "bili_scroll": _fn(
+        "bili_scroll",
+        "刷一轮 B 站：你自己去搜、读字幕判断值不值得看，值得的每条写一份笔记。"
+        "想知道最近 B 站有什么、想找点能聊的料、或主人让你「去刷刷 B 站」时用。"
+        "跑完回给你几条笔记的摘要和链接；挑一条跟人聊，或者 @ 主人说这个值得看。"
+        "一轮要十几秒到一分钟，别连着调两次。",
+        {
+            "topic": {"type": "string",
+                      "description": "想看什么方向（留空用默认主题）。比如「游戏 独立开发」「美食」"},
+            "want": {"type": "integer",
+                     "description": "这一轮想产出几份笔记（1-6，留空按配置）"},
+        },
+        [],
+    ),
+    "bili_notes": _fn(
+        "bili_notes",
+        "看刷 B 站攒下来的笔记：不给 name 就列最近几份，给了 name 就读那一份全文。"
+        "有人问「你最近看什么了」「那个视频讲了啥」时，先翻笔记再回答，别编。",
+        {
+            "name": {"type": "string",
+                     "description": "笔记文件名（列表里回给你的那个），不给就只列表"},
+            "limit": {"type": "integer", "description": "列几份，默认 8"},
+        },
+        [],
+    ),
+    "bili_action": _fn(
+        "bili_action",
+        "B 站全功能总入口：一个工具转发 25 个动作（搜索/详情/字幕/评论/弹幕/排行/"
+        "热门/热搜词/每周必看/UP 主页/投稿列表/收藏夹/未读/@与点赞/发评论/发动态/"
+        "发专栏/投稿视频/私信）。bili_scroll 是「刷一轮」，这个是「点哪打哪」。"
+        "写操作（reply/dynamic/opus/upload_video/send_message）要 bili_jct，没配会直接告诉你。",
+        {
+            "action": {"type": "string",
+                       "enum": bili_scroll.actions(),
+                       "description": "要做什么。search 搜、video_info 详情、subtitle 字幕原文、"
+                                      "comments 热评、danmaku 弹幕、hot 热门、rank 排行、"
+                                      "buzzwords 热搜词、weekly 每周必看、crawl 批量采集、"
+                                      "user_info/search_user/user_videos 看 UP、"
+                                      "favorites/favorite_content 收藏夹、"
+                                      "unread/received_replies/received_at 看消息、"
+                                      "reply 发评论、dynamic 发动态、opus 发专栏、"
+                                      "upload_video 投稿、send_message 私信"},
+            "args": {"type": "object",
+                     "description": "该动作的参数对象。search={keyword,num,order}、"
+                                    "video_info/subtitle/comments/danmaku={bvid}、"
+                                    "hot={pn,ps}、rank={category,day}、"
+                                    "user_videos={uid,pn,ps,order}、"
+                                    "reply={bvid,text,rpid}、dynamic={text,images}、"
+                                    "send_message={receiver_uid,text}。多传的会被忽略"},
+        },
+        ["action"],
     ),
     "post_qzone": _fn(
         "post_qzone",
@@ -411,6 +464,10 @@ class ToolBox:
         # 库是空的也留着 pick_sticker：它会去网上找一张存进库
         names.append("search_image")          # 免 key 也能用，不必再挑图源
         names.append("bili_video")            # B 站接口免登录
+        if self.bot.config.get("tools.bili_scroll_enabled", True):
+            names.append("bili_scroll")       # 自己刷一轮 B 站（搜+读字幕+写笔记）
+            names.append("bili_notes")        # 翻自己攒的笔记
+            names.append("bili_action")       # B 站全功能总入口（25 个动作）
         names.append("recall_last")           # 撤回自己上一条，不需要额外配置
         names.append("note_person")           # 记群友性格
         if getattr(self.bot, "memes", None) is not None:
@@ -748,6 +805,55 @@ class ToolBox:
         return (f"挑到一条：{bilibili.brief(v)}\n{tip}\n"
                 f"这条你还没看过内容，只知道标题，别假装看过；"
                 f"可以说「还没看，标题看着挺有意思」。"), segs
+
+    async def _t_bili_scroll(self, ctx, topic: str = "", want=None):
+        """刷一轮 B 站：搜 → 去重 → 读字幕 → 判断 → 写笔记。"""
+        try:
+            结果 = await bili_scroll.run_round(self.bot, topic=topic or "", want=want)
+        except Exception as e:
+            log.error(f"刷 B 站失败：{type(e).__name__} {e}")
+            return f"刷 B 站失败了：{type(e).__name__} {e}", []
+        if not 结果.get("ok"):
+            return f"这轮没刷成：{结果.get('reason') or '未知原因'}", []
+        笔记 = 结果.get("notes") or []
+        if not 笔记:
+            return ("这轮翻了一圈，没有值得单独写笔记的（候选 "
+                    f"{结果.get('candidates')} 条，跳过已看过的 {结果.get('skipped_seen')} 条）。"
+                    "别硬编内容。"), []
+        行 = [f"这轮看了 {结果.get('checked')} 条，挑出 {len(笔记)} 条值得的："]
+        for i, n in enumerate(笔记, 1):
+            行.append(f"{i}. {n['title']}（{n['author']}）\n   {n['gist']}\n   {n['url']}")
+            行.append(f"   笔记：{n['note']}")
+        行.append("要跟人聊就聊第几条；想 @ 主人就说清楚是哪个、为什么值得。别把四条都列出来。")
+        if not 结果.get("credential"):
+            行.append("（这次没拿到字幕，判断只靠标题和简介——说的时候要老实一点。）")
+        return "\n".join(行), []
+
+    async def _t_bili_action(self, ctx, action: str, args=None):
+        """B 站全功能总入口：把动作名 + 参数转给 vendored 的 bilibili-mcp。"""
+        结果 = await bili_scroll.action(self.bot, action,
+                                        args if isinstance(args, dict) else {})
+        if not 结果.get("ok"):
+            行 = [f"没成：{结果.get('error') or '未知原因'}"]
+            if 结果.get("hint"):
+                行.append(str(结果["hint"]))
+            return "\n".join(行), []
+        return json.dumps(结果.get("data"), ensure_ascii=False)[:6000], []
+
+    async def _t_bili_notes(self, ctx, name: str = "", limit: int = 8):
+        """列笔记 / 读某一篇。"""
+        if name:
+            正文 = bili_scroll.read_note(self.bot, name)
+            if not 正文:
+                return f"没找到叫「{name}」的笔记，先不填 name 列一下看看有哪些。", []
+            return 正文, []
+        笔记 = bili_scroll.recent_notes(self.bot, limit or 8)
+        if not 笔记:
+            return "还没攒下笔记。想有的话就刷一轮：bili_scroll。", []
+        行 = [f"最近 {len(笔记)} 份笔记："]
+        for n in 笔记:
+            行.append(f"- {n['name']}")
+        return "\n".join(行), []
 
     async def _t_speak(self, ctx, text: str):
         """把自己的声音合成成 QQ 语音，长了会分成连续几条。"""

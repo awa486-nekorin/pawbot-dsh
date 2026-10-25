@@ -126,7 +126,7 @@ class QuotedPlaceholderTests(unittest.IsolatedAsyncioTestCase):
             is_group=True, to_me=False, plain="就是这种", session_id="group_1",
             user_id=42, image_data=[], quoted_text="", quoted_from="",
         )
-        with patch.object(perceive, "_read_images", return_value=[b"a", b"b"]), \
+        with patch.object(perceive, "_image_bytes_tagged", return_value=[(b"a", False), (b"b", False)]), \
                 patch.object(perceive, "_see", return_value=("两只猫并排", [URL])):
             await perceive.enrich(self._bot(), conn, ev)
 
