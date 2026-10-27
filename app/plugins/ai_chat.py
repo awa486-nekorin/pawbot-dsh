@@ -19,6 +19,8 @@ import time
 
 from pawbot import tasks
 from pawbot import tts
+from pawbot import message as msg
+from pawbot.tools import commit_bili_delivery, prepare_bili_delivery
 from pawbot.log import log
 from pawbot.plugin import on_command, on_message
 from pawbot.style import cap_sentences, drop_trailing_question, polish
@@ -397,6 +399,9 @@ async def _reply_turn(ctx, text):
     _roll_reply_style(ctx, cfg)
     explain = is_explain_request(text)
     ctx.state["explain"] = explain
+    # 对方明确要表情包：让 pick_sticker 不受「随机低频」闸限制（被邀请 vs 自己顺手发）
+    if re.search(r"表情包|斗图|(?:发|来|整|搞).{0,4}表情|(?:发|来)张图", str(text or "")):
+        ctx.state["_sticker_requested"] = True
     ctx.state["length_target"] = roll_length(cfg, explain)
     # 对方点名要语音：这条无论如何都回语音（不受 auto_chance 限制）
     if tts.should_force_voice(cfg, text):
@@ -415,6 +420,11 @@ async def _reply_turn(ctx, text):
     except asyncio.TimeoutError:
         log.warn(f"AI 超过 {timeout:.0f}s 没完成，放弃这条并解锁：{key}")
         return
+    media = msg.normalize(media)
+    if not answer.strip() or answer.strip().casefold() == "<pass>":
+        # A selected video is not consent to share after the model declines.
+        # Preserve the existing image/sticker-only reaction behavior.
+        media, _ = prepare_bili_delivery(media, include=False)
     log.debug(f"AI 完成 {key} · {time.time() - t0:.1f}s · "
               f"{answer[:30]!r} · 媒体 {len(media)}")
 
@@ -466,6 +476,8 @@ async def _reply_turn(ctx, text):
         if capped != answer:
             log.debug(f"句数截到 {ceiling} 句 {key}：{answer[:30]!r} → {capped[:30]!r}")
             answer = capped
+    if not answer.strip():
+        media, _ = prepare_bili_delivery(media, include=False)
     if not answer and not media:
         log.debug(f"AI 回覆清理後為空：{key}")
         return
@@ -501,6 +513,7 @@ async def _reply_turn(ctx, text):
     payload = []
     if text_out:
         payload.append({"type": "text", "data": {"text": text_out}})
+    media, bili_pending = prepare_bili_delivery(media)
     payload.extend(media)
     if not payload:
         return
@@ -518,6 +531,9 @@ async def _reply_turn(ctx, text):
         # 这种情况话其实已经说出去了，必须算进「我说过的话」。
         delivered = bool(getattr(e, "delivered", False))
         log.error(("已发出但等不到回执：" if delivered else "发送失败：") + str(e))
+
+    if delivered and bili_pending:
+        commit_bili_delivery(bili_pending, replier.session_id)
 
     # 用户消息已经在 core 里全量入库了，这里只记自己说的。
     # 漏记一条的代价很大：模型下一句会以为自己没答过，于是回头再补一遍，

@@ -7,7 +7,17 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pawbot.style import polish
+from pawbot.style import polish as _polish
+
+
+def polish(text, *args, **kwargs):
+    """老测试默认关掉「语气词削减」，只测其它清理规则。
+
+    语气词削减有自己的测试（ToneTrimTests），别让 0.7 的哈希概率把
+    这些与语气词无关的断言弄成随机失败。
+    """
+    with patch("pawbot.style._configured_tone_trim", return_value=0.0):
+        return _polish(text, *args, **kwargs)
 
 
 class PolishTests(unittest.TestCase):
@@ -232,6 +242,42 @@ class BodyReactionCapTests(unittest.TestCase):
             self.assertEqual(polish("我脸红了。这题选 B。"), "这题选 B。")
             # 全是反应句时保留一句，别空
             self.assertEqual(polish("我脸红了。尾巴在摇。"), "我脸红了。")
+
+
+class ToneTrimTests(unittest.TestCase):
+    """语气词收敛：啊/嘛/呢/啦/呀/哦/哟 按比例削；吧/吗 不动。"""
+
+    def _trim(self, text, rate):
+        with patch("pawbot.style._configured_tone_trim", return_value=rate):
+            return _polish(text)
+
+    def test_rate_one_strips_trailing_particles(self):
+        self.assertEqual(self._trim("在呀 怎么啦", 1.0), "在 怎么")
+        self.assertEqual(self._trim("好呀 那我等你嘛", 1.0), "好 那我等你")
+        self.assertEqual(self._trim("这题确实没转过弯来呢", 1.0), "这题确实没转过弯来呢")  # 呢 当疑问语气保留
+        self.assertEqual(self._trim("好吧 那就这样啦~", 1.0), "好吧 那就这样~")
+
+    def test_keeps_ba_and_ma(self):
+        # 吧/吗 是疑问/商量语气，删了会改意思；ten 句里 ten 个都保留
+        self.assertEqual(self._trim("你连我都不认识了吗", 1.0), "你连我都不认识了吗")
+        self.assertEqual(self._trim("快去躺着吧", 1.0), "快去躺着吧")
+        self.assertEqual(self._trim("那你要不要来嘛", 1.0), "那你要不要来")
+
+    def test_protected_words_survive(self):
+        self.assertEqual(self._trim("干嘛突然摸头啊", 1.0), "干嘛突然摸头")
+        self.assertEqual(self._trim("哎呀 别闹呀", 1.0), "哎呀 别闹")
+
+    def test_rate_zero_is_noop(self):
+        for text in ("在呀", "好嘛", "这题呢", "好吧那就这样啦~"):
+            self.assertEqual(self._trim(text, 0.0), text)
+
+    def test_fractional_rate_keeps_some(self):
+        # 0.7 是哈希削，不保证哪句留；只断言「削了但没全削」「吧/吗 原样」
+        source = "在呀 好嘛 快去吧 这题呢"
+        out = self._trim(source, 0.7)
+        self.assertNotEqual(out, source)
+        self.assertIn("快去吧", out)
+        self.assertIn("这题", out)
 
 
 if __name__ == "__main__":

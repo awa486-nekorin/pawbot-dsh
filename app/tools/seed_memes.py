@@ -5,7 +5,7 @@
 每条都会先用 DeepSeek 官方搜索 + 萌娘百科查一次，确认能查到相关来源才写入；
 查不到的跳过并在末尾列出来，不硬编。重复执行不会清掉已有的 hits。
 
-    python tools/seed_memes.py
+    python tools/seed_memes.py --allow-network
 
 涉及真人（科比、蔡徐坤）的条目只写梗本身的出处和用法，不写侮辱性内容；
 地狱梗只用一句带过，并在 usage 里注明慎用。
@@ -352,6 +352,12 @@ def _pick_source(entry: dict, row: dict) -> str:
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="显式联网核对并导入梗库")
+    parser.add_argument("--allow-network", action="store_true", help="允许联网查询并写入知识库")
+    args = parser.parse_args()
+    if not args.allow_network:
+        parser.error("联网导入需要显式传入 --allow-network；尚未联网或写入")
     cfg = Config(os.path.join(BASE, "data", "config.json"))
     api_key = cfg.get("tools.search_api_key", "")
     book = MemeBook(os.path.join(BASE, "data", "memes.json"), cfg)
@@ -365,7 +371,7 @@ def main() -> int:
         except Exception as e:
             row["web_error"] = f"{type(e).__name__}: {e}"
         try:
-            row["moe"] = moegirl.lookup(entry["moe"], chars=800)
+            row["moe"] = moegirl.lookup(entry["moe"], chars=800, allow_network=True)
         except Exception as e:
             row["moe"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

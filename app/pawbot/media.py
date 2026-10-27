@@ -24,9 +24,9 @@ ALLOWED_ROOTS = (PROJECT_ROOT / "data" / "stickers",
 MAX_STICKER_BYTES = 5 * 1024 * 1024
 MARKER_RE = re.compile(r"\[(IMG|STICKER)\s*[:：]\s*((?:https?://|file:///)[^\]\r\n]+)\]", re.I)
 _DEFAULT_LEDGER = None
-# 配置缺失或写坏时的表情包节奏：发完下一轮就允许，且不是每轮必发。
-DEFAULT_STICKER_GAP = (1, 1)
-DEFAULT_STICKER_CHANCE = 0.95
+# 配置缺失或写坏时的表情包节奏：默认低频——隔 3~6 轮才重新有资格，到点也只有 12% 会真发。
+DEFAULT_STICKER_GAP = (3, 6)
+DEFAULT_STICKER_CHANCE = 0.12
 _FALLBACK_CONFIG = None
 _FALLBACK_LOADED = False
 
@@ -95,6 +95,8 @@ class MediaLedger:
         # 同一轮内可能被 tools / resolve / safety 多次询问，掷骰结果要一致，
         # 否则挑好的表情包会在发给模型之后又被判掉。
         self._rolls: dict = {}
+        # 情绪顶上来的那一轮：工具层直接放行（绕过间隔和概率），只对当前轮有效。
+        self._forced: dict = {}
         if self.path is None:
             return
         try:
@@ -212,13 +214,30 @@ class MediaLedger:
             self._rolls.pop(next(iter(self._rolls)))
         return allowed
 
+    def force_sticker(self, session) -> bool:
+        """本情绪轮直接放行：绕过间隔与概率，但只对**当前这一轮**有效。
+
+        工具层在「情绪强烈 / 兴奋 / 烦躁 / 亲昵」时调用（发癫不是任务，是情绪表达）。
+        同一轮 media.resolve() 还会再问一次 sticker_allowed，必须一致放行，
+        否则挑好的图会在发送层被悄悄丢掉；下一轮开始（turn+1）自动失效。
+        """
+        state = self._session(session)
+        key = str(session)
+        self._forced[key] = state["turn"]
+        self._rolls[key] = (state["turn"], True)
+        while len(self._forced) > 500:
+            self._forced.pop(next(iter(self._forced)))
+        return True
+
     def sticker_allowed(self, session) -> bool:
         """表情包节奏：间隔（media.sticker_gap）到了，再按概率（media.sticker_chance）掷骰。
 
-        默认 [1, 1] + 0.95：发完下一轮就重新有资格，几乎每条回复都能带一张，
-        但不是死板地每轮必发。每轮最多一张仍由 safety 层控制。
+        默认 [3, 6] + 0.12：多数回复不带图，隔几轮才轮到一次，到点也只有小概率真发。
+        情绪强烈时由 force_sticker() 单独放行（只放当前轮），每轮最多一张仍由工具层控制。
         """
         state = self._session(session)
+        if self._forced.get(str(session)) == state["turn"]:
+            return True
         if state["turn"] < int(state.get("next_sticker", 0) or 0):
             return False
         return self._sticker_now_allowed(str(session), state)
@@ -228,6 +247,7 @@ class MediaLedger:
         lo, hi = _sticker_gap(self.config)
         state["next_sticker"] = state["turn"] + random.randint(lo, hi)
         self._rolls.pop(str(session), None)
+        self._forced.pop(str(session), None)
         self._save()
 
 

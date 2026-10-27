@@ -3,7 +3,7 @@
  * ============================================================================
  * 設計目標（這一版整個重寫）：
  *   1. 所有看得到的欄位都有繁體中文標籤與「改了會怎樣」的說明。
- *   2. 設定頁不再把 200+ 個鍵平鋪：預設只顯示 73 個常用鍵，其餘 213 個
+ *   2. 設定頁不再把 200+ 個鍵平鋪：預設只顯示 73 個常用鍵，其餘 214 個
  *      收進「進階（原始 JSON）」；有中文標籤 / 原始 key / 說明全文搜尋。
  *   3. 字級、行高、間距、對比都照驗收規格（14px / 1.65、說明 12.5px、
  *      卡片 padding 14px 16px、卡片間 12px、每列上下 10px + 1px 分隔線）。
@@ -71,6 +71,7 @@ const COMMON = [
   ['reply.question_rate', '用问句收尾的概率', '每条回复允许用问句或追问收尾的概率，其余会被去掉。', ['speech', 'instant'], 'ratio'],
   ['reply.strip_ai_phrases', '去掉 AI 味固定句', '自动清掉「我认为／不是…而是…」这类很像 AI 的固定句式。', ['speech', 'instant'], 'switch'],
   ['reply.body_reaction_max', '自身反应句上限', '一整条回复最多留几句「脸红／尾巴」这类自身反应；0 代表全不留。', ['speech', 'instant'], 'number', { min: 0, max: 9, step: 1 }],
+  ['reply.tone_trim', '句尾语气词削减', '按比例削掉句末「啊／嘛／呢／啦／呀」这类语气词；「吧／吗」不动。0 = 全保留，1 = 全削。', ['speech', 'instant'], 'ratio'],
   ['reply.strip_filler_opener', '去掉「唔……」开场', '把「唔……」这种模板开场按内容抽掉一半，保留自然感。', ['speech', 'instant'], 'switch'],
   ['safety.enabled', '拟人延迟总开关', '关掉后她会立刻回话；开启才会有打字、反应与分条延迟。', ['speech', 'instant'], 'switch'],
   ['safety.typing_cps', '模拟打字速度', '每秒打几个字；数字越大，模拟打字时间越短。', ['speech', 'instant'], 'number', { min: 1, max: 30, step: 0.5 }],
@@ -103,7 +104,7 @@ const COMMON = [
   ['relations.enabled', '关系网背景', '把谁和谁互动多、群主/管理这些背景写进提示词。', ['speech', 'instant'], 'switch'],
 
   // ── 圖片與媒體 ────────────────────────────────────────────────────────────
-  ['media.sticker_chance', '表情包发送概率', '表情包间隔到了之后，实际决定要发的概率。', ['media', 'instant'], 'ratio'],
+  ['media.sticker_chance', '表情包发送概率', '表情包间隔到了之后，实际决定要发的概率（默认 12%：偶尔发，不再几乎每条都带）。', ['media', 'instant'], 'ratio'],
   ['persona.sticker_fetch', '缺图时自动找表情包', '表情包库没有贴合的图时，去公开图片搜索找一张存进库。', ['media', 'instant'], 'switch'],
   ['persona.sticker_anime_only', '只收二次元图', '自动抓图先过画风门槛，真人照片与照片合成不入库。', ['media', 'instant'], 'switch'],
   ['video.enabled', '看视频抽帧', 'QQ 视频段均匀抽几帧转述，让她真的能「看」视频。', ['media', 'instant'], 'switch'],
@@ -125,8 +126,8 @@ const COMMON = [
 
   // ── QQ 與服務 ────────────────────────────────────────────────────────────
   ['account.owner_ids', '主人 QQ 名单', '只有这些 QQ 号能命令她改资料或做敏感操作；留空等于没有主人。', ['napcat', 'instant'], 'json'],
-  ['qzone.enabled', 'QQ 空间功能', '允许她读取、发布与回应 QQ 空间说说。', ['napcat', 'instant'], 'switch'],
-  ['qzone.daily_limit', '空间每日发文上限', '每天最多发几条说说；要开启强制限额才会真的检查。', ['napcat', 'instant'], 'number', { min: 0, max: 100, step: 1 }],
+  ['qzone.enabled', 'QQ 空间功能', '允许主人在授权私聊读取空间；写操作还需配置主人名单并受每日上限约束。', ['napcat', 'instant'], 'switch'],
+  ['qzone.daily_limit', '空间每日写操作上限', '每天最多进行几次发布、编辑、删除或回复；必须是正整数。', ['napcat', 'instant'], 'number', { min: 1, max: null, step: 1 }],
   ['selfedit.enabled', '允许她修改自己人设', '开启后她能在群里自行调整自己的说话方式；默认关闭。', ['speech', 'instant'], 'switch'],
   ['server.port', 'NapCat 反向 WS 端口', 'NapCat 要连进来的 WebSocket 端口；改完必须重启，且两边要一致。', ['restart', 'napcat'], 'number', { min: 1, max: 65535, step: 1 }],
   ['webui.port', 'PawBot WebUI 端口', 'PawBot 自己的网页界面端口；改完必须重启 PawBot。', ['restart'], 'number', { min: 1, max: 65535, step: 1 }],
@@ -231,7 +232,13 @@ const ADVANCED = [
   ['persona.anime_check_model', '人设：画风检查模型', '自动抓图时判断是否二次元的模型。', ['media', 'instant'], 'text'],
   // media
   ['media.image_repeat_turns', '媒体：同图重发间隔', '同一张图隔几轮才能再发；太小会一直重复。', ['media', 'instant'], 'number'],
-  ['media.sticker_gap', '媒体：表情包间隔轮数', '发完表情包后至少隔几轮（区间）。', ['media', 'instant'], 'json'],
+  ['media.sticker_gap', '媒体：表情包间隔轮数', '发完表情包后至少隔几轮（区间）；默认 3~6 轮才轮到下一次。', ['media', 'instant'], 'json'],
+  ['media.sticker_force_intensity', '媒体：表情包情绪触发强度', '主导情绪强度达到这一级时，她可以无视随机概率主动发表情包（发癫/上头）。', ['media', 'instant'], 'select', { options: [['轻微', '轻微'], ['明显', '明显'], ['强烈', '强烈']] }],
+  ['media.sticker_force_dominant', '媒体：表情包情绪触发项', '这些主导情绪下也允许主动发（默认兴奋/烦躁/感动）。', ['media', 'instant'], 'json'],
+  ['media.sticker_vision', '媒体：表情包视觉描述', '收新图时用看图模型写画面描述（约 7~9 秒/张，异步不卡回复）；关掉就用标签兜底。', ['media', 'instant'], 'switch'],
+  ['media.sticker_vision_base', '媒体：表情描述接口地址', '生成表情描述用的 OpenAI 格式接口；留空 = togemini 网关。', ['media', 'instant'], 'text'],
+  ['media.sticker_vision_model', '媒体：表情描述模型', '写表情描述的看图模型；留空 = gemini-4-argon-medium。', ['media', 'instant'], 'text'],
+  ['media.sticker_vision_key', '媒体：表情描述密钥', '表情描述接口的 key；留空 = 从 DSH 凭证读 TOGEMINI_API_KEY。', ['media', 'instant'], 'secret'],
   // tools
   ['tools.time_budget', '工具：整轮时间预算', '一次问答的工具链最多跑几秒，到点就收口。', ['instant'], 'number'],
   ['tools.search_count', '搜索：返回几条', '官方搜索一次回几条结果。', ['instant'], 'number'],
@@ -239,6 +246,25 @@ const ADVANCED = [
   ['tools.bili_watch_enabled', 'B 站：外接看片插件', '启用「大肥鱼看 B 站」外接插件；关掉她只能看标题。', ['instant'], 'switch'],
   ['tools.bili_watch_dir', 'B 站：看片数据目录', '外接插件读写报告与凭证的文件夹。', ['instant'], 'text'],
   ['tools.bili_watch_credential_file', 'B 站：凭证文件路径', '主人提供的 B 站登录凭证文件；留空用默认。', ['instant'], 'text'],
+  ['tools.bili_scroll_enabled', 'B 站：自己刷片', '允许她自己搜片、读字幕、写笔记；关掉只能靠分享链接。', ['instant'], 'switch'],
+  ['tools.bili_scroll_topic', 'B 站：刷片主题', '自己刷片时默认搜什么方向，空格分隔多个主题。', ['instant'], 'text'],
+  ['tools.bili_scroll_per_round', 'B 站：一轮笔记数', '一次自己刷片最多写几份笔记，范围 1 到 6。', ['instant'], 'number', { min: 1, max: 6, step: 1 }],
+  ['tools.bili_scroll_max_chars', 'B 站：字幕字数上限', '喂给模型判断用的字幕最多多少字，超长会截断。', ['instant'], 'number'],
+  ['tools.bili_scroll_min_play', 'B 站：最低播放量', '播放量低于这个数的候选片直接跳过。', ['instant'], 'number'],
+  ['tools.bili_scroll_max_duration', 'B 站：最长时长', '超过这个秒数的片跳过，避免一轮刷太久。', ['instant'], 'number'],
+  ['tools.bili_scroll_notes_dir', 'B 站：笔记目录', '自己刷片的笔记写在这个文件夹，相对项目目录。', ['instant'], 'text'],
+  ['tools.bili_scroll_times', 'B 站：定时刷片时刻', '每天自动刷片的时间点列表，例如 09:00 与 21:30。', ['instant'], 'json'],
+  ['tools.bili_scroll_report_to', 'B 站：刷片结果发给谁', '刷完笔记发给主人、发到指定群，或完全不发。', ['instant'], 'select', { options: [['owner', '发给主人'], ['group', '发到指定群'], ['off', '不发送']] }],
+  ['tools.bili_scroll_group', 'B 站：刷片结果群号', '上一个设成「发到指定群」时，笔记发到这个群。', ['instant'], 'text'],
+  ['tools.bili_scroll_report_at', 'B 站：刷片时 @ 谁', '发到群里时要不要 @ 人：不 @、只 @ 主人，或 @ 全体成员。', ['instant'], 'select', { options: [['off', '不 @'], ['owner', '@ 主人'], ['all', '@ 全体成员']] }],
+  ['tools.bili_scroll_report_comment', 'B 站：贴完再补一句', '发完笔记清单后，再用她自己的语气接一句话；会多一次模型调用。', ['instant'], 'switch'],
+  ['tools.bili_jct', 'B 站：CSRF 令牌', 'B 站网页端 bili_jct，配合 SESSDATA 才能做需要登录的操作。', ['instant'], 'secret'],
+  ['tools.bili_post_enabled', 'B 站：自动发动态', '开启后她会按时间自己发 B 站动态；这是对外公开发布，需要先填好 bili_jct。', ['restart', 'napcat'], 'switch'],
+  ['tools.bili_post_times', 'B 站：发动态时刻', '每天自动发动态的时间点列表，例如 12:30；留空就完全不定时。', ['restart'], 'json'],
+  ['tools.bili_post_source', 'B 站：动态内容来源', '用最近刷到的片子笔记来写，还是按你指定的主题现写。', ['instant'], 'select', { options: [['scroll', '用刷片笔记'], ['topic', '按指定主题']] }],
+  ['tools.bili_post_topic', 'B 站：发动态主题', '内容来源选「按指定主题」时，让她围绕这个主题写一条。', ['instant'], 'text'],
+  ['tools.bili_post_daily_limit', 'B 站：每天最多发几条', '对外发布每天最多几条动态，必须正整数；到上限就不再发。', ['instant'], 'number', { min: 1, step: 1 }],
+  ['tools.bili_post_max_chars', 'B 站：动态字数上限', '一条动态最多多少字，超出会截断后再发。', ['instant'], 'number', { min: 20, step: 10 }],
   ['tools.search_base_url', '搜索：API 地址', '搜索服务的接口地址。', ['instant'], 'text'],
   ['tools.search_reasoning_effort', '搜索：思考强度', '搜索那次调用的思考强度 low/medium/high。', ['instant'], 'select', { options: [['', '服务端默认'], ['low', '低'], ['medium', '中'], ['high', '高']] }],
   ['tools.search_api_key', '搜索：API 密钥', '留空就借主模型的 key。', ['instant'], 'secret'],
@@ -290,8 +316,9 @@ const ADVANCED = [
   ['tts.cloud_format', '语音合成：音频格式', 'pcm 等输出格式。', ['instant'], 'text'],
   ['tts.cloud_sample_rate', '语音合成：采样率', '云端输出的采样率 Hz。', ['instant'], 'number'],
   // qzone
-  ['qzone.enforce_limits', 'QQ 空间：强制限额', '开启才检查主人名单与每日上限。', ['napcat', 'instant'], 'switch'],
-  ['qzone.owner_ids', 'QQ 空间：可发文主人', '只有这些 QQ 号能命令她发说说。', ['napcat', 'instant'], 'json'],
+  ['qzone.proactive_enabled', 'QQ 空间：主动操作', '允许主动引擎调用空间工具；还必须开启 QQ 空间功能。', ['napcat', 'instant'], 'switch'],
+  ['qzone.enforce_limits', 'QQ 空间：旧版限额开关', '旧版兼容字段；主人验证与每日写操作上限始终生效。', ['compat'], 'switch'],
+  ['qzone.owner_ids', 'QQ 空间：授权主人', '只有列出的 QQ 号能读取或写入空间；写操作还受每日上限约束。', ['napcat', 'instant'], 'json'],
   ['qzone.ugc_right', 'QQ 空间：可见范围', '1 代表公开，4 代表仅自己可见。', ['napcat', 'instant'], 'number', { min: 1, max: 4, step: 1 }],
   ['qzone.actions', 'QQ 空间：NapCat 动作名', '读、改、删、留言用的扩展动作名称。', ['napcat', 'instant'], 'json'],
   // selfedit
@@ -301,6 +328,8 @@ const ADVANCED = [
   // album
   ['album.dir', '图库：数据目录', '带描述的图库存放文件夹。', ['restart'], 'text'],
   // llm
+  ['llm.provider', '主模型：大脑走哪儿', '空＝直连下面的 API 地址（老行为）；dsh＝交给 DSH 进程里的 Agent，她能自己开电脑工具做事，且不需要填 API 密钥。', ['speech', 'instant'], 'select', { options: [['', '直连 API（旧）'], ['dsh', 'DSH 大脑（可用电脑工具）']] }],
+  ['llm.brain_timeout', '主模型：DSH 大脑超时', '大脑一轮最多等几秒；工具调用多时会被吃掉，建议 90 到 150。', ['instant'], 'number'],
   ['llm.base_url', '主模型：API 地址', '聊天模型的中转或官方端点。', ['instant'], 'text'],
   ['llm.temperature', '主模型：创造力', '越高越发散，0 最保守；太高会开始胡言乱语。', ['speech', 'instant'], 'number', { min: 0, max: 2, step: 0.1 }],
   ['llm.first_timeout', '主模型：首包超时', '主模型单次最多等几秒，超时立刻换备用；0 代表沿用等待上限。', ['instant'], 'number'],
@@ -332,6 +361,14 @@ const ADVANCED = [
   ['emotion.judge_api_key', '情绪：判官 API 密钥', '留空就用主模型 key。', ['instant'], 'secret'],
   ['emotion.judge_effort', '情绪：判官思考强度', 'low／medium／high。', ['instant'], 'select', { options: [['', '服务端默认'], ['low', '低'], ['medium', '中'], ['high', '高']] }],
   ['emotion.judge_timeout', '情绪：判官超时', '等情绪增减结果的秒数。', ['instant'], 'number'],
+  // 心情矩阵：类 JEV 决策模型（2026-10-27）
+  ['emotion.decider_enabled', '情绪：用决策模型', '开启后心情矩阵优先由概率化决策模型判断（失败再退回关键词/判官）。', ['instant'], 'switch'],
+  ['emotion.decider_model', '情绪：决策模型名', 'OpenRouter decisions 的模型，默认 perplexity/pplx-decider-v1.2。', ['instant'], 'text'],
+  ['emotion.decider_base_url', '情绪：决策接口', '默认 https://openrouter.ai/api/alpha/decisions。', ['instant'], 'text'],
+  ['emotion.decider_api_key', '情绪：决策模型 Key', '留空＝用环境变量 PAWBOT_DECIDER_KEY / ~/.pawbot/decider.key；遮罩值不会回显。', ['instant'], 'secret'],
+  ['emotion.decider_timeout', '情绪：决策超时', '单次决策请求超时秒数，默认 12。', ['instant'], 'number'],
+  ['emotion.decider_min_shift', '情绪：变化阈值', '「明显变化」概率低于此值就不更新，默认 0.5。', ['instant'], 'number', { min: 0, max: 1, step: 0.05 }],
+  ['emotion.decider_weight', '情绪：幅度倍率', '决策模型给出的情绪增减倍率，默认 1.0。', ['instant'], 'number', { min: 0.2, max: 3, step: 0.1 }],
   // whitelist
   ['whitelist.user_ids', '白名单：只理这些 QQ', '留空等于不限制；填了只回这些人的消息。', ['napcat', 'instant'], 'json'],
   // random_interject
@@ -384,6 +421,28 @@ const ADVANCED = [
   ['safety.typing_indicator', '延迟：正在输入提示', '发送前给协议端「正在输入」；不支持时会自动忽略。', ['speech', 'instant'], 'switch'],
   ['safety.typo_chance', '延迟：手滑概率', '偶尔打错一个字再补一句；0 代表关闭。', ['speech', 'instant'], 'ratio'],
   ['safety.typo_fix_delay', '延迟：更正间隔', '手滑到更正的间隔秒数（区间）。', ['speech', 'instant'], 'json'],
+  ['sync.enabled', '云端同步：总开关', '开启后可用 CLI/面板手动 push/pull；不开启也不会自动联网。', ['instant'], 'switch'],
+  ['sync.provider', '云端同步：方式', 'local 走本机/挂载盘；webdav 走坚果云/Nextcloud；http 走自建端点。', ['instant'], 'select', { options: [['local', '本机/挂载目录'], ['webdav', 'WebDAV（坚果云/Nextcloud）'], ['http', '自建 HTTP 端点']] }],
+  ['sync.url', '云端同步：地址', 'webdav 填目录 URL；http 填完整端点；local 填目录路径。', ['instant'], 'text'],
+  ['sync.username', '云端同步：用户名', 'WebDAV 的账号；local/http 可留空。', ['instant'], 'text'],
+  ['sync.password', '云端同步：密码/口令', 'WebDAV 密码；留空＝不改，遮罩值不会回显。', ['instant'], 'secret'],
+  ['sync.token', '云端同步：Token', '自建 HTTP 端点的 Bearer token；留空＝不改。', ['instant'], 'secret'],
+  ['sync.remote_dir', '云端同步：远端目录', 'WebDAV 下的子目录名；local 方式忽略。', ['instant'], 'text'],
+  ['sync.passphrase', '云端同步：加密口令', '非空才允许同步含 API key 的 config；口令丢失无法恢复。', ['instant'], 'secret'],
+  ['sync.include_persona', '云端同步：包含人设', '把 data/persona.md 打进包。', ['instant'], 'switch'],
+  ['sync.include_memory', '云端同步：包含记忆', '把记忆相关目录（mem/people/longmem/diary 等）打进包。', ['instant'], 'switch'],
+  ['sync.include_config', '云端同步：包含配置', '把 data/config.json 打进包（含密钥，必须设加密口令）。', ['instant'], 'switch'],
+  ['sync.include_stickers', '云端同步：包含表情包', '表情包图片体积大，默认不同步。', ['instant'], 'switch'],
+  ['sync.overwrite_config', '云端同步：拉取时覆盖配置', '默认关闭：只落地 config.synced.json；开启才会覆盖并先备份。', ['instant'], 'switch'],
+  ['sync.auto_pull_on_start', '云端同步：启动时拉取', 'PawBot 启动后后台拉一次；失败只记日志，不影响启动。', ['instant'], 'switch'],
+  ['sync.mode', '云端同步：同步方式', 'manual=只在 CLI/面板手动；realtime=后台近实时（本地变化防抖上传 + 远端定时拉取）。', ['instant'], 'select', { options: [['manual', '手动（默认）'], ['realtime', '近实时（自动）']] }],
+  ['sync.poll_sec', '云端同步：本地轮询秒数', '实时模式下多少秒检查一次本地文件；默认 2 秒。', ['instant'], 'number', { min: 1, max: 300, step: 1 }],
+  ['sync.debounce_sec', '云端同步：防抖秒数', '发现变化后再等几秒才上传，避免写一半；默认 3 秒。', ['instant'], 'number', { min: 1, max: 120, step: 1 }],
+  ['sync.remote_poll_sec', '云端同步：远端轮询秒数', '实时模式下多少秒看一次远端 manifest；默认 30 秒。', ['instant'], 'number', { min: 5, max: 3600, step: 5 }],
+  ['sync.conflict_policy', '云端同步：冲突策略', '两边都改过时：保留双份（默认）/ 本地优先 / 远端优先。', ['instant'], 'select', { options: [['keep_both', '保留双份（推荐）'], ['local', '本地优先'], ['remote', '远端优先']] }],
+  ['sync.first_run', '云端同步：首次遇到远端数据', '本机还没同步记录时发现远端有包：保留双份（默认）或直接拉取。', ['instant'], 'select', { options: [['keep_both', '保留双份（推荐）'], ['pull', '直接拉取']] }],
+  ['sync.last_push', '云端同步：上次上传', '运行时写回，不用手改。', ['instant'], 'text'],
+  ['sync.last_pull', '云端同步：上次拉取', '运行时写回，不用手改。', ['instant'], 'text'],
 ]
 
 const SECTION_LABELS = {
@@ -394,9 +453,27 @@ const SECTION_LABELS = {
   speech: '语音转写', video: '视频', tts: '语音合成', qzone: 'QQ 空间', selfedit: '自我编辑',
   album: '图库', llm: '主模型', judge: '评审模型', libido: '欲望', emotion: '情绪',
   whitelist: '白名单', random_interject: '随机插话', topic: '读空气', life: '生活',
-  proactive: '主动', events: '群事件', safety: '安全延迟',
+  proactive: '主动', events: '群事件', safety: '安全延迟', sync: '云端同步',
 }
 
+// 高级字段（按 config 原始 section）归到「服务分组」：服务视图里折叠在对应卡片下，
+// 避免「常用/高级两套分类」互相打架。
+const SECTION_GROUP = {
+  llm: 'model', judge: 'model', emotion: 'model',
+  chat: 'chat', reply: 'chat', safety: 'chat', store: 'chat',
+  proactive: 'proactive', random_interject: 'proactive', life: 'proactive',
+  topic: 'proactive', events: 'proactive', libido: 'proactive',
+  memory: 'memory', memes: 'memory', diary: 'memory', longmem: 'memory',
+  people: 'memory', relations: 'memory', hobbies: 'memory', reminders: 'memory',
+  media: 'media', persona: 'media', video: 'media', speech: 'media', tts: 'media',
+  album: 'media', qixi: 'media',
+  tools: 'bili', slang: 'bili',
+  account: 'qq', whitelist: 'qq', server: 'qq', webui: 'qq', bot: 'qq',
+  selfedit: 'qq', qzone: 'qq', spice: 'qq', sticker: 'qq',
+}
+function advancedGroupOf(item) {
+  return SECTION_GROUP[item.section] || 'qq'
+}
 const GROUPS = [
   { id: 'model', label: '模型与密钥', hint: '主模型、评审模型与密钥' },
   { id: 'chat', label: '聊天与回复', hint: '怎么回、回多长、延迟多久' },
@@ -453,7 +530,129 @@ const PANEL_META = {
   groups: GROUPS,
   impacts: IMPACTS,
   sectionLabels: SECTION_LABELS,
+  apiGroups: null,  // 下面定义后回填（保持 PANEL_META 单点导出）
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * API 統一管理頁：把散在「高級 → 36 個原始區段」裡的 key / endpoint / model
+ * 按「服務」聚成卡片。只換入口，不換語義（遮罩、diff、重啟徽章都沿用）。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const API_GROUPS = [
+  {
+    id: 'llm',
+    label: '主模型（聊天 + 看图）',
+    hint: '她回话和看图用的接口；key 留空＝沿用默认渠道',
+    keys: [
+      'llm.provider', 'llm.model', 'llm.api_key', 'llm.base_url',
+      'llm.reasoning_effort', 'llm.max_tokens', 'llm.timeout', 'llm.fallback_model',
+      'llm.vision_model', 'llm.vision_api_key', 'llm.vision_base_url',
+      'llm.vision_reasoning_effort', 'llm.vision_timeout', 'llm.vision_fallback_model',
+    ],
+  },
+  {
+    id: 'judge',
+    label: '评审 / 情绪判官',
+    hint: '情绪判读、画质评分用的模型；留空＝沿用主模型 key',
+    keys: [
+      'judge.enabled', 'judge.model', 'judge.api_key', 'judge.base_url',
+      'judge.reasoning_effort', 'judge.timeout',
+      'emotion.judge_model', 'emotion.judge_api_key', 'emotion.judge_base_url',
+      'emotion.judge_effort', 'emotion.judge_timeout',
+      'emotion.decider_enabled', 'emotion.decider_model', 'emotion.decider_base_url',
+      'emotion.decider_api_key', 'emotion.decider_timeout',
+      'emotion.decider_min_shift', 'emotion.decider_weight',
+    ],
+  },
+  {
+    id: 'search',
+    label: '联网搜索 / 图库',
+    hint: '搜索与公共图库的接口；图库 key 留空只走免 key 源',
+    keys: [
+      'tools.search_provider', 'tools.search_model', 'tools.search_api_key',
+      'tools.search_base_url', 'tools.search_timeout', 'tools.search_count',
+      'tools.search_reasoning_effort',
+      'tools.image_provider', 'tools.image_api_key', 'tools.image_custom_endpoint',
+      'tools.image_timeout',
+    ],
+  },
+  {
+    id: 'credentials',
+    label: 'Pixiv / B 站凭证',
+    hint: '登录态与 CSRF 令牌；这些是账号权限，别外传',
+    keys: [
+      'tools.pixiv_sessid', 'tools.pixiv_refresh_token', 'tools.pixiv_use_browser',
+      'tools.bili_jct', 'tools.bili_watch_credential_file',
+    ],
+  },
+  {
+    id: 'speech',
+    label: '语音（听 + 说）',
+    hint: '语音转写与语音合成的接口和 key',
+    keys: [
+      'speech.enabled', 'speech.api_key', 'speech.base_url', 'speech.model', 'speech.timeout',
+      'tts.enabled', 'tts.provider', 'tts.cloud_key', 'tts.cloud_url', 'tts.cloud_voice',
+      'tts.cloud_format', 'tts.url', 'tts.health_url', 'tts.timeout', 'tts.max_chars',
+    ],
+  },
+  {
+    id: 'slang',
+    label: '网络用语研究',
+    hint: '只在研究「现在网上怎么说话」时调用',
+    keys: [
+      'slang.base_url', 'slang.api_key', 'slang.model', 'slang.fallback_model',
+      'slang.max_tokens', 'slang.timeout',
+    ],
+  },
+  {
+    id: 'sticker',
+    label: '表情包描述（看图）',
+    hint: '收新表情包时生成画面描述用的接口；留空 = togemini 网关 + DSH 凭证',
+    keys: [
+      'media.sticker_vision', 'media.sticker_vision_base',
+      'media.sticker_vision_model', 'media.sticker_vision_key',
+    ],
+  },
+  {
+    id: 'sync',
+    label: '云端同步（共享人设/记忆/配置）',
+    hint: '把包传到自己的云；含密钥时必须设加密口令',
+    keys: [
+      'sync.enabled', 'sync.provider', 'sync.url', 'sync.username', 'sync.password',
+      'sync.token', 'sync.passphrase', 'sync.remote_dir',
+      'sync.include_persona', 'sync.include_memory', 'sync.include_config',
+      'sync.include_stickers', 'sync.overwrite_config', 'sync.auto_pull_on_start',
+      'sync.last_push', 'sync.last_pull',
+    ],
+  },
+  {
+    id: 'conn',
+    label: '连接与网页令牌',
+    hint: 'NapCat 连接令牌 / PawBot WebUI 登录令牌；改完要重启 PawBot',
+    keys: [
+      'server.access_token', 'server.host', 'server.port',
+      'webui.token', 'webui.host', 'webui.port',
+    ],
+  },
+]
+
+// API 页每张卡默认只露「要填的几项」；其余（超时/思考强度/备用模型等）折叠在「详细参数」里。
+const API_PRIMARY = {
+  llm: ['llm.provider', 'llm.model', 'llm.api_key', 'llm.base_url',
+    'llm.vision_model', 'llm.vision_api_key', 'llm.vision_base_url'],
+  judge: ['judge.enabled', 'judge.model', 'judge.api_key', 'judge.base_url'],
+  search: ['tools.search_provider', 'tools.search_model', 'tools.search_api_key',
+    'tools.search_base_url', 'tools.image_provider', 'tools.image_api_key'],
+  credentials: ['tools.pixiv_sessid', 'tools.pixiv_refresh_token', 'tools.bili_jct'],
+  speech: ['speech.enabled', 'speech.api_key', 'speech.base_url', 'speech.model',
+    'tts.enabled', 'tts.provider', 'tts.cloud_key', 'tts.cloud_url', 'tts.cloud_voice'],
+  sticker: ['media.sticker_vision', 'media.sticker_vision_base',
+    'media.sticker_vision_model', 'media.sticker_vision_key'],
+  conn: ['server.access_token', 'webui.token'],
+  sync: ['sync.enabled', 'sync.mode', 'sync.provider', 'sync.url', 'sync.username',
+    'sync.password', 'sync.token', 'sync.passphrase'],
+}
+PANEL_META.apiGroups = API_GROUPS
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * 共用小工具（純函數）
@@ -662,7 +861,7 @@ const CSS = `
   font-weight:600;box-shadow:var(--dsw-elevation-soft);}
 [data-pb-tabpanel][data-pb-hidden]{display:none;}
 
-[data-pb-root] :is(button,input,select,textarea):focus-visible{
+[data-pb-root] :is(button,input,select,textarea,[tabindex]):focus-visible{
   outline:none;box-shadow:0 0 0 var(--dsw-focus-ring-width) var(--dsw-focus-ring-color);
 }
 
@@ -720,11 +919,28 @@ const CSS = `
   line-height:1.6;color:var(--dsw-alias-label-secondary);}
 [data-pb-grow]{flex:1;min-width:0;}
 [data-pb-dirty]{color:var(--dsw-alias-state-warn-primary);}
+/* API 统一页：顶部状态条 + 底部吸附保存条 */
+[data-pb-api-strip]{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 12px;
+  border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md);
+  background:var(--dsw-alias-bg-layer-1);font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
+[data-pb-api-stat]{font-size:13.5px;font-weight:600;color:var(--dsw-alias-label-primary);}
+[data-pb-api-save]{position:sticky;bottom:0;z-index:6;display:flex;flex-wrap:wrap;gap:8px;
+  align-items:center;justify-content:flex-end;padding:10px 0;
+  background:var(--dsw-alias-bg-base);border-top:1px solid var(--dsw-alias-border-l1);}
+[data-pb-api-save] [data-pb-help]{margin-right:auto;}
 
 [data-pb-fields]{display:grid;grid-template-columns:minmax(0,1fr);gap:0;column-gap:28px;}
 [data-pb-field]{display:flex;flex-direction:column;gap:6px;padding:10px 0;
   border-bottom:1px solid var(--dsw-alias-border-l1);min-width:0;}
+[data-pb-field][data-dirty]{border-left:3px solid var(--dsw-alias-state-warn-primary);padding-left:8px;}
 [data-pb-field-head]{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+[data-pb-field-actions]{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+[data-pb-more]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;
+  border-top:1px dashed var(--dsw-alias-border-l1);}
+[data-pb-btn]:focus-visible,[data-pb-tab]:focus-visible,[data-pb-nav-btn]:focus-visible,
+[data-pb-input]:focus-visible,[data-pb-select]:focus-visible,[data-pb-textarea]:focus-visible,
+[data-pb-btn][data-undo]:focus-visible{outline:2px solid var(--dsw-alias-state-primary);outline-offset:2px;}[data-pb-card-side]{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+[data-pb-btn][data-undo]{font-size:12px;min-height:26px;padding:2px 8px;}
 [data-pb-field-label]{font-size:14px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary);}
 [data-pb-help]{font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
 [data-pb-help] code,[data-pb-keychip]{font-family:ui-monospace,Consolas,monospace;font-size:12px;
@@ -906,6 +1122,12 @@ const CSS = `
 
 @container (min-width:760px){
   [data-pb-fields]{grid-template-columns:repeat(2,minmax(0,1fr));}
+  [data-pb-api-strip]{flex-wrap:nowrap;}
+}
+@container (max-width:759px){
+  [data-pb-api-strip]{flex-direction:column;align-items:flex-start;}
+  [data-pb-api-save]{flex-wrap:wrap;justify-content:flex-start;}
+  [data-pb-btn]{min-height:40px;}
 }
 @container (max-width:759px){
   [data-pb-config]{grid-template-columns:minmax(0,1fr);}
@@ -944,12 +1166,14 @@ if (typeof window === 'undefined') {
           }))
       }
 
-      function Switch({ on, onChange, label, disabled }) {
+      function Switch({ on, onChange, label, labelId, controlId, disabled }) {
         return h('button', {
+          id: controlId,
           type: 'button',
           role: 'switch',
           'aria-checked': Boolean(on),
-          'aria-label': label || '开关',
+          'aria-labelledby': labelId,
+          'aria-label': labelId ? undefined : (label || '开关'),
           'data-pb-sw': '',
           'data-on': on ? '' : undefined,
           disabled: Boolean(disabled),
@@ -981,33 +1205,88 @@ if (typeof window === 'undefined') {
           sub ? h('div', { 'data-pb-kpi-sub': '' }, sub) : null)
       }
 
+      let confirmDialogSeq = 0
       function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel, danger, busy, onConfirm, onCancel }) {
+        const cardRef = useRef(null)
+        const previousFocusRef = useRef(null)
+        const cancelRef = useRef(null)
+        const confirmRef = useRef(null)
+        const callbacksRef = useRef({ onCancel, onConfirm, busy })
+        callbacksRef.current = { onCancel, onConfirm, busy }
+        const titleIdRef = useRef(null)
+        if (!titleIdRef.current) titleIdRef.current = 'pb-confirm-title-' + (++confirmDialogSeq)
         useEffect(() => {
           if (!open) return undefined
-          const onKey = (event) => {
-            if (event.key === 'Escape' && !busy) onCancel()
+          previousFocusRef.current = document.activeElement
+          const card = cardRef.current
+          const focusInside = () => {
+            const cancel = cancelRef.current
+            if (cancel && !cancel.disabled) cancel.focus()
+            else if (card) card.focus()
           }
-          window.addEventListener('keydown', onKey)
-          return () => window.removeEventListener('keydown', onKey)
-        }, [open, busy, onCancel])
+          focusInside()
+          const onFocus = (event) => {
+            if (card && !card.contains(event.target)) focusInside()
+          }
+          const onKey = (event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              if (!callbacksRef.current.busy) callbacksRef.current.onCancel()
+              return
+            }
+            if (event.key !== 'Tab' || !card) return
+            const focusable = Array.from(card.querySelectorAll(
+              'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+              .filter((element) => element.getClientRects().length > 0 && element.getAttribute('aria-hidden') !== 'true')
+            if (!focusable.length) {
+              event.preventDefault()
+              card.focus()
+              return
+            }
+            const first = focusable[0]
+            const last = focusable[focusable.length - 1]
+            const outsideSequence = !focusable.includes(document.activeElement)
+            if (event.shiftKey && (document.activeElement === first || outsideSequence)) {
+              event.preventDefault()
+              last.focus()
+            } else if (!event.shiftKey && (document.activeElement === last || outsideSequence)) {
+              event.preventDefault()
+              first.focus()
+            }
+          }
+          window.addEventListener('keydown', onKey, true)
+          document.addEventListener('focusin', onFocus)
+          return () => {
+            window.removeEventListener('keydown', onKey, true)
+            document.removeEventListener('focusin', onFocus)
+            const previous = previousFocusRef.current
+            if (previous && previous.isConnected && typeof previous.focus === 'function') previous.focus()
+            previousFocusRef.current = null
+          }
+        }, [open])
         if (!open) return null
         return h('div', { 'data-pb-modal': '', role: 'presentation' },
           h('div', {
+            ref: cardRef,
             'data-pb-modal-card': '',
             role: 'dialog',
             'aria-modal': 'true',
-            'aria-label': title,
+            'aria-labelledby': titleIdRef.current,
+            tabIndex: '-1',
           },
-          h('h2', { 'data-pb-modal-title': '' }, title),
+          h('h2', { id: titleIdRef.current, 'data-pb-modal-title': '' }, title),
           h('div', { 'data-pb-modal-body': '' }, children),
           h('div', { 'data-pb-modal-actions': '' },
             h('button', {
+              ref: cancelRef,
               'data-pb-btn': '',
               type: 'button',
               disabled: Boolean(busy),
               onClick: onCancel,
             }, cancelLabel || '取消'),
             h('button', {
+              ref: confirmRef,
               'data-pb-btn': '',
               'data-primary': danger ? undefined : '',
               'data-danger': danger ? '' : undefined,
@@ -1017,6 +1296,14 @@ if (typeof window === 'undefined') {
             }, busy ? '处理中…' : (confirmLabel || '确定')))))
       }
 
+      /** 保存失败时把焦点移到错误提示上，键盘/读屏用户不用自己找。 */
+      function NoticeRegion({ notice, children }) {
+        const ref = useRef(null)
+        useEffect(() => {
+          if (notice && notice.tone === 'err' && ref.current) ref.current.focus()
+        }, [notice])
+        return h('div', { ref, tabIndex: -1, 'data-pb-notice-region': '' }, children)
+      }
       function NoticeBlock({ notice, onGoStatus }) {
         if (!notice) return null
         const action = notice.restart && notice.restart.length && onGoStatus
@@ -1190,7 +1477,7 @@ if (typeof window === 'undefined') {
                   type: 'button',
                   disabled: Boolean(retrying),
                   onClick: onRetry,
-                }, retrying ? '重试中…' : '重试这一步'))
+                }, retrying ? '重新执行中…' : '重新执行启动流程'))
               : null))
       }
 
@@ -1459,6 +1746,7 @@ if (typeof window === 'undefined') {
         const [bootErr, setBootErr] = useState('')
         const [bootTick, setBootTick] = useState(0)
         const [bootArmed, setBootArmed] = useState(false)
+        const [bootConfirm, setBootConfirm] = useState(false)
         const [bootRequesting, setBootRequesting] = useState(false)
         const [napcat, setNapcat] = useState(null)
         const [napcatErr, setNapcatErr] = useState('')
@@ -1688,11 +1976,11 @@ if (typeof window === 'undefined') {
           h('div', { 'data-pb-hero': '' },
             h('div', { 'data-pb-hero-main': '' },
               h('h1', { 'data-pb-title': '' }, '一键把 PawBot 跑起来'),
-              h('p', { 'data-pb-sub': '' }, '装环境 → 连 NapCat → 启动 PawBot，三步自动完成'),
+              h('p', { 'data-pb-sub': '' }, '装环境 → 连 NapCat → 启动 PawBot → 检查就绪，四步自动完成'),
               h('div', { 'data-pb-help': '' }, bootBusy
                 ? '正在跑，进度会自动更新；这一步不用一直盯着。'
                 : bootFailed
-                  ? '有步骤失败了；修好原因后按右边的「一键启动」，或该步骤的「重试这一步」再跑一次。'
+                  ? '有步骤失败了；修好原因后按右边的「一键启动」重新执行，已完成的步骤会跳过。'
                   : '按右边的主按钮会从第 ① 步一路跑到第 ④ 步；也可以用下面各张卡的按钮单独重跑某一步。')),
             h('div', { 'data-pb-hero-actions': '' },
               h('button', {
@@ -1702,7 +1990,7 @@ if (typeof window === 'undefined') {
                 type: 'button',
                 disabled: bootBusy,
                 'aria-busy': bootBusy,
-                onClick: runBoot,
+                onClick: () => { if (!bootBusy) setBootConfirm(true) },
               }, bootBusy ? '执行中…' : '一键启动'))),
 
           actErr ? h(Notice, { tone: 'err' }, actErr) : null,
@@ -1736,8 +2024,22 @@ if (typeof window === 'undefined') {
               : null,
             bootSt && !bootDone && !bootBusy
               ? h('div', { 'data-pb-help': '' },
-                '目前没有在跑。按上面的「一键启动」会整套重跑；也可以用下面卡片上的按钮单独重跑一步。')
+                '目前没有在跑。按上面的「一键启动」会重新执行流程，已完成的步骤会跳过；下面卡片的按钮同样会重新执行启动流程。')
               : null),
+
+          h(ConfirmDialog, {
+            open: bootConfirm,
+            title: '开始「一键启动」？',
+            confirmLabel: '开始执行',
+            onCancel: () => setBootConfirm(false),
+            onConfirm: () => {
+              setBootConfirm(false)
+              runBoot()
+            },
+          },
+          h('p', null, '会按顺序执行：装 Python 依赖 → 检测/启动 NapCat → 启动 PawBot → 检查就绪。'),
+          h('p', null, '可能需要几分钟；期间不用重复点，进度会自动更新。'),
+          h('p', null, '已完成的步骤会跳过，不会重装依赖。')),
 
           h(SetupEnvCard, {
             st: setupSt,
@@ -1790,8 +2092,13 @@ if (typeof window === 'undefined') {
         const bits = []
         if (value.self_id !== undefined) bits.push('QQ ' + value.self_id)
         if (value.nickname) bits.push(String(value.nickname))
+        // 后端实际形状：{self_id, nickname, role, ready, online_sec, last_alive}
+        if (value.ready === true) bits.push('已就绪')
+        else if (value.ready === false) bits.push('未就绪')
         if (value.online === true) bits.push('在线')
         if (value.online === false) bits.push('离线')
+        const onlineSec = Number(value.online_sec)
+        if (Number.isFinite(onlineSec)) bits.push('在线 ' + fmtDuration(onlineSec))
         if (value.connected_at) bits.push('连上于 ' + (fmtTime(value.connected_at) || value.connected_at))
         return bits.length ? bits.join('・') : '一条连接'
       }
@@ -1844,23 +2151,10 @@ if (typeof window === 'undefined') {
         return bits.length ? bits.join('・') : '—'
       }
 
-      function todayWatchCount(pawbot) {
-        if (!pawbot || typeof pawbot !== 'object') return null
-        const candidates = [
-          pawbot.bili_today,
-          pawbot.today_watch,
-          pawbot.watch_today,
-          pawbot.stats && pawbot.stats.bili_today,
-          pawbot.stats && pawbot.stats.today_watch,
-        ]
-        for (const value of candidates) {
-          if (typeof value === 'number' && Number.isFinite(value)) return value
-        }
-        return null
-      }
-
       function StatusTab({ onGoConfig, active }) {
         const [st, setSt] = useState(null)
+        // Browser receipt time only: the endpoint does not promise a server sample timestamp.
+        const [lastSuccessAt, setLastSuccessAt] = useState(null)
         const [err, setErr] = useState('')
         const [notice, setNotice] = useState(null)
         const [showRaw, setShowRaw] = useState(false)
@@ -1883,6 +2177,7 @@ if (typeof window === 'undefined') {
               const data = await api('GET', '/status', undefined, ctrl.signal)
               if (alive) {
                 setSt(data)
+                setLastSuccessAt(Date.now())
                 setErr('')
               }
             } catch (error) {
@@ -1902,8 +2197,11 @@ if (typeof window === 'undefined') {
         const refresh = async () => {
           setRefreshing(true)
           try {
-            const data = await api('GET', '/status', undefined, ctrlRef.current && ctrlRef.current.signal)
+            const signal = ctrlRef.current && ctrlRef.current.signal
+            const data = await api('GET', '/status', undefined, signal)
+            if (signal && signal.aborted) return
             setSt(data)
+            setLastSuccessAt(Date.now())
             setErr('')
           } catch (error) {
             if (!isAbortError(error)) setErr(friendlyError(error))
@@ -1977,7 +2275,6 @@ if (typeof window === 'undefined') {
         const pawbot = (st && st.pawbot) || null
         const httpOk = Boolean(st && (st.http_ok !== undefined ? st.http_ok : st.webui_reachable))
         const connections = pawbot && Array.isArray(pawbot.connections) ? pawbot.connections : []
-        const watch = todayWatchCount(pawbot)
 
         const kpis = [
           {
@@ -1998,11 +2295,11 @@ if (typeof window === 'undefined') {
             tone: pawbot && connections.length === 0 ? 'warn' : undefined,
           },
         ]
-        if (watch !== null) {
+        if (pawbot && pawbot.sessions !== undefined) {
           kpis.push({
-            label: '今日看片',
-            value: String(watch),
-            sub: 'B 站外接插件回报',
+            label: '会话',
+            value: String(pawbot.sessions),
+            sub: '当前保留的群/私聊会话数',
           })
         }
 
@@ -2112,8 +2409,14 @@ if (typeof window === 'undefined') {
             onClick: refresh,
           }, '再试一次') }, '读不到状态：' + err) : null,
 
-          loading
-            ? h('div', { 'data-pb-card': '' }, h('div', { 'data-pb-help': '' }, '正在读取 PawBot 状态…'))
+          lastSuccessAt !== null ? h('div', { 'data-pb-help': '' },
+            err ? '下方为上次成功读取的状态，可能已过时。' : '最近成功读取：',
+            h('time', { dateTime: new Date(lastSuccessAt).toISOString() }, new Date(lastSuccessAt).toLocaleString()),
+            '（浏览器收到响应的时间，不代表服务器采样时间）') : null,
+
+          !st
+            ? h('div', { 'data-pb-card': '' }, h('div', { 'data-pb-help': '' },
+              loading ? '正在读取 PawBot 状态…' : '尚未成功读取状态，无法判断 PawBot 是否运行。'))
             : h(React.Fragment, null,
               h('div', { 'data-pb-kpis': '' }, kpis.map((kpi) => h(Kpi, { key: kpi.label, ...kpi }))),
 
@@ -2132,7 +2435,7 @@ if (typeof window === 'undefined') {
                   h('div', { 'data-pb-card-head': '' },
                     h('h2', { 'data-pb-card-title': '' }, '快捷操作'),
                     h('span', { 'data-pb-card-sub': '' }, '每颗按钮都写了后果；破坏性操作会再问一次')),
-                  h(NoticeBlock, { notice, onGoStatus: null }),
+                  h(NoticeRegion, { notice }, h(NoticeBlock, { notice, onGoStatus: null })),
 
                   h('div', { 'data-pb-action': '' },
                     h('div', { 'data-pb-action-title': '' }, '重启 PawBot'),
@@ -2171,8 +2474,9 @@ if (typeof window === 'undefined') {
                       }, sendOpen ? '收起测试消息表单' : '发测试消息')),
                     sendOpen ? h('div', { 'data-pb-form': '' },
                       h('div', { 'data-pb-form-row': '' },
-                        h('label', null, '目标（群号或 QQ 号）'),
+                        h('label', { htmlFor: 'pb-send-target' }, '目标（群号或 QQ 号）'),
                         h('input', {
+                          id: 'pb-send-target',
                           'data-pb-input': '',
                           type: 'text',
                           value: send.target,
@@ -2183,8 +2487,9 @@ if (typeof window === 'undefined') {
                         }),
                         h('div', { 'data-pb-help': '' }, '群聊填群号，私聊填对方 QQ 号；填错会送到别的地方。')),
                       h('div', { 'data-pb-form-row': '' },
-                        h('label', null, '消息内容'),
+                        h('label', { htmlFor: 'pb-send-message' }, '消息内容'),
                         h('textarea', {
+                          id: 'pb-send-message',
                           'data-pb-textarea': '',
                           rows: 4,
                           value: send.message,
@@ -2281,10 +2586,11 @@ if (typeof window === 'undefined') {
           else max = 100000
         }
         const step = item.step !== undefined ? item.step : (Number.isInteger(n) ? 1 : 0.01)
-        return { min, max, step }
+        // Explicit null removes the HTML bound; only undefined uses the heuristics above.
+        return { min: min === null ? undefined : min, max: max === null ? undefined : max, step }
       }
 
-      function NumberControl({ item, current, onChange, onClear }) {
+      function NumberControl({ item, current, onChange, onClear, controlId, labelId }) {
         const [text, setText] = useState(current === null || current === undefined ? '' : String(current))
         const focused = useRef(false)
         const bounds = boundsFor(item, current)
@@ -2306,6 +2612,8 @@ if (typeof window === 'undefined') {
           return true
         }
         return h('input', {
+          id: controlId,
+          'aria-labelledby': labelId,
           'data-pb-input': '',
           'data-pb-number': '',
           type: 'number',
@@ -2335,17 +2643,18 @@ if (typeof window === 'undefined') {
         })
       }
 
-      function RatioControl({ item, current, onChange }) {
+      function RatioControl({ item, current, onChange, controlId, labelId }) {
         const raw = Number(current)
         const value = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0
         return h('div', { 'data-pb-ratio': '' },
           h('input', {
+            id: controlId,
             type: 'range',
             min: 0,
             max: 1,
             step: 0.01,
             value,
-            'aria-label': item.label,
+            'aria-labelledby': labelId,
             onChange: (event) => onChange(Number(event.target.value)),
           }),
           h('span', { 'data-pb-ratio-val': '' }, (Math.round(value * 1000) / 10) + '%'))
@@ -2358,19 +2667,21 @@ if (typeof window === 'undefined') {
         })
       }
 
-      function SelectControl({ item, current, onChange }) {
+      function SelectControl({ item, current, onChange, controlId, labelId }) {
         const options = selectOptions(item.options)
         const value = current === null || current === undefined ? '' : String(current)
         const hasValue = options.some((option) => option.value === value)
         const list = hasValue ? options : [{ value, label: value === '' ? '（空值）' : '目前：' + value }].concat(options)
         return h('select', {
+          id: controlId,
+          'aria-labelledby': labelId,
           'data-pb-select': '',
           value,
           onChange: (event) => onChange(event.target.value),
         }, list.map((option) => h('option', { key: option.value, value: option.value }, option.label)))
       }
 
-      function JsonControl({ item, current, isDirty, onChange, onClear }) {
+      function JsonControl({ item, current, isDirty, onChange, onClear, controlId, labelId }) {
         const [open, setOpen] = useState(false)
         const [text, setText] = useState(() => JSON.stringify(current === undefined ? null : current, null, 2))
         const [err, setErr] = useState('')
@@ -2401,29 +2712,40 @@ if (typeof window === 'undefined') {
             onClear()
           }
         }
+        const editorId = controlId + '-editor'
+        const regionId = controlId + '-region'
+        const errorId = controlId + '-error'
         return h('div', { 'data-pb-control': '' },
           h('div', { 'data-pb-action-row': '' },
             h('span', { 'data-pb-help': '' }, summary),
             h('button', {
+              id: controlId,
               'data-pb-btn': '',
               type: 'button',
+              'aria-label': item.label + (open ? '：收起 JSON' : '：展开编辑 JSON'),
+              'aria-expanded': open,
+              'aria-controls': regionId,
               onClick: () => setOpen((value) => !value),
             }, open ? '收起 JSON' : '展开编辑 JSON')),
-          open ? h('div', null,
+          h('div', { id: regionId, hidden: !open }, open ? h(React.Fragment, null,
             h('textarea', {
+              id: editorId,
+              'aria-labelledby': labelId,
+              'aria-invalid': Boolean(err),
+              'aria-describedby': err ? errorId : undefined,
               'data-pb-code': '',
               rows: 6,
               value: text,
               spellCheck: false,
               onChange: (event) => edit(event.target.value),
             }),
-            err ? h(Notice, { tone: 'err' }, err) : h('div', { 'data-pb-help': '' },
+            err ? h('div', { id: errorId }, h(Notice, { tone: 'err' }, err)) : h('div', { 'data-pb-help': '' },
               isDirty ? '已应用，尚未保存；保存只会送这个键。' : '目前与服务器上的值相同。'),
             h('div', { 'data-pb-help': '' },
-              'PawBot 对对象只做深合并、对数组是整包替换；删掉对象里的键不会被移除。')) : null)
+              'PawBot 对对象只做深合并、对数组是整包替换；删掉对象里的键不会被移除。')) : null))
       }
 
-      function SecretControl({ item, masked, isDirty, draft, onChange, onClearSecret }) {
+      function SecretControl({ item, masked, isDirty, draft, onChange, onClearSecret, controlId, labelId }) {
         const [text, setText] = useState('')
         const [clearConfirm, setClearConfirm] = useState(false)
         // 明確的「清除」會把 dirty 設成空字串；空白輸入框本身仍然只是「不改」。
@@ -2435,7 +2757,7 @@ if (typeof window === 'undefined') {
             : h(Badge, { tone: 'muted' }, '未设置')
         return h('div', { 'data-pb-control': '' },
           h('div', { 'data-pb-secret-row': '' },
-            badge,
+            h('span', { role: 'status', 'aria-live': 'polite', 'data-pb-secret-badge': '' }, badge),
             h('span', { 'data-pb-help': '' },
               pendingClear ? '保存后会把这个值清空。' : '留空＝不改；输入新值才会覆盖'),
             h('button', {
@@ -2445,6 +2767,8 @@ if (typeof window === 'undefined') {
               onClick: () => setClearConfirm(true),
             }, '清除（设为空）')),
           h('input', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-input': '',
             type: 'password',
             value: text,
@@ -2475,6 +2799,8 @@ if (typeof window === 'undefined') {
 
       function Field({ item, value, masked, draft, isDirty, onChange, onClear, onClearSecret }) {
         const current = isDirty ? draft : value
+        const labelId = 'pb-field-label-' + encodeURIComponent(item.key)
+        const controlId = 'pb-field-control-' + encodeURIComponent(item.key)
         let control = null
 
         if (masked || item.control === 'secret') {
@@ -2485,23 +2811,28 @@ if (typeof window === 'undefined') {
             draft,
             onChange,
             onClearSecret,
+            controlId,
+            labelId,
           })
         } else if (item.control === 'switch' || typeof current === 'boolean') {
           control = h(Switch, {
             on: Boolean(current),
-            label: item.label,
+            labelId,
+            controlId,
             onChange: (next) => onChange(next),
           })
         } else if (item.control === 'ratio' || (item.control !== 'number' && typeof current === 'number' && current >= 0 && current <= 1 && !Number.isInteger(current))) {
-          control = h(RatioControl, { item, current, onChange })
+          control = h(RatioControl, { item, current, onChange, controlId, labelId })
         } else if (item.control === 'number' || typeof current === 'number') {
-          control = h(NumberControl, { item, current, onChange, onClear })
+          control = h(NumberControl, { item, current, onChange, onClear, controlId, labelId })
         } else if (item.control === 'select') {
-          control = h(SelectControl, { item, current, onChange })
+          control = h(SelectControl, { item, current, onChange, controlId, labelId })
         } else if (item.control === 'json' || Array.isArray(current) || isPlainObject(current)) {
-          control = h(JsonControl, { item, current, isDirty, onChange, onClear })
+          control = h(JsonControl, { item, current, isDirty, onChange, onClear, controlId, labelId })
         } else if (item.control === 'multiline' || (typeof current === 'string' && (current.length > 80 || current.indexOf('\n') >= 0))) {
           control = h('textarea', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-textarea': '',
             rows: 4,
             value: current === null || current === undefined ? '' : String(current),
@@ -2509,6 +2840,8 @@ if (typeof window === 'undefined') {
           })
         } else {
           control = h('input', {
+            id: controlId,
+            'aria-labelledby': labelId,
             'data-pb-input': '',
             type: 'text',
             value: current === null || current === undefined ? '' : String(current),
@@ -2518,10 +2851,18 @@ if (typeof window === 'undefined') {
           })
         }
 
-        return h('div', { 'data-pb-field': '', 'data-pb-field-key': item.key },
+        return h('div', { 'data-pb-field': '', 'data-pb-field-key': item.key, 'data-dirty': isDirty ? '' : undefined },
           h('div', { 'data-pb-field-head': '' },
-            h('label', { 'data-pb-field-label': '', title: item.key }, item.label),
-            h(Impacts, { codes: item.impact })),
+            h('label', { id: labelId, htmlFor: controlId, 'data-pb-field-label': '', title: item.key }, item.label),
+            h('div', { 'data-pb-field-actions': '' },
+              isDirty ? h('button', {
+                'data-pb-btn': '',
+                'data-undo': '',
+                type: 'button',
+                title: '撤销这个字段的改动',
+                onClick: onClear,
+              }, '撤销') : null,
+              h(Impacts, { codes: item.impact }))),
           h('div', { 'data-pb-control': '' }, control),
           h('div', { 'data-pb-help': '' },
             item.help,
@@ -2530,15 +2871,30 @@ if (typeof window === 'undefined') {
 
       /* ── 設定頁 ─────────────────────────────────────────────────────────── */
 
+      /** 有未保存改动时，刷新/关页前弹浏览器原生确认（panel 内切 tab 已有提示）。 */
+      function useUnsavedGuard(dirtyCount) {
+        useEffect(() => {
+          if (!dirtyCount) return undefined
+          const handler = (event) => {
+            event.preventDefault()
+            event.returnValue = ''
+            return ''
+          }
+          window.addEventListener('beforeunload', handler)
+          return () => window.removeEventListener('beforeunload', handler)
+        }, [dirtyCount])
+      }
       function ConfigTab({ onGoStatus, onDirtyChange }) {
         const [cfg, setCfg] = useState(null)
         const [maskedKeys, setMaskedKeys] = useState([])
         const [err, setErr] = useState('')
         const [loading, setLoading] = useState(true)
         const [dirty, setDirty] = useState({})
+        const [searchDraft, setSearchDraft] = useState('')
         const [search, setSearch] = useState('')
         const [showAdvanced, setShowAdvanced] = useState(false)
         const [activeGroup, setActiveGroup] = useState('model')
+        const [openAdv, setOpenAdv] = useState({})
         const [navCollapsed, setNavCollapsed] = useState(false)
         const [rev, setRev] = useState(0)
         const [rawOpen, setRawOpen] = useState(false)
@@ -2584,6 +2940,11 @@ if (typeof window === 'undefined') {
           if (!showAdvanced && activeGroup === 'advanced') setActiveGroup('model')
         }, [showAdvanced, activeGroup])
 
+        useEffect(() => {
+          const timer = window.setTimeout(() => setSearch(searchDraft), 200)
+          return () => window.clearTimeout(timer)
+        }, [searchDraft])
+
         const clearField = (key) => {
           setDirty((prev) => {
             if (!hasOwn(prev, key)) return prev
@@ -2626,6 +2987,7 @@ if (typeof window === 'undefined') {
 
         const dirtyKeys = Object.keys(dirty)
         const dirtyCount = dirtyKeys.length
+        useUnsavedGuard(dirtyCount)
 
         // 讓外層 Panel 知道目前有多少未儲存改動（切分頁時要提示）。
         useEffect(() => {
@@ -2767,14 +3129,31 @@ if (typeof window === 'undefined') {
               onClearSecret: () => clearSecretToEmpty(item.key),
             }))))
 
-        const renderGroupCard = (group, items) => h('section', { key: group.id, 'data-pb-card': '' },
-          h('div', { 'data-pb-card-head': '' },
-            h('h2', { 'data-pb-card-title': '' }, group.label),
-            h('span', { 'data-pb-card-sub': '' },
-              items.length + ' 项' + (q ? '符合' : '') + ' · ' + group.hint)),
-          items.length
-            ? renderFields(items)
-            : h('div', { 'data-pb-empty': '' }, h('div', { 'data-pb-help': '' }, '这个分组没有符合条件的设置。')))
+        const renderGroupCard = (group, items, advancedItems = []) => {
+          const open = Boolean(openAdv[group.id])
+          const total = items.length + advancedItems.length
+          return h('section', { key: group.id, 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, group.label),
+              h('span', { 'data-pb-card-sub': '' },
+                (q ? items.length + ' 项符合' : (items.length ? items.length + ' 项常用' : '0 项常用') +
+                  (advancedItems.length ? ' · ' + advancedItems.length + ' 项高级' : '')) + ' · ' + group.hint)),
+            items.length
+              ? renderFields(items)
+              : h('div', { 'data-pb-empty': '' }, h('div', { 'data-pb-help': '' }, '这个分组没有符合条件的设置。')),
+            advancedItems.length
+              ? h('div', { 'data-pb-more': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  'aria-expanded': open,
+                  onClick: () => setOpenAdv((prev) => ({ ...prev, [group.id]: !prev[group.id] })),
+                }, (open ? '收起高级参数（' : '展开高级参数（') + advancedItems.length + '）'),
+                h('span', { 'data-pb-help': '' },
+                  open ? '这些是原始区段里的参数，改完同样要点保存。' : '不影响日常使用，需要再展开。'))
+              : null,
+            open && advancedItems.length ? renderFields(advancedItems) : null)
+        }
 
         const renderSectionCard = (section, items) => h('section', { key: 'section-' + section, 'data-pb-card': '' },
           h('div', { 'data-pb-card-head': '' },
@@ -2798,6 +3177,8 @@ if (typeof window === 'undefined') {
             h('span', { 'data-pb-help': '' }, rawOpen ? '编辑后按下方按钮，会先验证 JSON 再让你确认。' : '展开后可直接编辑整份 JSON。')),
           rawOpen ? h('div', null,
             h('textarea', {
+              'aria-label': '原始 JSON（整份设置）',
+              'aria-invalid': Boolean(rawErr),
               'data-pb-code': '',
               rows: 18,
               value: rawText,
@@ -2839,49 +3220,33 @@ if (typeof window === 'undefined') {
           const commonGroups = GROUPS.filter((group) => group.id !== 'advanced')
             .map((group) => ({ group, items: commonMatches.filter((item) => item.group === group.id) }))
             .filter((entry) => entry.items.length)
-          const hiddenAdvancedNotice = !showAdvanced && advancedMatches.length
-            ? h(Notice, {
-              key: 'hidden-advanced',
-              tone: 'info',
-              action: h('button', {
-                'data-pb-btn': '',
-                type: 'button',
-                onClick: () => setShowAdvanced(true),
-              }, '显示 ' + advancedMatches.length + ' 个高级结果'),
-            }, '还有 ' + advancedMatches.length + ' 个符合的高级设置；它们收在「高级（原始 JSON）」里。')
-            : null
-          if (!commonMatches.length && !(showAdvanced && advancedMatches.length)) {
+          if (!commonMatches.length && !advancedMatches.length) {
             content.push(h('section', { key: 'no-result', 'data-pb-card': '' },
-              h('div', { 'data-pb-card-head': '' }, h('h2', { 'data-pb-card-title': '' },
-                advancedMatches.length ? '常用设置里没有符合的项目' : '找不到符合的设置')),
-              h('div', { 'data-pb-help': '' }, advancedMatches.length
-                ? '但高级设置里有 ' + advancedMatches.length + ' 项符合；按下面的按钮把它们显示出来。'
-                : '试试中文关键词（例如「记忆」「延迟」）或原始 key（例如 llm.model）。')))
-            if (hiddenAdvancedNotice) content.push(hiddenAdvancedNotice)
+              h('div', { 'data-pb-card-head': '' }, h('h2', { 'data-pb-card-title': '' }, '找不到符合的设置')),
+              h('div', { 'data-pb-help': '' },
+                '试试中文关键词（例如「记忆」「延迟」「密钥」）或原始 key（例如 llm.model）。')))
           } else {
+            // 搜索永远同时搜常用 + 高级，不再要求先开「显示高级项目」。
             content.push(h('div', { key: 'summary', 'data-pb-search-summary': '' },
-              '搜索「' + search.trim() + '」：' + commonMatches.length + ' 个常用' +
-              (showAdvanced ? '、' + advancedMatches.length + ' 个高级' : '') + '结果'))
+              '搜索「' + search.trim() + '」：' + commonMatches.length + ' 个常用、' +
+              advancedMatches.length + ' 个高级结果'))
             for (const entry of commonGroups) content.push(renderGroupCard(entry.group, entry.items))
-            if (showAdvanced) {
-              for (const entry of advancedSections) content.push(renderSectionCard(entry.section, entry.items))
-            } else if (hiddenAdvancedNotice) {
-              content.push(hiddenAdvancedNotice)
-            }
+            for (const entry of advancedSections) content.push(renderSectionCard(entry.section, entry.items))
           }
         } else if (activeGroup === 'advanced') {
           content.push(h(React.Fragment, { key: 'raw' }, rawCard()))
           for (const entry of advancedSections) content.push(renderSectionCard(entry.section, entry.items))
         } else {
           const group = GROUPS.find((entry) => entry.id === activeGroup) || GROUPS[0]
-          content.push(renderGroupCard(group, COMMON_META.filter((item) => item.group === group.id)))
+          const adv = ADVANCED_META.filter((item) => advancedGroupOf(item) === group.id)
+          content.push(renderGroupCard(group, COMMON_META.filter((item) => item.group === group.id), adv))
         }
 
         const head = h('div', { 'data-pb-top': '' },
           h('div', null,
             h('h1', { 'data-pb-title': '' }, 'PawBot 设置'),
             h('p', { 'data-pb-sub': '' },
-              '默认只显示常用设置；其余 ' + ADVANCED_META.length + ' 个原始键收在「高级」。改完按保存，会先列出中文标签让你确认。')))
+              '常用 ' + COMMON_META.length + ' 项按服务分组；搜索会同时搜常用与 ' + ADVANCED_META.length + ' 个高级键。改完按保存，会先列出中文标签让你确认。')))
 
         if (!cfg) {
           return h(React.Fragment, null, head,
@@ -2924,6 +3289,7 @@ if (typeof window === 'undefined') {
                 type: 'button',
                 onClick: () => {
                   setActiveGroup(item.id)
+                  setSearchDraft('')
                   setSearch('')
                 },
               }, h('span', null, item.label), h('span', { 'data-pb-nav-count': '' }, String(item.count)))))),
@@ -2934,15 +3300,18 @@ if (typeof window === 'undefined') {
                   'data-pb-input': '',
                   'data-pb-search': '',
                   type: 'search',
-                  value: search,
+                  value: searchDraft,
                   placeholder: '搜索中文标签、原始 key 或说明…',
                   'aria-label': '搜索设置',
-                  onChange: (event) => setSearch(event.target.value),
+                  onChange: (event) => setSearchDraft(event.target.value),
                 }),
-                search ? h('button', {
+                searchDraft || search ? h('button', {
                   'data-pb-btn': '',
                   type: 'button',
-                  onClick: () => setSearch(''),
+                  onClick: () => {
+                    setSearchDraft('')
+                    setSearch('')
+                  },
                 }, '清除') : null,
                 h('div', { 'data-pb-grow': '' }),
                 navCollapsed ? h('button', {
@@ -2980,7 +3349,7 @@ if (typeof window === 'undefined') {
                   ? h('span', { 'data-pb-dirty': '' }, dirtyCount + ' 项未保存')
                   : h('span', null, '只会送出改动过的键。'),
                 h('span', null, '保存前会列出中文标签让你确认。'))),
-            h(NoticeBlock, { notice, onGoStatus }),
+            h(NoticeRegion, { notice }, h(NoticeBlock, { notice, onGoStatus })),
             h('div', { 'data-pb-stack': '' }, content))),
 
           h(ConfirmDialog, {
@@ -3013,6 +3382,284 @@ if (typeof window === 'undefined') {
           },
           h('p', null, '表单里 ' + dirtyCount + ' 项未保存的改动会消失，无法恢复。'),
           h('p', null, '原始 JSON 编辑框也会回到上次读到的设置；服务器上的 config 不会被改动。')))
+      }
+
+      /* ── API 統一管理頁（把散落的 key / endpoint / model 收在一頁） ───────── */
+
+      function ApiTab({ onGoConfig, onGoStatus, onDirtyChange }) {
+        const [cfg, setCfg] = useState(null)
+        const [maskedKeys, setMaskedKeys] = useState([])
+        const [err, setErr] = useState('')
+        const [loading, setLoading] = useState(true)
+        const [dirty, setDirty] = useState({})
+        const [saving, setSaving] = useState(false)
+        const [notice, setNotice] = useState(null)
+        const [confirm, setConfirm] = useState(null)
+        const [rev, setRev] = useState(0)
+        const [openGroups, setOpenGroups] = useState({})
+        const ctrlRef = useRef(null)
+
+        const applyServerConfig = (config, masked) => {
+          const safe = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+          setCfg(safe)
+          setMaskedKeys(Array.isArray(masked) ? masked : [])
+          setDirty({})
+          setRev((value) => value + 1)
+        }
+
+        const load = async (signal) => {
+          setLoading(true)
+          setErr('')
+          try {
+            const result = await api('GET', '/config', undefined, signal)
+            applyServerConfig(result && result.config, result && result.masked_keys)
+          } catch (error) {
+            if (!isAbortError(error)) setErr(friendlyError(error))
+          } finally {
+            if (!(signal && signal.aborted)) setLoading(false)
+          }
+        }
+
+        useEffect(() => {
+          const ctrl = new AbortController()
+          ctrlRef.current = ctrl
+          load(ctrl.signal)
+          return () => ctrl.abort()
+        }, [])
+
+        const maskedSet = new Set(maskedKeys)
+        const isSecretField = (key) => {
+          const item = META_BY_KEY[key]
+          return maskedSet.has(key) || Boolean(item && item.control === 'secret')
+        }
+
+        const clearField = (key) => {
+          setDirty((prev) => {
+            if (!hasOwn(prev, key)) return prev
+            const next = { ...prev }
+            delete next[key]
+            return next
+          })
+        }
+
+        const setField = (key, value) => {
+          if (isSecretField(key) && (value === '' || value === MASK)) {
+            clearField(key)
+            return
+          }
+          const original = getPath(cfg, key)
+          if (deepEqual(value, original)) {
+            clearField(key)
+            return
+          }
+          setDirty((prev) => ({ ...prev, [key]: value }))
+        }
+
+        const clearSecretToEmpty = (key) => {
+          if (deepEqual(getPath(cfg, key), '')) {
+            clearField(key)
+            return
+          }
+          setDirty((prev) => ({ ...prev, [key]: '' }))
+        }
+
+        const dirtyKeys = Object.keys(dirty)
+        const dirtyCount = dirtyKeys.length
+        useUnsavedGuard(dirtyCount)
+
+        useEffect(() => {
+          if (typeof onDirtyChange === 'function') onDirtyChange(dirtyCount)
+        }, [dirtyCount, onDirtyChange])
+
+        const restartKeysOf = (keys) => keys.filter((key) => {
+          const item = META_BY_KEY[key]
+          return Boolean(item && item.impact.indexOf('restart') >= 0)
+        })
+
+        const requestSave = () => {
+          if (!dirtyCount) {
+            setNotice({ tone: 'info', text: '没有改动，不需要保存。' })
+            return
+          }
+          const patch = {}
+          for (const key of dirtyKeys) setPath(patch, key, dirty[key])
+          const stripped = stripMask(patch)
+          if (!stripped) {
+            setNotice({ tone: 'warn', text: '这次的改动只有遮罩值，没有可送出的内容。' })
+            return
+          }
+          setNotice(null)
+          setConfirm({
+            patch: stripped,
+            keys: dirtyKeys.slice(),
+            count: dirtyCount,
+            restart: restartKeysOf(dirtyKeys),
+          })
+        }
+
+        const performSave = async () => {
+          if (!confirm) return
+          const plan = confirm
+          setSaving(true)
+          try {
+            const result = await api('POST', '/config', { patch: plan.patch },
+              ctrlRef.current && ctrlRef.current.signal)
+            const next = result && result.config ? result.config : cfg
+            const nextMasked = result && Array.isArray(result.masked_keys) ? result.masked_keys : maskedKeys
+            setCfg(next)
+            setMaskedKeys(nextMasked)
+            setDirty({})
+            setRev((value) => value + 1)
+            setConfirm(null)
+            setNotice({
+              tone: 'good',
+              text: '已保存 ' + plan.count + ' 项改动。' + (plan.restart.length ? '其中 ' + plan.restart.length + ' 项要重启 PawBot 才生效。' : ''),
+              restart: plan.restart,
+            })
+          } catch (error) {
+            if (!isAbortError(error)) {
+              setNotice({ tone: 'err', text: '保存失败：' + friendlyError(error) + '；改动还留着，可以再试一次。' })
+              setConfirm(null)
+            }
+          } finally {
+            setSaving(false)
+          }
+        }
+
+        const discardAll = () => {
+          setDirty({})
+          setRev((value) => value + 1)
+          setNotice({ tone: 'info', text: '已放弃全部未保存改动。' })
+        }
+
+        const groups = API_GROUPS.map((group) => ({
+          ...group,
+          items: group.keys.map((key) => META_BY_KEY[key]).filter(Boolean),
+        })).filter((group) => group.items.length)
+
+        const secretKeys = groups.reduce((out, group) => out.concat(
+          group.items.filter((item) => item.control === 'secret').map((item) => item.key)), [])
+        const configured = secretKeys.filter((key) => maskedSet.has(key)).length
+
+        const renderFields = (items) => h('div', { 'data-pb-fields-wrap': '' },
+          h('div', { 'data-pb-fields': '' },
+            items.map((item) => h(Field, {
+              key: rev + ':' + item.key,
+              item,
+              value: getPath(cfg, item.key),
+              masked: maskedSet.has(item.key),
+              draft: dirty[item.key],
+              isDirty: hasOwn(dirty, item.key),
+              onChange: (value) => setField(item.key, value),
+              onClear: () => clearField(item.key),
+              onClearSecret: () => clearSecretToEmpty(item.key),
+            }))))
+
+        const head = h('div', { 'data-pb-top': '' },
+          h('div', null,
+            h('h1', { 'data-pb-title': '' }, 'API 与密钥'),
+            h('p', { 'data-pb-sub': '' },
+              '把模型、搜索、语音、Pixiv/B 站、连接令牌都收在这一页。留空＝不改；遮罩值「已设置」不会显示，也不会写回。')))
+
+        if (!cfg) {
+          return h(React.Fragment, null, head,
+            loading
+              ? h('div', { 'data-pb-card': '' }, h('div', { 'data-pb-help': '' }, '正在读取设置…'))
+              : h(React.Fragment, null,
+                h(Notice, {
+                  tone: 'err',
+                  action: h('button', {
+                    'data-pb-btn': '',
+                    type: 'button',
+                    onClick: () => load(ctrlRef.current && ctrlRef.current.signal),
+                  }, '再试一次'),
+                }, '读不到设置：' + (err || '未知错误') + '。'),
+                h('div', { 'data-pb-card': '' },
+                  h('div', { 'data-pb-help': '' }, '读取成功后才会出现表单。'))))
+        }
+
+        return h(React.Fragment, null,
+          head,
+          err ? h(Notice, { tone: 'warn' }, '上次读取失败：' + err) : null,
+          h('div', { 'data-pb-api-strip': '' },
+            h('span', { 'data-pb-api-stat': '' }, '密钥已配置 ' + configured + ' / ' + secretKeys.length),
+            h('span', { 'data-pb-help': '' }, '同一服务尽量填同一家的 key 与地址；只填 key 不填地址＝用默认渠道。'),
+            h('button', {
+              'data-pb-btn': '',
+              type: 'button',
+              onClick: onGoConfig,
+            }, '去「设置」看全部 ' + (COMMON_META.length + ADVANCED_META.length) + ' 项')),
+          h(NoticeRegion, { notice }, h(NoticeBlock, { notice, onGoStatus })),
+          h('div', { 'data-pb-stack': '' },
+            groups.map((group) => {
+              const secretItems = group.items.filter((item) => item.control === 'secret')
+              const configuredCount = secretItems.filter((item) => maskedSet.has(item.key)).length
+              const badge = !secretItems.length
+                ? null
+                : configuredCount === 0
+                  ? h(Badge, { tone: 'muted' }, '未配置')
+                  : configuredCount === secretItems.length
+                    ? h(Badge, { tone: 'good' }, '已配置')
+                    : h(Badge, { tone: 'warn' }, '部分配置 ' + configuredCount + '/' + secretItems.length)
+              const primaryKeys = new Set(API_PRIMARY[group.id] || group.keys)
+              const primary = group.items.filter((item) => primaryKeys.has(item.key))
+              const detail = group.items.filter((item) => !primaryKeys.has(item.key))
+              const detailOpen = Boolean(openGroups[group.id])
+              return h('section', { key: group.id, 'data-pb-card': '' },
+                h('div', { 'data-pb-card-head': '' },
+                  h('h2', { 'data-pb-card-title': '' }, group.label),
+                  h('div', { 'data-pb-card-side': '' },
+                    badge,
+                    h('span', { 'data-pb-card-sub': '' },
+                      primary.length + ' 项常用' + (detail.length ? ' · ' + detail.length + ' 项详细' : '') +
+                      ' · ' + group.hint))),
+                renderFields(primary),
+                detail.length
+                  ? h('div', { 'data-pb-more': '' },
+                    h('button', {
+                      'data-pb-btn': '',
+                      type: 'button',
+                      'aria-expanded': detailOpen,
+                      onClick: () => setOpenGroups((prev) => ({ ...prev, [group.id]: !prev[group.id] })),
+                    }, (detailOpen ? '收起详细参数（' : '展开详细参数（') + detail.length + '）'))
+                  : null,
+                detailOpen && detail.length ? renderFields(detail) : null)
+            })),
+          h('div', { 'data-pb-api-save': '' },
+            h('span', { 'data-pb-help': '' },
+              dirtyCount ? dirtyCount + ' 项未保存；保存只会送改动过的键。' : '没有未保存的改动。'),
+            h('button', {
+              'data-pb-btn': '',
+              'data-primary': '',
+              type: 'button',
+              disabled: !dirtyCount || saving,
+              onClick: requestSave,
+            }, saving ? '保存中…' : '保存 API 改动' + (dirtyCount ? '（' + dirtyCount + '）' : '')),
+            dirtyCount ? h('button', {
+              'data-pb-btn': '',
+              'data-danger': '',
+              type: 'button',
+              disabled: saving,
+              onClick: discardAll,
+            }, '放弃改动') : null),
+          h(ConfirmDialog, {
+            open: Boolean(confirm),
+            title: '这次会改动 ' + (confirm ? confirm.count : 0) + ' 项 API 设置',
+            busy: saving,
+            confirmLabel: '确定保存 ' + (confirm ? confirm.count : 0) + ' 项',
+            onCancel: () => { if (!saving) setConfirm(null) },
+            onConfirm: performSave,
+          },
+          h('p', null, '只会把下面这些键送回 PawBot；没动到的设置不会被覆盖。遮罩值不会被写回。'),
+          h('ul', { 'data-pb-changelist': '' },
+            (confirm ? confirm.keys : []).map((key) => h('li', { key },
+              h('b', null, (META_BY_KEY[key] && META_BY_KEY[key].label) || key),
+              ' ',
+              h('code', null, key)))),
+          confirm && confirm.restart && confirm.restart.length
+            ? h('p', null, '其中 ' + confirm.restart.length + ' 项需要重启 PawBot 才生效：' +
+              confirm.restart.map((key) => (META_BY_KEY[key] && META_BY_KEY[key].label) || key).join('、') + '。')
+            : h('p', null, '这些项目保存后立即生效。')))
       }
 
       /* ── 人設頁 ─────────────────────────────────────────────────────────── */
@@ -3118,6 +3765,7 @@ if (typeof window === 'undefined') {
               '还原：只把编辑框回到这次打开面板时读到的版本（' + originalCount + ' 字），不会动服务器上的文件，也不是还原到出厂值。'),
             h(NoticeBlock, { notice }),
             h('textarea', {
+              'aria-label': '人设内容',
               'data-pb-code': '',
               'data-pb-persona-editor': '',
               rows: 22,
@@ -3170,26 +3818,52 @@ if (typeof window === 'undefined') {
       const TABS = [
         ['setup', '启动'],
         ['status', '状态'],
+        ['api', 'API 密钥'],
         ['config', '设置'],
         ['persona', '人设'],
       ]
 
-      function Panel() {
+      function Panel({ initialTab }) {
         // 「启动」排第一且预设打开：新用户第一眼就看到一键引导。
-        const [tab, setTab] = useState('setup')
+        const startTab = initialTab || 'setup'
+        const [tab, setTab] = useState(startTab)
         // 只掛載使用者拜訪過的分頁；之後用 CSS 隱藏而不是卸載，避免切走再回來掉草稿。
-        const [mounted, setMounted] = useState({ setup: true, status: false, config: false, persona: false })
+        const [mounted, setMounted] = useState({ setup: true, status: false, api: false, config: false, persona: false, [startTab]: true })
         const [configDirty, setConfigDirty] = useState(0)
+        const [apiDirty, setApiDirty] = useState(0)
         const [tabNotice, setTabNotice] = useState('')
-        const selectTab = (id) => {
+        const tabRefs = useRef({})
+        const selectTab = (id, focus = true) => {
           if (id !== 'config' && tab === 'config' && configDirty > 0) {
             setTabNotice('设置页还有 ' + configDirty + ' 项未保存的改动；已切换标签页，改动还保留着，回到「设置」就能继续。')
-          } else if (id === 'config') {
+          } else if (id !== 'api' && tab === 'api' && apiDirty > 0) {
+            setTabNotice('API 页还有 ' + apiDirty + ' 项未保存的改动；已切换标签页，改动还保留着，回到「API 密钥」就能继续。')
+          } else if (id === 'config' || id === 'api') {
             setTabNotice('')
           }
           setTab(id)
           setMounted((prev) => (prev[id] ? prev : { ...prev, [id]: true }))
+          if (focus) requestAnimationFrame(() => tabRefs.current[id]?.focus())
         }
+        const onTabKeyDown = (event, index) => {
+          let next = index
+          if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % TABS.length
+          else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index + TABS.length - 1) % TABS.length
+          else if (event.key === 'Home') next = 0
+          else if (event.key === 'End') next = TABS.length - 1
+          else return
+          event.preventDefault()
+          selectTab(TABS[next][0], true)
+        }
+        const panelProps = (id) => ({
+          id: 'pb-panel-' + id,
+          role: 'tabpanel',
+          'aria-labelledby': 'pb-tab-' + id,
+          tabIndex: tab === id ? 0 : -1,
+          hidden: tab !== id,
+          'data-pb-tabpanel': '',
+          'data-pb-hidden': tab !== id ? '' : undefined,
+        })
         return h('div', { 'data-pb-root': '' },
           h('div', { 'data-pb-top': '' },
             h('div', null,
@@ -3198,15 +3872,20 @@ if (typeof window === 'undefined') {
               h('p', { 'data-pb-sub': '' },
                 '一键启动、看状态、改设置、写人设，都在这里完成；不用再开 PawBot 自己的 6185 网页。')),
             h('div', { 'data-pb-tabs': '', role: 'tablist', 'aria-label': 'PawBot 控制面板标签页' },
-              TABS.map(([id, label]) => h('button', {
+              TABS.map(([id, label], index) => h('button', {
                 key: id,
+                id: 'pb-tab-' + id,
+                ref: (node) => { tabRefs.current[id] = node },
                 type: 'button',
                 role: 'tab',
                 'aria-selected': tab === id,
+                'aria-controls': 'pb-panel-' + id,
+                tabIndex: tab === id ? 0 : -1,
                 'data-pb-tab': '',
                 'data-active': tab === id ? '' : undefined,
+                onKeyDown: (event) => onTabKeyDown(event, index),
                 onClick: () => selectTab(id),
-              }, label + (id === 'config' && configDirty > 0 ? '（' + configDirty + '）' : ''))))),
+              }, label + (id === 'config' && configDirty > 0 ? '（' + configDirty + '）' : '') + (id === 'api' && apiDirty > 0 ? '（' + apiDirty + '）' : ''))))),
           tabNotice
             ? h(Notice, {
               tone: 'warn',
@@ -3217,7 +3896,7 @@ if (typeof window === 'undefined') {
               }, '回到设置'),
             }, tabNotice)
             : null,
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'setup' ? '' : undefined },
+          h('div', panelProps('setup'),
             mounted.setup
               ? h(SetupTab, {
                 active: tab === 'setup',
@@ -3225,16 +3904,20 @@ if (typeof window === 'undefined') {
                 onGoConfig: () => selectTab('config'),
               })
               : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'status' ? '' : undefined },
+          h('div', panelProps('status'),
             mounted.status ? h(StatusTab, { active: tab === 'status', onGoConfig: () => selectTab('config') }) : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'config' ? '' : undefined },
+          h('div', panelProps('api'),
+            mounted.api ? h(ApiTab, { onGoConfig: () => selectTab('config'), onGoStatus: () => selectTab('status'), onDirtyChange: setApiDirty }) : null),
+          h('div', panelProps('config'),
             mounted.config ? h(ConfigTab, { onGoStatus: () => selectTab('status'), onDirtyChange: setConfigDirty }) : null),
-          h('div', { 'data-pb-tabpanel': '', 'data-pb-hidden': tab !== 'persona' ? '' : undefined },
+          h('div', panelProps('persona'),
             mounted.persona ? h(PersonaTab) : null))
       }
 
       return {
         inject: ['slots'],
+        // 只给离线渲染冒烟测试用（不参与 DSH 运行时）
+        __components: { Panel },
         apply(ctx) {
           let style = document.querySelector('style[data-plugin-css="@local/pawbot"]')
           if (!style) {

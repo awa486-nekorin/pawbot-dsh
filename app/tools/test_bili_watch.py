@@ -492,12 +492,10 @@ class ToolWiringTests(unittest.IsolatedAsyncioTestCase):
             joined = " ".join(str(s.get("data", {}).get("text", "")) for s in media)
             self.assertIn("看过的好视频", joined)
             self.assertIn("BVwatch", joined)
-            # 節流已更新
-            self.assertFalse(bilibili.share_allowed("group_1", 3600))
-            # shared.json 記下了 bvid
-            with open(os.path.join(tmp, "shared.json"), "r", encoding="utf-8") as f:
-                shared = json.load(f)
-            self.assertIn("BVwatch", shared)
+            # 挑到报告还不算分享；真正送达才会写 shared.json / 更新节流。
+            self.assertTrue(bilibili.share_allowed("group_1", 3600))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "shared.json")))
+            self.assertEqual(media[0]["_bili_share"]["bvid"], "BVwatch")
 
     async def test_requests_watch_and_stays_honest_without_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,8 +603,8 @@ class ToolWiringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data["kind"], "keyword")
             self.assertEqual(data["value"], "猫咪")
 
-    async def test_title_only_path_marks_shared(self):
-        # P2-7：只看标题也发出去的片，也要进 shared.json（插件只认这份档）
+    async def test_title_only_path_defers_shared_until_delivery(self):
+        # 只看标题也要等实际送达，挑到候选时不能写 shared.json。
         with tempfile.TemporaryDirectory() as tmp:
             box = ToolBox(self.make_bot(tmp))
             ctx = SimpleNamespace(session_id="group_1")
@@ -615,10 +613,9 @@ class ToolWiringTests(unittest.IsolatedAsyncioTestCase):
                      "author": "UP", "play": 100, "tname": "科技", "pic": ""}]
             with patch.object(bilibili, "pick_lively", return_value=fake):
                 text, media = await box._t_bili_video(ctx, "")
-            with open(os.path.join(tmp, "shared.json"), "r", encoding="utf-8") as f:
-                shared = json.load(f)
-            self.assertIn("BVhot", shared)
-            self.assertEqual(shared["BVhot"]["session"], "group_1")
+            self.assertFalse(os.path.exists(os.path.join(tmp, "shared.json")))
+            self.assertTrue(bilibili.share_allowed("group_1", 3600))
+            self.assertEqual(media[0]["_bili_share"]["bvid"], "BVhot")
 
     async def test_days_and_order_go_into_extra(self):
         with tempfile.TemporaryDirectory() as tmp:

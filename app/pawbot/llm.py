@@ -115,9 +115,113 @@ class _Transient(Exception):
 class LLMClient:
     def __init__(self, config):
         self.config = config
+        self._brain_warned = False
+        self._brain_fallback_warned = False
 
     def _cfg(self, key, default=None):
         return self.config.get(f"llm.{key}", default)
+
+    # ---------------------------------------------------------- DSH 大脑
+    def provider(self) -> str:
+        return str(self._cfg("provider", "") or "").strip().lower()
+
+    @staticmethod
+    def _text_of(content) -> str:
+        """OpenAI content 可能是 str，也可能是 [{type:text},…] 分段。"""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            out = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in ("text", "input_text"):
+                    out.append(str(part.get("text") or ""))
+            return "\n".join(x for x in out if x)
+        return ""
+
+    @classmethod
+    def _images_of(cls, content) -> int:
+        if not isinstance(content, list):
+            return 0
+        return sum(1 for part in content
+                   if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"))
+
+    def _brain_payload(self, messages: list[dict], tools: list[dict] | None,
+                       brain_conv: str, brain_meta: dict | None = None) -> dict:
+        """把 PawBot 的 OpenAI 形状 messages 折成「整段 system + 当前一条 user」。
+
+        PawBot 本来就把聊天历史渲染进 system 块（ctxwin.build_messages），
+        所以这里不丢信息；真出现 assistant 历史（极少）就单独补一段，避免复读。
+        """
+        systems: list[str] = []
+        assistant_lines: list[str] = []
+        user_text = ""
+        images = 0
+        for message in messages or []:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "system":
+                text = self._text_of(content).strip()
+                if text:
+                    systems.append(text)
+            elif role == "user":
+                text = self._text_of(content).strip()
+                if text:
+                    user_text = text
+                images += self._images_of(content)
+            elif role == "assistant":
+                text = self._text_of(content).strip()
+                if text:
+                    assistant_lines.append(text)
+        if assistant_lines:
+            systems.append("## 你这一轮前面已经说过的话（接着往下说，别重复）\n"
+                           + "\n".join(assistant_lines[-4:]))
+        if images:
+            systems.append(f"（对方这条消息里带了 {images} 张图；这一轮的大脑还看不了图，"
+                           "只按文字回应，不要假装看见了。）")
+        seconds = float(self._cfg("brain_timeout", 90) or 90)
+        # Python 侧比 Host 早 5 秒放弃/晚 5 秒收线：避免「Host 正常超时回包」被误判成连不上。
+        host_ms = int(max(5.0, min(595.0, seconds - 5.0)) * 1000)
+        payload = {
+            "conv": str(brain_conv),
+            "system": "\n\n".join(systems),
+            "user": user_text,
+            "tools": list(tools or []),
+            "context": dict(brain_meta or {}),
+            "options": {"timeoutMs": host_ms},
+        }
+        return payload
+
+    def _brain_message(self, messages: list[dict], tools: list[dict] | None,
+                       brain_conv: str, brain_meta: dict | None = None) -> dict:
+        from . import brain
+
+        if not brain.enabled():
+            raise LLMError(
+                "llm.provider=dsh，但 DSH 大脑桥没接通：Host 没注入 "
+                f"{brain.URL_ENV}/{brain.TOKEN_ENV}（插件没加载/没重启 PawBot？）",
+            )
+        seconds = float(self._cfg("brain_timeout", 90) or 90)
+        try:
+            data = brain.turn(self._brain_payload(messages, tools, brain_conv, brain_meta),
+                              timeout=seconds + 5)
+        except brain.BrainError as error:
+            brain.announce_failure(error)
+            raise LLMError(f"DSH 大脑这一轮失败（{error.code}）：{error}") from error
+        except Exception as error:  # 防御：绝不让大脑异常把整条回复链路炸掉
+            brain.announce_failure(error)
+            raise LLMError(f"DSH 大脑异常：{type(error).__name__}: {error}") from error
+
+        text = str(data.get("text") or "")
+        if data.get("degraded"):
+            log.warn(f"DSH 大脑降级运行：{data.get('degraded')}")
+        return {
+            "role": "assistant",
+            "content": text,
+            "media": data.get("media") or [],
+            "brain": {key: data.get(key) for key in (
+                "provider", "model", "session_id", "tools_used", "native_calls",
+                "stop_reason", "elapsed_ms", "preset_mounted", "degraded", "isolation")},
+        }
 
     def _payload(self, messages: list[dict], tools: list[dict] | None = None,
                  budget: int | None = None, model: str | None = None) -> dict:
@@ -171,12 +275,46 @@ class LLMClient:
         return content
 
     def _request_message(self, messages: list[dict],
-                         tools: list[dict] | None = None) -> dict:
+                         tools: list[dict] | None = None,
+                         brain_conv: str | None = None,
+                         brain_meta: dict | None = None) -> dict:
         """完整返回 assistant message，含可能的 tool_calls。
 
         主模型先用 llm.first_timeout 等着；超时或 429/5xx 时如果配了
         llm.fallback_model，就立刻用同一份 payload 换模型重发。
+
+        `llm.provider = "dsh"` 且有轮次上下文时，整轮交给 DSH 进程内的 Agent
+        （它自己跑工具循环，回最终文本）；后台调用（判官/日记/情绪）没有
+        `brain_conv`，继续走下面的直连 API 路径，不会被顺带改道。
         """
+        if self.provider() == "dsh" and brain_conv:
+            from . import brain
+
+            if not brain.enabled():
+                # 插件没注入 env（没装 Host 半边 / 没重启子进程）：
+                # 配了 api_key 才回退直连 API；否则**不能落到 mock**（mock 文案会发进群），
+                # 直接失败让上层按「这一轮说不了话」处理。
+                if str(self._cfg("api_key", "")).strip():
+                    if not self._brain_warned:
+                        log.warn("llm.provider=dsh，但 DSH 大脑桥没接通；已回退直连 API")
+                        self._brain_warned = True
+                else:
+                    raise LLMError(
+                        "llm.provider=dsh，但 DSH 大脑桥没接通，且没有可回退的 llm.api_key"
+                        "（检查宿主插件是否加载、PawBot 是否被插件重启过）",
+                    )
+            else:
+                try:
+                    return self._brain_message(messages, tools, brain_conv, brain_meta)
+                except LLMError as error:
+                    key = str(self._cfg("api_key", "")).strip()
+                    if not key:
+                        raise
+                    if not self._brain_fallback_warned:
+                        log.warn(f"DSH 大脑失败，已回退直连 API：{error}")
+                        self._brain_fallback_warned = True
+                    # 落到下面的直连 API 路径
+
         base = str(self._cfg("base_url", "")).rstrip("/")
         key = str(self._cfg("api_key", "")).strip()
         timeout = int(self._cfg("timeout", 60))
@@ -259,10 +397,18 @@ class LLMClient:
         return await loop.run_in_executor(None, self._request, messages)
 
     async def chat_message(self, messages: list[dict],
-                           tools: list[dict] | None = None) -> dict:
-        """要工具的那种调用：返回带 tool_calls 的完整 message。"""
+                           tools: list[dict] | None = None,
+                           brain_conv: str | None = None,
+                           brain_meta: dict | None = None) -> dict:
+        """要工具的那种调用：返回带 tool_calls 的完整 message。
+
+        `brain_conv` 非空且 llm.provider=dsh 时走 DSH 大脑；否则行为与以前完全一致。
+        """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._request_message, messages, tools)
+        if brain_conv is None:
+            return await loop.run_in_executor(None, self._request_message, messages, tools)
+        return await loop.run_in_executor(
+            None, self._request_message, messages, tools, brain_conv, brain_meta)
 
     def build_messages(self, user_text: str, history: list[dict],
                        system_prompt: str | None = None,
@@ -274,4 +420,14 @@ class LLMClient:
                 {"role": "user", "content": user_text}]
 
     async def test(self) -> str:
+        """面板「测试连通性」：provider=dsh 时测的是 DSH 大脑，不是外部 API。"""
+        if self.provider() == "dsh":
+            from . import brain
+            loop = asyncio.get_running_loop()
+            try:
+                data = await loop.run_in_executor(None, brain.selftest, "用一句话确认你在工作。")
+            except Exception as error:
+                raise LLMError(f"DSH 大脑自检失败：{error}") from error
+            model = f"{data.get('provider')}/{data.get('model')}"
+            return f"{data.get('text')}（来自 DSH 大脑 {model}）"
         return await self.chat([{"role": "user", "content": "用一句话确认你在工作。"}])

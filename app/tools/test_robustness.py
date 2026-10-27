@@ -154,17 +154,17 @@ class MoodViewTests(unittest.TestCase):
         mood = Mood().bind_emotion(emo)
         self.assertAlmostEqual(mood.score, 50.0, places=6)
 
-        emo.apply({"开心": 15, "兴奋": 15, "亲昵": 15, "得意": 15})
+        emo.apply({"开心": 15, "兴奋": 15, "感动": 15, "得意": 15})
         high = mood.score
         self.assertGreater(high, 53.0)
         self.assertEqual(mood.label, mood_label(high))
 
-        emo.apply({"开心": -15, "兴奋": -15, "亲昵": -15, "得意": -15})
+        emo.apply({"开心": -15, "兴奋": -15, "感动": -15, "得意": -15})
         self.assertLess(mood.score, high)
 
         chill = Emotion(None, None)
         low_mood = Mood().bind_emotion(chill)
-        chill.apply({"烦躁": 15, "低落": 15, "疲惫": 15})
+        chill.apply({"烦躁": 15, "低落": 15, "害羞": 15})
         self.assertLess(low_mood.score, 45.0)
 
     def test_bound_mood_is_read_only_and_does_not_save(self):

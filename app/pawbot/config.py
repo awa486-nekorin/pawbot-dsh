@@ -137,12 +137,14 @@ DEFAULT = {
         "length_weights": [5, 3, 2, 0, 0],  # 每条回复写 1~5 句的随机权重，按下标对应句数
         "length_enforce": True,         # 模型写超了就在发送前截到 length_max 句（代码/链接/长解释不截）
         "length_max": 3,                # 闲聊回复最多几句；内容多就该分句写，不是硬塞进一句
-        # ⭐ 2026-10-24：实测 133 条消息中位 56 字、56% 用了 ‖ 分条 —— 读起来像分段说明文。
-        #    真人 QQ 群聊多数是一条 10~30 字。上限压到 2 条（最多一个 ‖）。
-        "max_parts": 2,                 # 一条回复最多分成几条消息（‖ 的个数 = 条数 - 1）
+        # 2026-10-24：实测 133 条消息中位 56 字、56% 用了 ‖ 分条 —— 读起来像分段说明文。
+        #    真人 QQ 群聊多数是一条 10~30 字。v3 人设的口径是「多数时候一条说完，真要分条最多三条」，
+        #    所以默认与运行态（data/config.json = 3）和 style._DEFAULT_MAX_PARTS 对齐。
+        "max_parts": 3,                 # 一条回复最多分成几条消息（‖ 的个数 = 条数 - 1）
         "question_rate": 0.3,           # 每条回复允许用问句/追问收尾的概率，其余会被去掉
         "strip_ai_phrases": True,       # 去掉「我认/我在XX/不是…而是…」这类 AI 味固定句（确定性清理）
         "body_reaction_max": 1,         # 一整条回复（含 ‖ 分条）合计最多留几句「脸红/尾巴」自身反应；0=全不留
+        "tone_trim": 0.7,               # 句末语气词（啊/嘛/啦/呀/哦/哟）削减比例 0~1；呢/吧/吗不动
         "strip_filler_opener": True,     # 「唔……」当固定开场（实测占 56%）：按内容哈希抽掉一半，保留软糯但不模板
     },
     # 研究「現在中文網上怎麼說話」用的接口（只在 tools/research_slang.py 裡調，
@@ -165,10 +167,22 @@ DEFAULT = {
         "anime_check_model": "gemini-3.8-flash",  # 判画风用的看图模型（走 llm 中转）
     },
     # 表情包节奏：发完隔几轮能再发，以及到点后掷骰的概率。
+    # 默认低频——表情包是调味，不是每条回复都配一张。
     "media": {
         "image_repeat_turns": 30,   # 同一张图隔多少轮可以再发（0 附近会让搜图永远发不出去）
-        "sticker_gap": [1, 1],        # 发完表情包后至少隔几轮（随机 lo~hi；[1,1] = 下一轮就允许）
-        "sticker_chance": 0.95,       # 间隔到了再按这个概率决定发不发（接近必发，但保留偶尔不发的自然感）
+        "sticker_gap": [3, 6],        # 发完表情包后至少隔几轮（随机 lo~hi；[3,6] = 隔 3~6 轮才轮到下次）
+        "sticker_chance": 0.12,       # 间隔到了再按这个概率决定发不发（12%：偶尔才有，不刷屏）
+        # 情绪顶上来的那一轮可以绕过上面的随机闸（发癫/激动/撒娇是情绪表达，不是任务）。
+        # 触发条件（满足任意一条）：主导情绪强度 == sticker_force_intensity，
+        # 或者主导情绪属于 sticker_force_dominant 列表。
+        "sticker_force_intensity": "强烈",   # 轻微 / 明显 / 强烈
+        "sticker_force_dominant": ["兴奋", "烦躁", "感动"],  # json 数组，主导情绪命中就放行
+        # 收图时「尽可能」看一眼生成真实 desc / mood（走 OpenAI 兼容的看图通道）；
+        # 开关关着、或读不到 key，就用标签拼一句人话描述，不影响收图。
+        "sticker_vision": True,
+        "sticker_vision_base": "",    # 留空 = https://totokens.cc/v1
+        "sticker_vision_model": "",   # 留空 = gemini-4-argon-medium
+        "sticker_vision_key": "",     # 留空 = 从 DSH 凭证读 TOGEMINI_API_KEY
     },
     "account": {
         # 修改 QQ 资料 / 账号资料仅接受此处主人本次明确请求（原两处 account 段已合并）
@@ -209,8 +223,18 @@ DEFAULT = {
         "bili_scroll_times": [],
         "bili_scroll_report_to": "owner",   # owner / group / off
         "bili_scroll_group": "",            # report_to=group 时发到哪个群
+        "bili_scroll_report_at": "off",     # 群里汇报时 @ 谁：off / owner / all
+        "bili_scroll_report_comment": False,  # 贴完清单后再用她自己的语气补一句
         # B 站写操作（发评论/动态/投稿/私信）要的 CSRF token；只填 SESSDATA 只能读
         "bili_jct": "",
+        # ---- 自动发 B 站动态（对外发布，默认关）----
+        # 需要 bili_jct；每天有硬上限；内容来自刷片笔记或指定主题。
+        "bili_post_enabled": False,
+        "bili_post_daily_limit": 1,      # 每天最多发几条，必须正整数
+        "bili_post_times": [],           # 每天几点发（HH:MM），空 = 不定时
+        "bili_post_source": "scroll",    # scroll=用刷片笔记 / topic=按主题现写
+        "bili_post_topic": "",           # source=topic 时的主题
+        "bili_post_max_chars": 180,      # 一条动态最多多少字
         "search_base_url": "https://api.deepseek.com",
         # 实测：只有 pro 会真的发 web_search_call，flash 收下参数但不搜
         "search_model": "deepseek-v4-flash",  # 不用 v4-pro；实测 flash 在 Responses 上不真搜
@@ -271,27 +295,33 @@ DEFAULT = {
         "auto_max_chars": 0,         # 0 = 不限（保留兼容）
         "chunk_chars": 180,          # 一条语音最多念多少字，多出来接着发下一条
         "autostart": True,           # 启动时 /health 不通就拉起一次服务
+        # 云端 TTS（阿里云语音合成）备用通道；provider=local 时不用这些。
+        "provider": "local",         # local=本地飞鱼；cloud=阿里云
+        "cloud_url": "wss://convai-platform.aliyuncs.com/api-ws/v1/inference",
+        "cloud_key": "",             # 阿里云 AccessKey，留空等于不启用云端
+        "cloud_voice": "",           # 云端音色名
+        "cloud_format": "pcm",       # 云端返回的音频格式
+        "cloud_sample_rate": 24000,  # 云端采样率
         # 本地 CosyVoice 服务的启动命令，例如
         # ["/path/to/CosyVoice/.venv/bin/python", "/path/to/CosyVoice/tools/feiyu_server.py"]。
         # 默认留空：没有本地服务就不自动拉起，TTS 走云端或静默降级为打字。
         "server_cmd": [],
     },
     "qzone": {
-        "enabled": False,            # 默认关：发空间是对外发布，别误触
-        # ⚠ 两道闸默认不生效（跟「按要求移除」时的行为一致）。想收紧就把 enforce_limits 打开。
-        "enforce_limits": False,     # true 才校验 owner_ids 和 daily_limit
-        "owner_ids": [],             # 只有这些 QQ 号能命令它发说说
+        "enabled": False,            # 默认关：空间内容涉及私人信息和对外发布
+        "proactive_enabled": False,  # 自主引擎的空间操作另行默认关闭
+        "enforce_limits": False,     # 旧版兼容；主人验证与正每日额度始终生效
+        "owner_ids": [],             # 只有这些 QQ 号能读取或写入空间
         "ugc_right": 1,              # 1=公开，4=仅自己可见
-        "daily_limit": 3,            # 每天最多几条（enforce_limits 打开才生效；0=不限）
-        # 读/改/删/留言用的 NapCat 扩展动作名。默认值只是「先试这些」，
-        # 实际以启动后的探测结果为准；后端换了名字就在这里改，不用改代码。
+        "daily_limit": 3,            # 每天最多几次写操作，必须为正整数
+        # 读接口可配置；写接口没有默认猜测值，需显式确认后配置。
         "actions": {
             "list": "get_qzone_msg_list",
             "detail": "get_qzone_msg",
             "comments": "get_qzone_comments",
-            "delete": "delete_qzone_msg",
-            "edit": "update_qzone_msg",
-            "reply": "send_qzone_comment",
+            "delete": "",
+            "edit": "",
+            "reply": "",
         },
     },
     # 自主改提示词（自由度第一步）。默认关：开了她就能在群里自己调自己的说话方式。
@@ -306,6 +336,12 @@ DEFAULT = {
         "dir": "data/album",
     },
     "llm": {
+        # 大肥鱼的大脑走哪儿：
+        #   ""    = 直连下面 base_url 的 /chat/completions（老行为，默认，兼容所有中转）
+        #   "dsh" = 交给 DSH 进程里的 Agent（人设由宿主注入；能用 pwsh / 读写文件 / 联网等电脑工具）
+        # 切成 dsh 不需要 api_key；DSH 那边用宿主自己的模型凭据。
+        "provider": "",
+        "brain_timeout": 90,            # provider=dsh 时一轮最多等多少秒（工具多时会被吃掉）
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
         "model": "deepseek-chat",
@@ -357,11 +393,20 @@ DEFAULT = {
         "judge_api_key": "",          # 判官 key；留空 = 用 llm.api_key，别在这里再抄一份
         "judge_effort": "low",        # 判官的思考强度：low / medium / high
         "judge_timeout": 10,          # 等判官给情绪增减的上限（秒）；中转比官方慢
+        # 决策模型（类 JEV，概率化）：心情矩阵改由它判「要不要变/变什么/多强」
+        "decider_enabled": False,     # 开启后优先走决策模型，失败再退回关键词/判官
+        "decider_model": "perplexity/pplx-decider-v1.2",
+        "decider_base_url": "https://openrouter.ai/api/alpha/decisions",
+        "decider_api_key": "",        # 留空 = 环境变量 / ~/.dsh/.credentials.yaml 里的 key
+        "decider_timeout": 12,        # 单次决策请求超时（秒）
+        "decider_min_shift": 0.5,     # 「明显变化」概率低于这个值就不更新
+        "decider_weight": 1.0,        # 情绪幅度倍率（0.5=更含蓄，1.5=更大起大落）
     },
+    # 仅过滤 message 事件；两项白名单按 AND 组合，不把主人身份当作通行证。
     "whitelist": {
-        "group_ids": [],    # 空 = 不限制
-        "user_ids": [],
-        "blacklist_group_ids": [],
+        "group_ids": [],    # 空 = 不限制群；私聊不受此项限制
+        "user_ids": [],     # 空 = 不限制用户；非空时同时限制群聊和私聊
+        "blacklist_group_ids": [],  # 群消息命中即拒绝，白名单/主人均不能越过
     },
     "random_interject": {
         "enabled": False,
@@ -475,6 +520,30 @@ DEFAULT = {
         "typing_indicator": True,   # 发送前给协议端一个「正在输入」；协议端不支持时自动忽略
         "typo_chance": 0.01,        # 偶尔手滑一个字再补一句；0 = 关，被 @ 时再减半
         "typo_fix_delay": [1.2, 2.4],  # 手滑到更正之间的间隔（秒）
+    },
+    # 云端共享/同步：人设 + 记忆 + 配置（含 API key）打包上传到自己的云。
+    # 说明见 docs/CLOUD-SYNC.md；passphrase 为空时禁止上传 config.json。
+    "sync": {
+        "enabled": False,
+        "provider": "local",            # local / webdav / http
+        "url": "",                      # webdav: 目录 URL；http: 完整端点；local: 目录路径
+        "username": "", "password": "", "token": "",
+        "remote_dir": "pawbot-sync",    # webdav 下的子目录
+        "passphrase": "",
+        "include_persona": True,
+        "include_memory": True,
+        "include_config": True,
+        "include_stickers": False,
+        "overwrite_config": False,
+        "auto_pull_on_start": False,
+        # 实时（近实时）：manual=只在 CLI/面板操作；realtime=后台线程自动同步
+        "mode": "manual",                 # manual / realtime
+        "poll_sec": 2,                    # 本地多少秒看一次文件变化
+        "debounce_sec": 3,                # 变化后等几秒再传（避免写一半）
+        "remote_poll_sec": 30,            # 多少秒看一次远端 manifest
+        "conflict_policy": "keep_both",   # keep_both / local / remote
+        "first_run": "keep_both",        # keep_both / pull（首次发现远端数据时）
+        "last_push": "", "last_pull": "",
     },
 }
 

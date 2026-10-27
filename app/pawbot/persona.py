@@ -105,7 +105,7 @@ class Persona:
             if recent:
                 parts.append("## 你记得的事（最近的几条）\n" + recent)
 
-        parts.append("## 网络用词理解原则\n网络用词不是你的词库，只用来听懂别人；别学着说或刻意套用。")
+        parts.append("## 网络用词\n网络用语、梗、缩写是群聊的日常语言，跟着用；不用刻意学，也别刻意避开。")
 
         owner = self.owner_line()
         if owner:

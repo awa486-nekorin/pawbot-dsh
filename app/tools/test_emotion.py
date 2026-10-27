@@ -102,9 +102,9 @@ class ValueTests(Base):
         self.assertEqual(e.values()["低落"], 50.0)
 
         e2 = Emotion(None, FakeConfig({"emotion": {"turn_regress": 3}}))
-        e2._values["好奇"] = 60.0
+        e2._values["惊讶"] = 60.0
         e2.turn()
-        self.assertAlmostEqual(e2.values()["好奇"], 57.0, places=2)
+        self.assertAlmostEqual(e2.values()["惊讶"], 57.0, places=2)
 
     def test_long_idle_returns_to_baseline(self):
         base = 1_700_000_000.0
@@ -124,9 +124,9 @@ class ValueTests(Base):
         calm = Emotion(None, self.off).hint()
         self.assertIn("平常", calm)
 
-        cases = [{"开心": 15}, {"烦躁": 15}, {"低落": 15}, {"亲昵": 15},
-                 {"疲惫": 15}, {"好奇": 15}, {"得意": 15}, {"兴奋": 15},
-                 {"开心": 15, "亲昵": 9}, {d: 15 for d in DIMS}]
+        cases = [{"开心": 15}, {"烦躁": 15}, {"低落": 15}, {"感动": 15},
+                 {"害羞": 15}, {"惊讶": 15}, {"得意": 15}, {"兴奋": 15},
+                 {"开心": 15, "感动": 9}, {d: 15 for d in DIMS}]
         for deltas in cases:
             e = Emotion(None, self.off)
             e.apply(deltas)
@@ -266,6 +266,26 @@ class JudgeJsonTests(Base):
         with mock.patch.object(JudgeLLM, "chat",
                                new=mock.AsyncMock(side_effect=RuntimeError("x"))):
             self.assertIsNone(asyncio.run(judge_json(cfg, "hi", timeout=1)))
+
+
+class DimensionDriftTests(unittest.TestCase):
+    """情绪维度是跨模块契约：改名字必须同步 decider / 表情包 / 心情视图。"""
+
+    def test_decider_and_stickers_follow_emotion_dims(self):
+        from pawbot import decider, stickers, topic
+
+        self.assertEqual(tuple(decider.EMOTIONS), DIMS)
+        self.assertEqual(set(stickers.EMOTION_TAGS), set(DIMS))
+        self.assertTrue(set(topic._POSITIVE_DIMS) <= set(DIMS))
+        self.assertTrue(set(topic._NEGATIVE_DIMS) <= set(DIMS))
+        self.assertFalse(set(topic._POSITIVE_DIMS) & set(topic._NEGATIVE_DIMS))
+
+    def test_moods_reasonable(self):
+        from pawbot import decider
+
+        self.assertTrue(decider.NEGATIVE <= set(DIMS))
+        self.assertTrue(decider.POSITIVE <= set(DIMS))
+        self.assertFalse(decider.NEGATIVE & decider.POSITIVE)
 
 
 if __name__ == "__main__":

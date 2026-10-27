@@ -10,20 +10,25 @@
  *   5. config 裡每個葉節點都有 metadata（沒有漏掉的鍵）；
  *   6. 需求列出的「常用」key 全部都在；
  *   7. 影響徽章、分組、下拉選單設定都合法。
+ *   8. 轻量静态检查控件标签、JSON 折叠、键盘分頁、对话框、搜索防抖与状态时间；
+ *      只检查语义连接，不锁定文案/完整源码，也不替代真实浏览器与读屏测试。
  *
- * 資料來源：
- *   - 優先打 PawBot WebUI：http://127.0.0.1:6185/api/config
- *   - 6185 沒開才退回讀 D:/WorkBuddy/2026-10-20-00-14-25/pawbot/data/config.json
- *   （只讀 key 與遮罩結果，不印任何設定值或 secrets）
+ * 資料來源（完全離線）：
+ *   - Python 子進程直接載入本倉庫 app/pawbot/config.py 的 DEFAULT。
+ *   - Windows 需 py（Python 3），其他平台需 python3；禁用 bytecode 寫入。
+ *   - 不連 WebUI／網路，不讀寫 app/data，不實例化會保存配置的 Config。
+ *   （只印 key 與檢查摘要，不印任何設定值或 secrets）
  */
 import { readFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { runInNewContext } from 'node:vm'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { maskSecrets } from '../lib/config-utils.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-const FALLBACK_CONFIG = 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot/data/config.json'
 
 /**
  * 需求指定的「常用」key 清單（73 個）。
@@ -37,7 +42,7 @@ const REQUIRED_COMMON = [
   'chat.reply_mode', 'chat.reply_in_private', 'chat.context_messages', 'chat.context_chars',
   'chat.time_decay_hours', 'chat.batch_enabled', 'chat.rate_limit_per_min',
   'reply.max_parts', 'reply.quote', 'reply.at_sender', 'reply.question_rate', 'reply.strip_ai_phrases',
-  'reply.body_reaction_max', 'reply.strip_filler_opener',
+  'reply.body_reaction_max', 'reply.tone_trim', 'reply.strip_filler_opener',
   'safety.enabled', 'safety.typing_cps', 'safety.min_delay', 'safety.max_delay', 'safety.stop_when_replied',
   'proactive.enabled', 'proactive.daily_max', 'proactive.idle_min', 'proactive.idle_max',
   'proactive.bili_chance', 'proactive.idle_activity', 'proactive.surf_chance',
@@ -106,22 +111,26 @@ function collectConfigKeys(config) {
 }
 
 async function loadConfig() {
-  const url = 'http://127.0.0.1:6185/api/config'
+  const executable = process.platform === 'win32' ? 'py' : 'python3'
+  const script = [
+    'import json, runpy, sys',
+    // Load this file directly, not the package or Config constructor (which can save).
+    'defaults = runpy.run_path(sys.argv[1])["DEFAULT"]',
+    'print(json.dumps(defaults, ensure_ascii=True))',
+  ].join('\n')
+  let stdout
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
-    if (!response.ok) throw new Error('HTTP ' + response.status)
-    const json = await response.json()
-    const config = json && json.data !== undefined ? json.data : json
-    if (!isPlainObject(config)) throw new Error('回應不是 config 物件')
-    return { config, source: url + '（PawBot WebUI 在線）' }
+    ;({ stdout } = await promisify(execFile)(executable, [
+      ...(process.platform === 'win32' ? ['-3'] : []),
+      '-I', '-B', '-c', script, path.join(ROOT, 'app', 'pawbot', 'config.py'),
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024, windowsHide: true }))
   } catch (error) {
-    const config = JSON.parse(await readFile(FALLBACK_CONFIG, 'utf8'))
-    if (!isPlainObject(config)) throw new Error('config.json 不是物件')
-    return {
-      config,
-      source: FALLBACK_CONFIG + '（6185 不可用：' + String((error && error.message) || error) + '）',
-    }
+    throw new Error('无法离线加载 config.py DEFAULT；请安装可用的 ' + executable +
+      '（Python 3）。不回退到网络或运行时配置。原因：' + String(error.code || error.message))
   }
+  const config = JSON.parse(stdout)
+  if (!isPlainObject(config)) throw new Error('config.py DEFAULT 不是物件')
+  return { config, source: 'app/pawbot/config.py DEFAULT（离线；' + executable + '；不读取运行时配置）' }
 }
 
 console.log('== PawBot 面板 METADATA 檢查 ==')
@@ -134,9 +143,145 @@ if (!meta || !meta.metadata || !Array.isArray(meta.common) || !Array.isArray(met
   process.exit(1)
 }
 
+// Static smoke checks: inspect semantic props/relationships, not copy, full snapshots,
+// or exact formatting. These complement metadata checks, not browser/AT testing.
+const clientSource = await readFile(path.join(ROOT, 'client.js'), 'utf8')
+function componentSource(name) {
+  const start = new RegExp(String.raw`^([ \t]*)function ${name}\s*\([^\n]*\)\s*\{`, 'm').exec(clientSource)
+  if (!start) throw new Error('Missing component: ' + name)
+  const end = clientSource.indexOf('\n' + start[1] + '}', start.index + start[0].length)
+  if (end < 0) throw new Error('Missing component boundary: ' + name)
+  return clientSource.slice(start.index, end)
+}
+function wiringCheck(name, run) {
+  try {
+    const result = run()
+    if (result === true) ok(name)
+    else fail(name, typeof result === 'string' ? result : 'Accessible wiring contract is missing')
+  } catch (error) {
+    fail(name, error.message)
+  }
+}
+const prop = (name, value) => new RegExp(String.raw`(?:["']${name}["']|\b${name})\s*:\s*${value}(?=\s*[,}])`)
+
+wiringCheck('字段标签连接实际控件，包含滑杆和 JSON', () => {
+  const field = componentSource('Field')
+  if (!prop('htmlFor', 'controlId').test(field) || !prop('id', 'labelId').test(field)) return false
+  for (const name of ['NumberControl', 'SelectControl', 'RatioControl', 'SecretControl', 'JsonControl']) {
+    const call = new RegExp(String.raw`h\(${name},\s*\{([^}]+)\}`).exec(field)
+    if (!call || !/\bcontrolId\b/.test(call[1]) || !/\blabelId\b/.test(call[1])) return name + ' loses the field ids'
+    const control = componentSource(name)
+    if (!prop('id', 'controlId').test(control) || !prop('aria-labelledby', 'labelId').test(control)) return name + ' loses its accessible identity'
+  }
+  return true
+})
+wiringCheck('所有原生编辑控件都有名称或对应的可见标签', () => {
+  const controls = [...clientSource.matchAll(/h\(['"](input|select|textarea)['"],\s*\{([\s\S]*?)\}/g)]
+  if (!controls.length) return 'No controls checked'
+  const unnamed = controls.filter(([, , props]) => {
+    if (/['"]aria-(?:label|labelledby)['"]\s*:/.test(props)) return false
+    const id = /\bid\s*:\s*['"]([^'"]+)['"]/.exec(props)?.[1]
+    return !id || !new RegExp(String.raw`htmlFor\s*:\s*['"]${id}['"]`).test(clientSource)
+  })
+  return unnamed.length ? unnamed.map(([match]) => match.split('\n')[0]).join(', ') : true
+})
+wiringCheck('JSON 折叠按钮、编辑区和错误提示具有独立关联', () => {
+  const json = componentSource('JsonControl')
+  const button = /h\(['"]button['"],\s*\{([\s\S]*?)\}/.exec(json)?.[1] || ''
+  const editor = /h\(['"]textarea['"],\s*\{([\s\S]*?)\}/.exec(json)?.[1] || ''
+  return prop('id', 'controlId').test(button) && prop('aria-expanded', 'open').test(button) &&
+    prop('aria-controls', 'regionId').test(button) && prop('id', 'regionId').test(json) &&
+    prop('hidden', '!open').test(json) && prop('id', 'editorId').test(editor) &&
+    prop('aria-labelledby', 'labelId').test(editor) && /aria-invalid/.test(editor) &&
+    /aria-describedby[^\n]+errorId/.test(editor) && prop('id', 'errorId').test(json)
+})
+wiringCheck('开关使用名称和布尔 ARIA 状态', () => {
+  const control = componentSource('Switch')
+  return prop('role', `["']switch["']`).test(control) &&
+    prop('id', 'controlId').test(control) && prop('aria-labelledby', 'labelId').test(control) &&
+    prop('aria-checked', String.raw`Boolean\(on\)`).test(control)
+})
+wiringCheck('标签页有双向 ARIA 关联和单一活动面板', () => {
+  const panel = componentSource('Panel')
+  return /role\s*:\s*['"]tablist['"]/.test(panel) && /role\s*:\s*['"]tab['"]/.test(panel) &&
+    /role\s*:\s*['"]tabpanel['"]/.test(panel) && /aria-controls[^\n]+pb-panel-/.test(panel) &&
+    /aria-labelledby[^\n]+pb-tab-/.test(panel) && /aria-selected[^\n]+tab\s*===\s*id/.test(panel) &&
+    /tabIndex\s*:\s*tab\s*===\s*id\s*\?\s*0\s*:\s*-1/.test(panel) &&
+    /hidden\s*:\s*tab\s*!==\s*id/.test(panel) &&
+    ['setup', 'status', 'config', 'persona'].every((id) => new RegExp(String.raw`panelProps\(["']${id}["']\)`).test(panel))
+})
+wiringCheck('标签页支持方向键与首尾键，并移动焦点', () => {
+  const panel = componentSource('Panel')
+  return ['ArrowRight', 'ArrowLeft', 'Home', 'End'].every((key) => panel.includes(key)) &&
+    /preventDefault\(/.test(panel) && /\.focus\(/.test(panel) && /focus\s*=\s*true/.test(panel)
+})
+wiringCheck('可聚焦面板和对话框具有可见焦点样式', () => {
+  const rules = [...clientSource.matchAll(/([^{}]+):focus-visible\s*\{([^}]+)\}/g)]
+  return rules.some(([, selector, body]) =>
+    /\[tabindex\]|\[data-pb-tabpanel\]/.test(selector) && /box-shadow|outline\s*:[^;]*solid/.test(body))
+})
+wiringCheck('确认框限制焦点、处理 Escape 并清理恢复', () => {
+  const dialog = componentSource('ConfirmDialog')
+  return /aria-modal/.test(dialog) && /aria-labelledby/.test(dialog) &&
+    /activeElement/.test(dialog) && /querySelectorAll/.test(dialog) &&
+    /shiftKey/.test(dialog) && /Escape/.test(dialog) && /callbacksRef\.current\.busy/.test(dialog) &&
+    /card\.focus\(/.test(dialog) && /focusable\.includes\(document\.activeElement\)/.test(dialog) &&
+    /addEventListener\(['"]focusin['"]/.test(dialog) && /removeEventListener\(['"]focusin['"]/.test(dialog) &&
+    /removeEventListener\(['"]keydown['"]/.test(dialog) && /previous\.isConnected/.test(dialog) && /previous\.focus\(/.test(dialog)
+})
+wiringCheck('搜索输入立即更新草稿，筛选防抖且取消旧计时器', () => {
+  const config = componentSource('ConfigTab')
+  const delay = /setTimeout\(\(\)\s*=>\s*setSearch\(searchDraft\),\s*(\d+)\)/.exec(config)
+  return /value\s*:\s*searchDraft/.test(config) && /setSearchDraft\(event\.target\.value\)/.test(config) &&
+    Boolean(delay && Number(delay[1]) >= 100 && Number(delay[1]) <= 500) &&
+    /return\s*\(\)\s*=>\s*window\.clearTimeout\(/.test(config) && /\[searchDraft\]/.test(config)
+})
+wiringCheck('状态首次失败不伪报停机，并标记成功响应时间', () => {
+  const status = componentSource('StatusTab')
+  return /!st\s*\?/.test(status) && /lastSuccessAt/.test(status) &&
+    (status.match(/setLastSuccessAt\(Date\.now\(\)\)/g) || []).length === 2 &&
+    /dateTime\s*:\s*new Date\(lastSuccessAt\)\.toISOString\(\)/.test(status)
+})
+
 const { config, source } = await loadConfig()
+wiringCheck('常用清单保持 74 项，全部 metadata 为 74 + 270 = 344', () =>
+  REQUIRED_COMMON.length === 74 && meta.common.length === 74 && meta.advanced.length === 270 &&
+  meta.common.every((item) => REQUIRED_COMMON.includes(item.key)))
+wiringCheck('QQ 空间主动权限保留在高级设置且默认关闭', () =>
+  meta.metadata['qzone.proactive_enabled']?.advanced === true && config.qzone.proactive_enabled === false)
+wiringCheck('每日空间额度保留正整数要求且没有虚构上限', () => {
+  const item = meta.metadata['qzone.daily_limit']
+  const boundsFor = runInNewContext('(' + componentSource('boundsFor') + '\n})', Object.create(null), { timeout: 1000 })
+  for (const current of [3, 101, 100001]) {
+    const bounds = boundsFor(item, current)
+    if (bounds.min !== 1 || bounds.step !== 1 || bounds.max !== undefined) return false
+  }
+  return item.max === null && boundsFor({ key: 'example', max: 0 }, 3).max === 0 &&
+    boundsFor({ key: 'example', max: 42 }, 3).max === 42 &&
+    boundsFor({ key: 'example' }, 3).max === 100000 &&
+    boundsFor({ key: 'server.port' }, 3).max === 65535 &&
+    prop('max', 'bounds.max').test(componentSource('NumberControl'))
+})
 const configKeys = collectConfigKeys(config)
 const allMeta = meta.common.concat(meta.advanced)
+
+// API 統一管理頁（2026-10-27 新增）：分組必須覆蓋所有 secret 字段，且 key 都真實存在。
+wiringCheck('API 分組覆蓋所有 secret，key 不重複且都存在于 metadata', () => {
+  const groups = meta.apiGroups
+  if (!Array.isArray(groups) || !groups.length) return false
+  const seen = new Set()
+  for (const group of groups) {
+    if (!group || !Array.isArray(group.keys) || !group.keys.length) return false
+    for (const key of group.keys) {
+      if (!meta.metadata[key]) return false
+      if (seen.has(key)) return false
+      seen.add(key)
+    }
+  }
+  const secretKeys = allMeta.filter((item) => item.control === 'secret').map((item) => item.key)
+  return secretKeys.length > 0 && secretKeys.every((key) => seen.has(key))
+})
+
 const allLabels = new Map()
 const allKeys = new Map()
 const masked = maskSecrets(config)

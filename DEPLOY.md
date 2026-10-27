@@ -81,6 +81,19 @@ python -m py_compile run.py         # 可选自检（不联网、不连 QQ）
 | `model` / `allowedModel` | 保持 `deepseek-flash`（v4-pro 会被白名单拦掉） |
 | `sessdata` | 想让 `watched_level` 升到 `subtitle` 才需要（见 §5） |
 
+### 3.1 大肥鱼的大脑（可选，2026-10-27）
+
+`llm.provider` 默认空＝直连外部 API，老部署不受影响。要用「DSH 进程内 Agent + 电脑工具」：
+
+1. PawBot 设置页「进阶 → 主模型 → 大脑走哪儿」选 **DSH 大脑**（等价于 `app/data/config.json` 的 `"llm": {"provider": "dsh"}`），热生效；
+2. 宿主插件 Config 检查 `brainEnabled=true`（默认）与 `brainSandbox`（默认 `workspace-write`；要全盘读写才改 `danger-full-access`）；
+3. 验证：`Invoke-RestMethod -Method Post http://127.0.0.1:6185/api/llm/test` → 回「（来自 DSH 大脑 …）」；
+   或 DSH 工具 `pawbot_brain action=status`。
+4. Linux 上注意：`brainCwd` 默认落在 `app/data/brain`，要保证运行用户可写；电脑工具需要宿主装有
+   `@deepseek-ai/dsh-tool-pwsh|bash`、`dsh-tool-fs`、`dsh-tool-fs-search`、`dsh-tool-web`（DSH 桌面/标准发行版自带）。
+
+设计/回滚见 [docs/BRAIN.md](docs/BRAIN.md)。
+
 **PawBot 那一头也要指到同一个目录**（`app/data/config.json`；默认值是相对路径 `pawbot-bili-watch-data`，
 插件会用绝对路径覆盖它，手改时填绝对路径最稳）：
 
@@ -140,3 +153,124 @@ B 站 AI 字幕要登录才给。三种塞 SESSDATA 的方式，插件按 `env >
 3. DSH 设置 → PawBot → **状态**页应显示「运行中」、连上 NapCat 后「连接数」≥ 1
 4. `bili_watch_status` → `model: deepseek-flash`、`has_credential` 与你是否配了 SESSDATA 一致
 5. 在群里发一句话，机器人应能正常回复
+
+---
+
+## 8. 上传到阿里云 ECS + 两端同步（2026-10-27）
+
+### 8.1 打包（一条命令）
+
+本地仓库里已有打包脚本，产物**不含** `app/data`（人设/记忆/config/key）、`.venv`、`node_modules`：
+
+```powershell
+# Windows PowerShell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pack-server.ps1
+# 或 Git Bash / WSL / Linux
+bash scripts/pack-server.sh
+```
+
+产物在 `dist/pawbot-dsh-<版本>-<时间>.tar.gz`（约 2.5 MB）+ 同名 `.sha256`。
+本次已生成两个包（二选一上传）：
+
+| 用途 | 文件 | 说明 |
+|---|---|---|
+| 安全部署（不含数据） | `dist/pawbot-dsh-1.0.0-20261027-222423.tar.gz` | 2.5 MB；人设/记忆/key 之后用云同步或手工 scp |
+| **含完整 key + 人设（不含记忆）** | `dist/pawbot-dsh-1.0.0-*-full.tar.gz` | 约 1.1 MB；含 `app/data/config.json`、`persona.md`、`secrets/`（DSH 全量凭证 + PawBot 子集 + decider.key） |
+
+生成含 key 的人设包：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pack-server.ps1 -IncludeSecrets
+```
+
+上传后先看 `secrets/README.txt`：把 `credentials.full.yaml`/`credentials.pawbot.yaml` 放到
+`~/.dsh/.credentials.yaml`、`decider.key` 放到 `~/.pawbot/decider.key`，并 `chmod 600`。
+这个包是**明文 key**：只走 scp/内网，别放公共 OSS 桶，传完删本地和服务器上的 tar.gz。
+（sha256 `036bc6513ee51ae52047402c9f5d1fe3622c714d3f31de83c6e4c2bbad23d4a1`）。
+
+上传（任选其一）：
+
+```bash
+# A. scp（最直接）
+scp dist/pawbot-dsh-*.tar.gz root@<ECS_IP>:/opt/
+
+# B. 阿里云 OSS + ossutil（scp 被墙/走内网时）
+ossutil cp dist/pawbot-dsh-*.tar.gz oss://<bucket>/pawbot/
+# 服务器上
+ossutil cp oss://<bucket>/pawbot/pawbot-dsh-*.tar.gz /opt/
+
+# C. ECS 控制台 → 远程连接 → 文件上传（小文件，浏览器里拖上去）
+```
+
+### 8.2 建议：数据放插件目录外（升级不丢）
+
+DSH 插件 Config 里设 `dataDir=/opt/pawbot-data`（或环境变量 `PAWBOT_DATA_DIR=/opt/pawbot-data`），
+首次加载会把 `app/data` 迁过去并建联接；之后升级/重装只换代码。
+
+### 8.3 用「云同步」把本机数据搬过去（加密）
+
+1. 本机先 `push`（`sync.passphrase` 必须设，否则含 key 的 config 会被拒绝）：
+
+```powershell
+cd D:\WorkBuddy\pawbot-dsh\app
+py tools\cloud_sync.py test
+py tools\cloud_sync.py push
+```
+
+2. 服务器拉取（同一个 provider/url/passphrase）：
+
+```bash
+cd /opt/pawbot-dsh/app
+python3 tools/cloud_sync.py test
+python3 tools/cloud_sync.py pull --overwrite-config
+```
+
+3. 想「实时」就在两端都开 `sync.mode=realtime`（冲突默认 `keep_both`，远端包落在
+   `data/sync-conflict-<时间>/`，不会互相覆盖）。
+
+> 阿里云没有内置 WebDAV 的话，三条路：① 在 ECS 上跑 Nextcloud/WebDAV 只给同步用；
+> ② 用插件自带的 `http` 端点；③ 直接用 `scp` 传 `data/` 打包（不走云同步）。
+> 插件目前**不支持阿里云 OSS/S3 协议**，需要的话可以再加一个 adapter。
+
+### 8.4 常驻（systemd）
+
+```ini
+# /etc/systemd/system/pawbot.service
+[Unit]
+Description=PawBot QQ bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pawbot-dsh/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PAWBOT_DATA_DIR=/opt/pawbot-data
+ExecStart=/opt/pawbot-dsh/app/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now pawbot
+journalctl -u pawbot -f
+```
+
+### 8.5 安全组 / 端口
+
+- 只开 DSH Web 端口（或你自己的反代 443）给公网；
+- `6185`（WebUI）、`6199`（OneBot 反向 WS）**只绑 127.0.0.1**，不要进安全组白名单；
+- QQ 登录的 NapCat 可以放本机、通过公网 WS 连服务器，也可以服务器上跑（小号先试，云 IP 风控更严）。
+
+### 8.6 上完检查 + 回滚
+
+```bash
+curl -s http://127.0.0.1:6185/api/status | head -c 300     # 有 llm_provider/handlers
+python3 tools/cloud_sync.py status
+python3 tools/decider_once.py --text "测试一句" --addressed  # 决策模型通不通
+```
+
+回滚：云同步覆盖前自动备份在 `data/backup-sync-<时间>/`；数据迁移留档在
+`data.migrated-<时间>/`；版本快照在 `data/backups/plugin-update-*`（见 `docs/DATA-PERSISTENCE.md`）。

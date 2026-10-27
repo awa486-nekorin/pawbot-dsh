@@ -185,7 +185,7 @@ class ToolMarkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_pick_sticker_follows_mood_and_returns_marker(self):
         self.stickers.save(PNG, "无语猫", tags=["无语"])
         self.stickers.save(PNG.replace(b"0", b"1"), "开心狗", tags=["开心"])
-        # sticker_chance 默认 0.85 会随机拒发，这里把骰子固定成「放行」
+        # 默认 chance 只有 0.12 会随机拒发，这里把骰子固定成「放行」
         with patch("pawbot.media.random.random", return_value=0.0):
             _text, segs = await self.toolbox._t_pick_sticker(self.ctx)   # 不给 query，按「烦躁」挑
         marker = segs[0]["data"]["text"]
@@ -195,6 +195,9 @@ class ToolMarkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pick_sticker_respects_pacing(self):
         self.stickers.save(PNG, "无语猫", tags=["无语"])
+        # 「烦躁」会触发情绪绕闸（发癫可以主动发），这条测的是随机闸，换成不绕闸的情绪
+        self.bot.emotion = SimpleNamespace(
+            blend=lambda: {"dominant": "惊讶", "intensity": "轻微"})
         ledger = SimpleNamespace(sticker_allowed=lambda sid: False)
         with patch("pawbot.media.ledger_for", return_value=ledger, create=True):
             text, segs = await self.toolbox._t_pick_sticker(self.ctx, "无语")

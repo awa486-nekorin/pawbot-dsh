@@ -35,6 +35,19 @@ from urllib.parse import parse_qs, quote, urlparse
 from .log import log
 
 
+# 大脑回调里「有副作用/会写数据」的 PawBot 工具：只允许主人发起。
+# 理由：群友的提示词注入不能借她的记忆 / 人设 / 账号写东西（正常聊天仍由 persona + 主人判断约束，
+# 但大脑桥把工具执行搬到了 Host，必须在执行口再做一次硬闸）。
+SENSITIVE_BRAIN_TOOLS = frozenset({
+    "account_action", "learn_meme", "remember", "remind", "note_person",
+    "edit_persona", "bili_action", "save_sticker", "post_qzone", "album_add",
+    "qzone_reply", "qzone_edit",
+})
+
+# 单个 HTTP 请求体上限（本 WebUI 只服务本机面板与大脑回调；4MB 足够人设/配置）
+MAX_HTTP_BODY = 4 * 1024 * 1024
+
+
 class WebUI:
     # 模型预设存在 data/models.json；键值不回显，只给首尾各 4 位
     MODELS_FILE = "models.json"
@@ -80,7 +93,16 @@ class WebUI:
                 headers[k.strip().lower()] = v.strip()
 
         body = b""
-        length = int(headers.get("content-length") or 0)
+        try:
+            length = int(headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            await self._json(writer, 400, {"ok": False, "error": "bad content-length"})
+            writer.close()
+            return
+        if length < 0 or length > MAX_HTTP_BODY:
+            await self._json(writer, 413, {"ok": False, "error": "body too large"})
+            writer.close()
+            return
         if length:
             body = await reader.readexactly(length)
 
@@ -90,7 +112,9 @@ class WebUI:
 
         # webui.token 留空则不校验；配置后可用页面现有的 ?token=<token>，
         # 或 Authorization: Bearer <token>。所有页面、API 与 SSE 都走同一道检查。
-        if self.token:
+        # 例外：/api/brain/tool 是 Host 大脑桥的回调，用它自己的 token（env 注入），
+        # 不跟面板 token 混（否则面板一设 token，大脑的工具调用就全 401）。
+        if self.token and path != "/api/brain/tool":
             auth = headers.get("authorization", "")
             bearer = auth[7:] if auth[:7].lower() == "bearer " else ""
             query_token = (query.get("token") or [""])[0]
@@ -110,7 +134,7 @@ class WebUI:
             if method == "GET":
                 await self._route_get(writer, path, query)
             elif method == "POST":
-                await self._route_post(writer, path, body)
+                await self._route_post(writer, path, body, headers)
             else:
                 await self._json(writer, 405, {"ok": False, "error": "method not allowed"})
         except Exception as e:
@@ -184,6 +208,17 @@ class WebUI:
             return
         if path == "/api/status":
             await self._json(writer, 200, {"ok": True, "data": bot.status()})
+            return
+        if path == "/api/brain/status":
+            from . import brain
+            provider = str(bot.config.get("llm.provider", "") or "").strip().lower()
+            await self._json(writer, 200, {"ok": True, "data": {
+                **brain.status(),
+                "provider": provider,
+                # provider=dsh 不需要 api_key；别把大脑模式显示成 mock
+                "llm_mock": provider != "dsh" and not str(bot.config.get("llm.api_key", "") or "").strip(),
+                "model": str(bot.config.get("llm.model", "") or ""),
+            }})
             return
         if path == "/api/config":
             await self._json(writer, 200, {"ok": True, "data": bot.config.data})
@@ -625,6 +660,94 @@ class WebUI:
         return 400, {"ok": False,
                      "error": "what 只能是 turn_summary / episodes / diary"}
 
+    async def _brain_tool(self, writer, payload: dict, headers: dict):
+        """Host 大脑桥回调：用「本轮登记的 ctx」执行一个 PawBot 工具。
+
+        安全（2026-10-27 加固）：
+          - 只接受 Host 注入的 token；
+          - 只接 loopback（面板可能被配成 0.0.0.0，不能让 LAN 打进来）；
+          - 只接受本轮 schemas 里出现过的工具名；
+          - 没有登记 ctx（不是由 agent.run 发起的轮次）一律拒绝；
+          - **写类/有副作用的工具只允许主人发起**（群友的提示词注入不能借她的记忆/人设/账号写东西）。
+        """
+        from . import brain
+
+        expected = brain.env_token()
+        if not expected:
+            await self._json(writer, 503, {"ok": False, "error": {
+                "code": "BRAIN_DISABLED",
+                "message": "PawBot 没有 DSH 大脑 token（Host 没注入；插件是不是没加载？）"}})
+            return
+        peer = writer.get_extra_info("peername") if hasattr(writer, "get_extra_info") else None
+        host = peer[0] if isinstance(peer, tuple) and peer else ""
+        if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            await self._json(writer, 403, {"ok": False, "error": {
+                "code": "FORBIDDEN", "message": "brain 工具回调只接 loopback"}})
+            return
+        auth = str(headers.get("authorization") or "")
+        got = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        if not got or not hmac.compare_digest(got.encode("utf-8"), expected.encode("utf-8")):
+            await self._json(writer, 401, {"ok": False, "error": {
+                "code": "UNAUTHORIZED", "message": "brain token 不对"}})
+            return
+
+        conv = str(payload.get("conv") or "")
+        name = str(payload.get("name") or "")
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        ctx = brain.active_ctx(conv)
+        if ctx is None:
+            await self._json(writer, 409, {"ok": False, "error": {
+                "code": "NO_ACTIVE_TURN",
+                "message": f"本轮没有登记的会话（conv={conv[:60]!r}）"}})
+            return
+        if not brain.tool_allowed(conv, name):
+            await self._json(writer, 403, {"ok": False, "error": {
+                "code": "TOOL_NOT_ALLOWED",
+                "message": f"本轮没有给大脑开放工具 {name!r}"}})
+            return
+        if name in SENSITIVE_BRAIN_TOOLS and not self._ctx_is_owner(ctx):
+            log.warn(f"大脑拒绝写类工具 {name}：发起者不是主人（uid={getattr(ctx, 'user_id', '')}）")
+            await self._json(writer, 200, {"ok": False, "error": {
+                "code": "TOOL_FORBIDDEN",
+                "message": f"{name} 只能由主人触发；转达一句「这个要主人自己来说」即可"}})
+            return
+
+        toolbox = getattr(self.bot, "toolbox", None)
+        if toolbox is None:
+            await self._json(writer, 503, {"ok": False, "error": {
+                "code": "NO_TOOLBOX", "message": "PawBot 没有 toolbox"}})
+            return
+        try:
+            result, extra = await toolbox.execute(ctx, name, arguments)
+        except Exception as e:
+            log.warn(f"大脑工具 {name} 执行失败：{type(e).__name__}: {e}")
+            await self._json(writer, 200, {"ok": False, "error": {
+                "code": "TOOL_FAILED", "message": f"{type(e).__name__}: {e}"}})
+            return
+
+        # 媒体段（表情包/图/语音）要无损 JSON 传回 Host，Path 之类统一转字符串。
+        media: list = []
+        for segment in extra or []:
+            try:
+                media.append(json.loads(json.dumps(segment, ensure_ascii=False, default=str)))
+            except Exception:
+                pass
+        text = "" if result is None else str(result)
+        log.debug(f"大脑工具 {name} 执行完成（{conv[:32]}…，{len(text)} 字，媒体 {len(media)}）")
+        await self._json(writer, 200, {
+            "ok": True,
+            "text": text[:8000],
+            "media": media,
+            "name": name,
+        })
+
+    def _ctx_is_owner(self, ctx) -> bool:
+        owners = {str(x) for x in (self.bot.config.get("account.owner_ids") or [])
+                  if str(x).strip()}
+        return bool(str(getattr(ctx, "user_id", "") or "") in owners)
+
     async def _serve_sticker(self, writer, path: str):
         from urllib.parse import unquote
         name = unquote(path[len("/stickers/"):])
@@ -638,12 +761,16 @@ class WebUI:
         with open(full, "rb") as f:
             await self._bytes(writer, 200, f.read(), ctype)
 
-    async def _route_post(self, writer, path: str, body: bytes):
+    async def _route_post(self, writer, path: str, body: bytes, headers: dict | None = None):
         bot = self.bot
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             await self._json(writer, 400, {"ok": False, "error": "JSON 解析失败"})
+            return
+
+        if path == "/api/brain/tool":
+            await self._brain_tool(writer, payload, headers or {})
             return
 
         if path == "/api/config":

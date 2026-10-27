@@ -23,6 +23,9 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createPawbotProxy } from './lib/webui-proxy.js'
+import * as dataGuard from './lib/data-guard.js'
+import { BRIDGE_PATH, createToolBridge, redactBridgeText, stripBridgeEnv } from './lib/dsh-tool-bridge.js'
+import { BRAIN_TURN_PATH, BRAIN_STATUS_PATH, BRAIN_URL_ENV, BRAIN_TOKEN_ENV, createBrainBridge, DEFAULT_NATIVE_TOOLS } from './lib/dsh-brain.js'
 import { maskSecrets, pickUpdatable, pickSection, diffKeys } from './lib/config-utils.js'
 import {
   createBootOrchestrator,
@@ -54,6 +57,9 @@ export const inject = ['tools', 'webServer']
 
 const isWin = process.platform === 'win32'
 
+/** 插件版本（用于「DSH 更新后自动快照一次数据」的版本标记）。 */
+const PKG_VERSION = dataGuard.readPluginVersion(fileURLToPath(new URL('.', import.meta.url)))
+
 /** 插件自帶的 PawBot 源碼目錄（app/ 由安裝包提供；一鍵安裝的 venv / data 都在這裡）。 */
 const DEFAULT_APP_DIR = fileURLToPath(new URL('./app', import.meta.url))
 
@@ -66,6 +72,29 @@ export const Config = (() => {
       projectDir: z.string().default(isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot').extra('volatile', true),
       /** 用哪個 python 起（Windows 是 `py` launcher；Linux/macOS 用 `python3`） */
       pythonExe: z.string().default(isWin ? 'py' : 'python3').extra('volatile', true),
+      /** Opt-in read-only child→DSH bridge. Reload plugin/restart child after changing. */
+      dshBridgeEnabled: z.boolean().default(false),
+      /** 「大肥鱼大脑」：允许 PawBot 把一轮对话交给 DSH 进程内的真 Agent（可用电脑工具）。 */
+      brainEnabled: z.boolean().default(true),
+      /** 大脑用的模型路由（空＝跟随 DSH 的 agentDefaultModel） */
+      brainProvider: z.string().default(''),
+      brainModel: z.string().default(''),
+      /** low / medium / high；空＝跟随模型默认 */
+      brainReasoningEffort: z.string().default(''),
+      /** read-only / workspace-write / danger-full-access（默认只允许写工作目录） */
+      brainSandbox: z.string().default('workspace-write'),
+      /** 大脑的工作目录（空＝<appDir>/data/brain，会自动建） */
+      brainCwd: z.string().default(''),
+      /** 允许大脑使用的宿主电脑工具名（逗号分隔，空＝默认白名单） */
+      brainNativeTools: z.string().default(DEFAULT_NATIVE_TOOLS.join(',')),
+      /** 人设是否用 complete 模式（true＝模型只看到 PawBot 的 system，不掺 DSH 编码 agent 提示词） */
+      brainCompletePersona: z.boolean().default(true),
+      /** 电脑工具是否只给主人（true＝群友轮次不挂 preset，只给 PawBot 业务工具） */
+      brainOwnerOnly: z.boolean().default(true),
+      /** 单轮大脑超时（毫秒） */
+      brainTimeoutMs: z.natural().default(180000),
+      /** 单个工具调用超时（毫秒） */
+      brainToolTimeoutMs: z.natural().default(120000),
       /** apply 時是否自動啟動 */
       autostart: z.boolean().default(true).extra('volatile', true),
       /** 進程意外退出後是否自動重啟（有意 stop 不會觸發） */
@@ -84,6 +113,12 @@ export const Config = (() => {
       maxCrashRestarts: z.natural().default(5).extra('volatile', true),
       /** PawBot 源碼目錄（run.py / requirements.txt / data/ 所在）。預設＝插件目錄下的 app/ */
       appDir: z.string().default(DEFAULT_APP_DIR).extra('volatile', true),
+      /** 数据守卫：把 data/ 放到插件目录外面（例如 D:/PawBotData），DSH 升级/重装不会碰它；留空＝用 appDir/data。 */
+      dataDir: z.string().default(''),
+      /** 数据守卫：是否在插件版本变化时自动快照 config/persona/记忆（默认开）。 */
+      dataGuardEnabled: z.boolean().default(true),
+      /** 数据守卫：保留最近几份版本快照（默认 5）。 */
+      dataBackupKeep: z.natural().default(5),
       /** NapCat docker 鏡像（沒有 docker 時用不到） */
       napcatImage: z.string().default(NAPCAT_IMAGE).extra('volatile', true),
       /** NapCat WebUI 對外埠（docker 的 -p；預設 6099） */
@@ -101,6 +136,18 @@ export function apply(ctx, config) {
     projectDir: isWin ? 'D:/WorkBuddy/2026-10-20-00-14-25/pawbot' : '/opt/pawbot',
     pythonExe: isWin ? 'py' : 'python3',
     autostart: true,
+    dshBridgeEnabled: false,
+    brainEnabled: true,
+    brainProvider: '',
+    brainModel: '',
+    brainReasoningEffort: '',
+    brainSandbox: 'workspace-write',
+    brainCwd: '',
+    brainNativeTools: DEFAULT_NATIVE_TOOLS.join(','),
+    brainCompletePersona: true,
+    brainOwnerOnly: true,
+    brainTimeoutMs: 180000,
+    brainToolTimeoutMs: 120000,
     restartOnCrash: false,
     logLines: 200,
     webuiHost: '127.0.0.1',
@@ -109,6 +156,9 @@ export function apply(ctx, config) {
     healthTimeoutMs: 3000,
     maxCrashRestarts: 5,
     appDir: DEFAULT_APP_DIR,
+    dataDir: '',
+    dataGuardEnabled: true,
+    dataBackupKeep: 5,
     napcatImage: NAPCAT_IMAGE,
     napcatWebuiPort: NAPCAT_WEBUI_PORT,
     onebotToken: '',
@@ -124,7 +174,9 @@ export function apply(ctx, config) {
       } else if (typeof base[k] === 'boolean') {
         if (typeof v === 'boolean') out[k] = v
       } else if (typeof base[k] === 'string') {
+        // 面板可能把「逗号列表」送成 string[]；对象（schema 默认值包装等）一律忽略，沿用默认。
         if (typeof v === 'string') out[k] = v
+        else if (Array.isArray(v)) out[k] = v.map(String).join(',')
       }
     }
     return out
@@ -133,7 +185,7 @@ export function apply(ctx, config) {
   const refreshCfg = () => Object.assign(cfg, normalize(config, DEFAULTS))
 
   const log = (msg) => {
-    const line = `[pawbot] ${msg}`
+    const line = `[pawbot] ${redactBridgeText(msg)}`
     try {
       if (ctx.logger?.info) ctx.logger.info(line)
       else console.log(line)
@@ -147,7 +199,7 @@ export function apply(ctx, config) {
   const MAX_BUFFER = 5000
   const ring = [] // { ts, stream, line }
   const pushLine = (stream, line) => {
-    ring.push({ ts: Date.now(), stream, line })
+    ring.push({ ts: Date.now(), stream, line: redactBridgeText(line) })
     if (ring.length > MAX_BUFFER) ring.splice(0, ring.length - MAX_BUFFER)
   }
   const tail = (n) => ring.slice(-Math.max(0, n))
@@ -177,7 +229,7 @@ export function apply(ctx, config) {
   const SETUP_LOG_TAIL = 60
   const setupRing = []
   const setupLog = (msg) => {
-    const text = String(msg == null ? '' : msg)
+    const text = redactBridgeText(msg == null ? '' : msg)
     if (!text) return
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trimEnd()
@@ -207,6 +259,15 @@ export function apply(ctx, config) {
   let uiRouteState = 'pending'
   const timers = new Set()
 
+  // Separate from browser dispatch/CSRF. No route or credentials exist by default.
+  let bridgeRouteReady = false
+  const bridge = cfg.dshBridgeEnabled ? createToolBridge({
+    execute: (input) => ctx.tools.execute(input),
+    getOrigin: () => ctx.webServer.getOrigin(),
+    isEnabled: () => !disposed && bridgeRouteReady && config?.dshBridgeEnabled === true,
+    audit: ({ tool, outcome, elapsed_ms }) => log(`bridge tool=${tool} outcome=${outcome} elapsed_ms=${elapsed_ms}`),
+  }) : null
+
   const isRunning = (c) => !!(c && c.exitCode === null && c.signalCode === null)
 
   /* ── 路徑解析（appDir / projectDir / 用哪個 python） ──
@@ -216,6 +277,31 @@ export function apply(ctx, config) {
    */
   const appDirectory = () => resolve(String(cfg.appDir || DEFAULTS.appDir))
   const dataDirectory = () => join(appDirectory(), 'data')
+
+  /* ── 数据守卫：防止 DSH 更新 / 插件重装 / 版本升级把 data/ 冲掉 ──────────
+   * 1) dataDir 非空时把 app/data 换成指向外部目录的联接（升级只覆盖 app/，不碰外部数据）；
+   * 2) 版本变化时自动快照 config.json + persona.md + 记忆文件到 data/backups/。
+   * 迁移/快照都不覆盖已有文件：外部已有数据优先，不会用插件模板盖掉你的 key。
+   */
+  let dataGuardInfo = { enabled: false, dataDir: '', warnings: [] }
+  try {
+    dataGuardInfo = dataGuard.prepareData({
+      appDir: appDirectory(),
+      dataDir: cfg.dataDir || process.env.PAWBOT_DATA_DIR || '',
+      version: PKG_VERSION,
+      keep: cfg.dataBackupKeep,
+      enabled: cfg.dataGuardEnabled !== false,
+      log,
+    })
+    for (const warning of dataGuardInfo.warnings || []) log(`数据守卫：${warning}`)
+    if (dataGuardInfo.dataDir) {
+      log(`数据守卫：data = ${dataGuardInfo.dataDir}${dataGuardInfo.external ? '（外部目录）' : ''}` +
+        (dataGuardInfo.snapshot ? `；版本快照：${dataGuardInfo.snapshot}` : ''))
+    }
+  } catch (error) {
+    log(`数据守卫初始化失败（不影响启动）：${error?.message || error}`)
+  }
+  const DataGuardDir = () => dataGuardInfo.dataDir || dataDirectory()
   // 專案目錄（run.py 所在）：
   //   1. 使用者**明確**設了非預設的 projectDir，且那裡有 run.py → 尊重它（升級/自訂安裝不被搶走）
   //   2. 否則 app/ 有 run.py → 用 app/（一鍵安裝的預設佈局，venv/data 也都在這裡）
@@ -234,6 +320,28 @@ export function apply(ctx, config) {
     if (vp && existsSync(vp)) return vp
     return String(cfg.pythonExe || DEFAULTS.pythonExe)
   }
+
+  /* ── 大肥鱼的大脑：PawBot 每轮对话 → 进程内 DSH Agent（可用电脑工具） ──
+   * 与只看状态的只读桥是两件事：
+   *   - 只读桥：PawBot → Host，allowlist 只有 bili_watch_status，1KB/2s；
+   *   - 大脑桥：PawBot → Host，negotiate 整段人设 + 30 工具，2MB/180s。
+   * 子进程通过 env（PAWBOT_DSH_BRAIN_URL / TOKEN）拿到入口，token 每次 spawn 重生成。
+   */
+  const brain = createBrainBridge({
+    ctx,
+    // 面板改完 refreshCfg() 后立刻生效：这里每次调用都重新读 cfg。
+    config: () => ({
+      ...cfg,
+      brainNativeTools: String(cfg.brainNativeTools || '')
+        .split(',').map((s) => s.trim()).filter(Boolean),
+    }),
+    logger: { info: log, warn: log, error: log, debug() {} },
+    pawbotBase: () => `http://${cfg.webuiHost || '127.0.0.1'}:${Number(cfg.webuiPort) || 6185}`,
+    // 子进程要打的是 DSH WebServer 的 origin（/pawbot-dsh-brain/turn 注册在这里），不是 6185。
+    hostOrigin: () => (typeof ctx.webServer?.getOrigin === 'function' ? ctx.webServer.getOrigin() : ''),
+    workDir: () => String(cfg.brainCwd || '').trim() || join(dataDirectory(), 'brain'),
+    onAudit: ({ outcome, elapsed_ms }) => log(`brain turn outcome=${outcome} elapsed_ms=${elapsed_ms}`),
+  })
 
   /* ── Windows 整棵進程樹收口 ──
    * 為什麼必須 taskkill /T /F：
@@ -287,6 +395,8 @@ export function apply(ctx, config) {
    *   - stopped:false,alive:false 本來就沒在跑
    */
   const stopChild = async () => {
+    bridge?.revoke()
+    brain.revoke()
     const child = currentChild
     if (!child) return { stopped: false, alive: false }
     const pid = child.pid
@@ -341,14 +451,20 @@ export function apply(ctx, config) {
     }
     let child
     try {
+      const baseEnv = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' }
+      const withBridge = bridge ? bridge.childEnv(baseEnv) : stripBridgeEnv(baseEnv)
+      // 大腦橋的 env 永遠最後套：即使只读桥关着，也要把 brain 的 URL/token 注进去。
+      const childEnv = brain.envForChild(withBridge)
       child = spawn(exe, ['run.py'], {
         cwd,
-        env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       })
     } catch (e) {
-      const msg = `spawn 抛错：${e?.message}`
+      bridge?.revoke()
+      brain.revoke()
+      const msg = redactBridgeText(`spawn 抛错：${e?.message}`)
       lastSpawnError = msg
       lastError = msg
       log(msg)
@@ -367,7 +483,11 @@ export function apply(ctx, config) {
     child.stdout?.on('data', (d) => feed('stdout', d))
     child.stderr?.on('data', (d) => feed('stderr', d))
     child.on('error', (err) => {
-      const msg = `进程错误：${err?.message}`
+      if (currentChild === child) {
+        bridge?.revoke()
+        brain.revoke()
+      }
+      const msg = redactBridgeText(`进程错误：${err?.message}`)
       lastError = msg
       lastSpawnError = msg
       pushLine('stderr', msg)
@@ -379,6 +499,8 @@ export function apply(ctx, config) {
         log(`忽略旧子进程（pid=${child.pid}）晚到的 exit（currentChild=${currentChild?.pid ?? 'null'}）`)
         return
       }
+      bridge?.revoke()
+      brain.revoke()
       flushBuf()
       lastExit = { code, signal, at: Date.now() }
       pushLine('stderr', `[pawbot] process exited code=${code} signal=${signal}`)
@@ -443,11 +565,12 @@ export function apply(ctx, config) {
 
   /* ── DSH 工具 ── */
   const safe = (v) => {
-    if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+    if (typeof v === 'string') return redactBridgeText(v)
+    if (v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean') return v
     try {
-      return JSON.parse(JSON.stringify(v))
+      return JSON.parse(redactBridgeText(JSON.stringify(v)))
     } catch {
-      return String(v)
+      return redactBridgeText(String(v))
     }
   }
   const textOutput = {
@@ -494,6 +617,16 @@ export function apply(ctx, config) {
         app_dir: appDirectory(),
         // 同源代理路由的註冊結果——UI 打不開時先看這個，不要瞎猜
         ui_route: uiRouteState,
+        // 「大肥鱼的大脑」是否通：模型路由 / 沙箱 / 电脑工具白名单 / 最近失败
+        brain: await brain.describe(),
+        // 数据守卫：data 放哪、是否外部目录、最近一次版本快照
+        data_guard: {
+          data_dir: DataGuardDir(),
+          external: Boolean(dataGuardInfo.external),
+          plugin_version: PKG_VERSION,
+          last_snapshot: dataGuardInfo.snapshot || null,
+          warnings: dataGuardInfo.warnings || [],
+        },
         // webServer 實際綁在哪個 origin（面板就是從這個 origin 的同源路徑打的）
         web_origin: (() => {
           try {
@@ -1271,6 +1404,87 @@ export function apply(ctx, config) {
     },
   })
 
+  tool({
+    name: 'pawbot_data_backup',
+    description:
+      '数据守卫：防止 DSH 更新 / 插件重装把 PawBot 的「人设 + 记忆 + config（含 API key）」冲掉。' +
+      'action=status 看数据目录、外部目录与否、已有快照；action=backup 立刻快照一份到 data/backups/；' +
+      'action=list 列出快照。把宿主 Config 的 dataDir 设成插件目录外的路径（例如 D:/PawBotData）可让数据彻底离开升级范围（改完重载插件生效）。',
+    parameters: {
+      action: {
+        type: 'string',
+        enum: ['status', 'backup', 'list'],
+        description: 'status=看现状（默认）；backup=手动快照；list=列出已有快照。',
+      },
+    },
+    async execute(args) {
+      refreshCfg()
+      const action = String(args?.action || 'status')
+      const dir = DataGuardDir()
+      if (action === 'backup') {
+        const result = dataGuard.createBackup(dir, 'manual')
+        log(`数据守卫：手动快照 ${result.files} 个文件 → ${result.dir}`)
+        return { ok: true, action, ...result, data_dir: dir, plugin_version: PKG_VERSION }
+      }
+      const info = dataGuard.describe(dir)
+      return {
+        ok: true,
+        action,
+        plugin_version: PKG_VERSION,
+        data_dir: dir,
+        external: Boolean(dataGuardInfo.external),
+        config_data_dir: String(cfg.dataDir || ''),
+        guard_enabled: cfg.dataGuardEnabled !== false,
+        guard_warnings: dataGuardInfo.warnings || [],
+        ...info,
+      }
+    },
+  })
+
+  tool({
+    name: 'pawbot_brain',
+    description:
+      '「大肥鱼的大脑」诊断与自检：action=status 看大脑桥通不通（模型路由/沙箱/工具白名单/计数）；' +
+      'action=selftest 直接用一句内置提示在 DSH 进程里跑一轮真 Agent（证明模型连通、人设段注入成功）；' +
+      'action=turn 用自定义 system/prompt 跑一轮（调试用，不带 PawBot 工具、不发 QQ）。' +
+      '这不是聊天入口：QQ 群里的对话仍由 PawBot 自己触发大脑。',
+    parameters: {
+      action: {
+        type: 'string',
+        enum: ['status', 'selftest', 'turn'],
+        description: 'status=只读状态（默认）；selftest=内置提示跑一轮；turn=自定义提示跑一轮。',
+      },
+      system: { type: 'string', description: 'turn 用：这一轮要注入的系统提示词（人设）。' },
+      prompt: { type: 'string', description: 'turn/selftest 用：这一轮的用户消息。' },
+      timeout_ms: { type: 'integer', description: '可选：本轮超时毫秒（默认 180000，上限 600000）。' },
+    },
+    async execute(args) {
+      refreshCfg()
+      const action = String(args?.action || 'status')
+      if (action === 'status') {
+        return { ok: true, brain: await brain.describe() }
+      }
+      if (action === 'selftest') {
+        return await brain.selfTest({
+          prompt: args?.prompt ? String(args.prompt) : undefined,
+          system: args?.system ? String(args.system) : undefined,
+          timeoutMs: Number(args?.timeout_ms) || undefined,
+        })
+      }
+      if (action === 'turn') {
+        const system = String(args?.system || '')
+        const prompt = String(args?.prompt || '')
+        if (!system.trim() || !prompt.trim()) return { ok: false, error: 'turn 需要同时给 system 和 prompt' }
+        return await brain.selfTest({
+          prompt,
+          system,
+          timeoutMs: Number(args?.timeout_ms) || undefined,
+        })
+      }
+      return { ok: false, error: `未知 action：${action}` }
+    },
+  })
+
   /* ── 同源代理路由：/pawbot-ui/*（瀏覽器唯一入口，內部再打 PawBot WebUI） ── */
   const proxy = createPawbotProxy({
     pawbotFetch,
@@ -1343,10 +1557,43 @@ export function apply(ctx, config) {
     }
   }, 'pawbot: /pawbot-ui 同源代理路由')
 
+  if (bridge) ctx.effect(() => {
+    const unregister = ctx.webServer.register({ kind: 'exact', path: BRIDGE_PATH, handler: bridge.dispatch })
+    bridgeRouteReady = true
+    return () => {
+      bridgeRouteReady = false
+      bridge.dispose()
+      unregister()
+    }
+  }, 'pawbot: private read-only DSH bridge')
+
+  /* ── 大脑桥路由：PawBot → Host（POST /pawbot-dsh-brain/turn）+ 只读状态 ── */
+  ctx.effect(() => {
+    if (!ctx.webServer || typeof ctx.webServer.register !== 'function') return () => {}
+    const disposers = []
+    try {
+      disposers.push(ctx.webServer.register({ kind: 'exact', path: BRAIN_TURN_PATH, handler: brain.dispatchTurn }))
+      disposers.push(ctx.webServer.register({ kind: 'exact', path: BRAIN_STATUS_PATH, handler: brain.dispatchStatus }))
+      log(`已注册大肥鱼大脑路由：${BRAIN_TURN_PATH}`)
+    } catch (e) {
+      log(`大肥鱼大脑路由注册失败：${e?.message || e}`)
+    }
+    return () => {
+      const disposing = brain.dispose()
+      for (const d of disposers) {
+        try { d?.() } catch {}
+      }
+      // 让 Loader 等 preset 反注册落地，避免「旧实例删掉新实例刚注册的 preset」。
+      return disposing
+    }
+  }, 'pawbot: DSH brain bridge')
+
   /* ── 回收：子進程 + 定時器都經 ctx.effect（dispose 時收整棵樹） ── */
   ctx.effect(
     () => () => {
       disposed = true
+      bridge?.dispose()
+      brain.dispose()
       stopping = true
       for (const t of timers) clearTimeout(t)
       timers.clear()

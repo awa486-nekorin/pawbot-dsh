@@ -169,14 +169,14 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ledger.sticker_allowed("s"))
 
     def test_sticker_config_fallback(self):
-        # 配置缺失或写坏：[1,1] + 0.95
+        # 配置缺失或写坏：[3,6] + 0.12（低频默认值）
         for config in (None, Cfg(media__sticker_gap="oops", media__sticker_chance="bad"),
                        Cfg(media__sticker_gap=[3, 1], media__sticker_chance=2)):
             ledger = media.MediaLedger(None, config=config)
             with patch("pawbot.media.random.randint") as randint, \
                  patch("pawbot.media.random.random", return_value=0.0):
                 ledger.mark_sticker("s")
-                randint.assert_called_once_with(1, 1)
+                randint.assert_called_once_with(3, 6)
                 ledger.turn("s")
                 self.assertTrue(ledger.sticker_allowed("s"))
         self.bot.media_ledger = None

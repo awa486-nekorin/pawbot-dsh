@@ -75,11 +75,11 @@ async def main():
     with patch.object(bot.persona, "facts", return_value="- 自检偏好：喜欢安静的键盘"):
         memory_prompt = bot.persona.build(group_id=987654321, sender="阿明")
     check("记忆注入进来了", "自检偏好：喜欢安静的键盘" in memory_prompt)
-    # 网络用词只当「理解用的背景」，不当词库——标题和收尾都要体现这一点
+    # 网络用词是群聊的日常语言：跟着用，不刻意学也不刻意避开（v3 人设口径）
     check("网络用词注入进来了", "别人可能这么说话" in p or "网络用词" in p)
-    check("网络用词标明「只看懂、别套用」",
-          "不是你的词库" in p or "别学着说" in p,
-          "如果这句没了，模型会把这些词当口头禅复读")
+    check("网络用词标明「跟着用、不用刻意学」",
+          "跟着用" in p or "日常语言" in p,
+          "如果这句变回「别学着说」，模型会把群里的网络语当外语躲开")
 
     print("\n== 记忆 ==")
     hits = bot.memory.recall("熬夜")

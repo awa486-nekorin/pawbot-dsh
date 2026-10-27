@@ -32,8 +32,42 @@ app/**/__pycache__/
 app/.venv/
 *.pyc
 app/data/napcat/
+# 其他运行时状态：都是「机器上长出来的」，更新时不能被仓库版本盖掉
+app/data/memes.json
+app/data/reminders.json
+app/data/relations.json
+app/data/emotion.json
+app/data/mood.json
+app/data/libido.json
+app/data/spice.json
+app/data/topic.json
+app/data/media_ledger.json
+app/data/proactive_state.json
+app/data/bili_post.json
+app/data/album/
 # B 站刷站（bili_scroll）产物与凭证：只留程式，不留资料
 app/data/bili_notes/
 app/data/bili_scroll_seen.json
 app/pawbot/bili_mcp/bili_credential.json
 app/pawbot/bili_mcp/.venv/
+
+# 大肥鱼的大脑（2026-10-27）：工作目录里是它跑电脑工具时写的东西，运行时产物不进库
+app/data/brain/
+# 其它「机器上长出来」的运行时状态（运行时自己写，不该被仓库版本盖掉）
+app/data/people/.daily_gain.json
+# 对话测试窗口的本机设置（群号/QQ/昵称）
+app/data/chat_window.json
+
+
+# 云同步运行态（2026-10-27）：状态、冲突包、拉取备份、候选配置都不进库
+app/data/.sync-state.json
+app/data/config.synced.json
+app/data/sync-conflict-*/
+app/data/backup-sync-*/
+# 数据守卫（2026-10-27）：版本快照/迁移留档不进库
+app/data/.data-guard.json
+app/data/backups/
+app/data/*.migrated-*/
+
+# 上传包产物（2026-10-27）
+dist/

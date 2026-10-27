@@ -231,8 +231,8 @@ class LengthTests(unittest.TestCase):
     def test_hint_carries_target_without_cramming(self):
         agent = Agent.__new__(Agent)
         out = Agent._batch_hint(agent, SimpleNamespace(state={"length_target": 5}))
-        self.assertIn("大约 5 句话", out)
-        self.assertIn("不要为了压句数把几层意思硬塞进一句", out)
+        self.assertIn("大概 5 句的量", out)
+        self.assertIn("别为了凑句数把话撑长", out)
 
 class CapSentencesTests(unittest.TestCase):
     def test_caps_to_target(self):

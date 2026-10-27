@@ -104,6 +104,13 @@ class Proactive:
     def _cfg(self, k, d=None):
         return self.bot.config.get(f"proactive.{k}", d)
 
+    def _qzone_blocked(self, name: str) -> bool:
+        is_qzone = name == "post_qzone" or name.startswith("qzone_")
+        if not is_qzone:
+            return False
+        return not (self.bot.config.get("qzone.enabled", False) is True
+                    and self.bot.config.get("qzone.proactive_enabled", False) is True)
+
     # ------------------------------------------------------------ 每日额度状态
     def _state_path(self) -> str:
         raw = str(self._cfg("state_file", "") or "").strip()
@@ -622,6 +629,12 @@ class Proactive:
                              "content": f"（你想搜：{action['query']}）"})
 
         schemas = self.bot.toolbox.schemas() if tools_on else []
+        # 空间正文/留言没有可靠的逐条公开性证明，不能成为群聊生成素材。
+        # 不只隐藏 schema；下面执行时也拦住模型自行编出的调用。
+        private_space_reads = {"qzone_list", "qzone_comments"}
+        schemas = [s for s in schemas
+                   if s["function"]["name"] not in private_space_reads
+                   and not self._qzone_blocked(s["function"]["name"])]
         # 视频已选好，别再让它去刷 B 站（会重复）
         if action["kind"] == "bili":
             schemas = [s for s in schemas
@@ -676,7 +689,14 @@ class Proactive:
                     args = _json.loads(fn.get("arguments") or "{}")
                 except Exception:
                     args = {}
-                res, extra = await self.bot.toolbox.execute(None, fn.get("name", ""), args)
+                if fn.get("name", "") in private_space_reads:
+                    res, extra = "不能把私人空间动态或留言读取到群聊中。", []
+                elif self._qzone_blocked(fn.get("name", "")):
+                    res, extra = "主动空间操作未开启（qzone.proactive_enabled=false）；不能执行。", []
+                else:
+                    # A proactive run has no verified human actor. Even with
+                    # opt-in, Qzone mutations must reject this absent context.
+                    res, extra = await self.bot.toolbox.execute(None, fn.get("name", ""), args)
                 media.extend(extra)
                 messages.append({"role": "tool",
                                  "tool_call_id": call.get("id", ""),

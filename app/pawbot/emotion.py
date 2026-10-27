@@ -1,7 +1,7 @@
 """
 八维情绪矩阵：让「大肥鱼」有自己的心情，而不是每条都同一个语气。
 
-八个维度（顺序固定）：开心 兴奋 好奇 烦躁 低落 亲昵 得意 疲惫，
+八个维度（顺序固定）：开心 兴奋 惊讶 烦躁 低落 感动 得意 害羞，
 各自 0~100，基准 50。设计上有三层：
 
     衰减    时间久了所有情绪往 50 回落（指数退避，半衰期默认 90 分钟），
@@ -27,7 +27,7 @@ from . import judge
 from .llm import LLMClient
 from .log import log
 
-DIMS = ("开心", "兴奋", "好奇", "烦躁", "低落", "亲昵", "得意", "疲惫")
+DIMS = ("开心", "兴奋", "惊讶", "烦躁", "低落", "感动", "得意", "害羞")
 BASE = 50.0
 # 每个维度自己的基准，目前都是 50；性欲是独立模块（pawbot/libido.py），不混进情绪。
 BASE_BY_DIM = {d: BASE for d in DIMS}
@@ -36,12 +36,12 @@ BASE_BY_DIM = {d: BASE for d in DIMS}
 _STYLE = {
     "开心": "活泼、话多一点、愿意接梗",
     "兴奋": "积极、语气上扬、主动一点",
-    "好奇": "会追问一句、对细节感兴趣",
+    "惊讶": "会惊讶一下、追问一句、语气有起伏",
     "烦躁": "短句、克制、不耐烦",
     "低落": "话少、语气软、不想多说",
-    "亲昵": "黏人、撒娇、愿意多陪一会儿",
+    "感动": "心里软、想多陪一会儿、说话温一点",
     "得意": "小傲娇、小炫耀",
-    "疲惫": "摆烂、短句、懒得解释",
+    "害羞": "扭捏、脸红、话少但软",
 }
 _STRENGTH = {"轻微": "淡淡的", "明显": "比较明显", "强烈": "很明显、藏不太住"}
 _SOOTHE = "别把情绪直接说出来或报数，体现在语气里。"
@@ -290,20 +290,20 @@ class Emotion:
             bump("低落", 5)
             bump("开心", -7)
         if any(k in low for k in ("抱抱", "贴贴", "摸摸", "想你", "亲亲")):
-            bump("亲昵", 13)
+            bump("感动", 13)
             bump("开心", 5)
         if any(k in low for k in ("色", "涩", "骚", "撩", "想要", "硬了", "湿了", "裸", "脱",
                                   "亲一下", "咬一口", "腿", "胸")):
-            bump("亲昵", 5)
+            bump("害羞", 5)
             bump("兴奋", 4)
         if any(k in low for k in ("?", "？", "为什么", "怎么")):
-            bump("好奇", 5)
+            bump("惊讶", 5)
         if any(k in low for k in ("!!", "！！", "卧槽", "牛")):
             bump("兴奋", 6)
         if 1 <= _hour() <= 6:
-            bump("疲惫", 4)
+            bump("低落", 4)
         if addressed:
-            bump("好奇", 2)
+            bump("惊讶", 2)
         return {k: v for k, v in out.items() if v}
 
     # ------------------------------------------------------------ 更新
@@ -315,8 +315,8 @@ class Emotion:
         who = "这条消息在叫她" if addressed else "这条消息不一定是在叫她"
         parts = [
             "你是「大肥鱼」的情绪判官。她是二次元少女群友，不是助手，"
-            "心情随聊天自然起伏：被夸会开心/得意，被骂会烦躁，被撒娇会亲昵，"
-            "无聊或深夜聊天会疲惫。\n"
+            "心情随聊天自然起伏：被夸会开心/得意，被骂会烦躁，被撒娇会感动，"
+            "无聊或深夜聊天会害羞。\n"
             f"当前情绪（基准五十）：{current}",
         ]
         if ctx:
@@ -334,7 +334,7 @@ class Emotion:
             "第一个非空白字符是 { ，最后一个非空白字符是 } ，能直接 json.loads 解析；"
             "不要解释、不要代码块、不要前后缀、不要先写一段话再给 JSON，"
             "没有变化也输出 {}。格式就长这样："
-            '{"开心": 9, "亲昵": 6, "烦躁": -4}')
+            '{"开心": 9, "感动": 6, "烦躁": -4}')
         return "\n".join(parts)
 
     @staticmethod
@@ -388,22 +388,35 @@ class Emotion:
 
             deltas = None
             if use_judge and config is not None:
-                timeout = self._num_cfg("emotion.judge_timeout", 10.0)
-                data = None
+                # ① 决策模型（类 JEV，概率化）：开着就优先用它判「变不变/变什么/多强」
                 try:
-                    if self._judge_model(config):
-                        # 配了 judge_model：走中转上的 Gemini，不碰 judge.* 通道
-                        data = await self._judge_via_gemini(
-                            config, self._judge_prompt(text, context, addressed),
-                            timeout)
-                    elif judge.judge_enabled(config):
-                        data = await judge.judge_json(
-                            config, self._judge_prompt(text, context, addressed),
-                            timeout=timeout)
+                    from . import decider
+                    if decider.enabled(config):
+                        decided = await decider.decide_mood(
+                            config, text, context, addressed, self.values())
+                        if decided is not None:
+                            deltas = decided
+                            log.debug(f"决策模型情绪：{deltas}")
                 except Exception as e:
-                    log.debug(f"判官异常：{type(e).__name__}")
+                    log.debug(f"决策模型异常：{type(e).__name__}")
+                # ② 没开/失败：退回原来的判官（judge_model 或 judge.* 通道）
+                if deltas is None:
+                    timeout = self._num_cfg("emotion.judge_timeout", 10.0)
                     data = None
-                deltas = self._clean_deltas(data)
+                    try:
+                        if self._judge_model(config):
+                            # 配了 judge_model：走中转上的 Gemini，不碰 judge.* 通道
+                            data = await self._judge_via_gemini(
+                                config, self._judge_prompt(text, context, addressed),
+                                timeout)
+                        elif judge.judge_enabled(config):
+                            data = await judge.judge_json(
+                                config, self._judge_prompt(text, context, addressed),
+                                timeout=timeout)
+                    except Exception as e:
+                        log.debug(f"判官异常：{type(e).__name__}")
+                        data = None
+                    deltas = self._clean_deltas(data)
             heuristic = self.heuristic_deltas(text, addressed=addressed)
             if deltas is None or not deltas:
                 deltas = heuristic

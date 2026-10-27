@@ -323,8 +323,8 @@ def mood_label(score: float) -> str:
 
 # 绑定八维情绪时用的分组，名字必须和 emotion.DIMS 一致。
 # 「好奇」是中性的，两边都不算，免得问一句就当成高兴。
-_POSITIVE_DIMS = ("开心", "兴奋", "亲昵", "得意")
-_NEGATIVE_DIMS = ("烦躁", "低落", "疲惫")
+_POSITIVE_DIMS = ("开心", "兴奋", "感动", "得意")
+_NEGATIVE_DIMS = ("烦躁", "低落")
 
 
 class Mood:

@@ -131,7 +131,11 @@ class FetchFromDoutuTests(unittest.TestCase):
         meta = self.book.index()[name]
         self.assertIn("开心", meta["tags"])
         self.assertIn("笑死", meta["tags"])
-        self.assertEqual(meta["desc"], "斗图网：开心")
+        # 不再写「斗图网：xxx」这种假描述：没配看图通道就用标签拼一句人话
+        self.assertEqual(meta["desc"], "开心、笑死的样子")
+        self.assertEqual(meta["desc_source"], "tags")
+        self.assertEqual(meta["mood"], "开心")
+        self.assertNotIn("斗图网", meta["desc"])
         self.assertEqual(len(meta["sha1"]), 40)
         self.assertTrue(os.path.isfile(os.path.join(self.book.dir, name)))
 

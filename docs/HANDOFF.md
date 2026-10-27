@@ -3,7 +3,7 @@
 > **给下一个 Agent**：你没有之前的对话上下文。这份文档是自包含的——读完你应该知道：
 > 这个项目是什么、代码在哪、现在做到哪一步、哪些硬规则不能碰、下一步该干什么、哪些坑已经踩过。
 >
-> 最后更新：2026-10-26 · 对应 commit `ff19c36`
+> 最后更新：2026-10-26 · 2.0.1 改动**尚未提交**，基于 commit `ba7c665`
 
 ---
 
@@ -12,7 +12,7 @@
 ```
 仓库（同时也是 DSH bundle 源码）  D:\WorkBuddy\pawbot-dsh
 GitHub                           https://github.com/awa486-nekorin/pawbot-dsh  (public, MIT, main)
-当前 HEAD                         ff19c36  (6 commits)
+当前 HEAD                         ba7c665  (7 commits；2.0.1 改动还在工作区未提交)
 DSH profile 里的安装形态           link:D:/WorkBuddy/pawbot-dsh → node_modules/@local/pawbot
 Python 本体（随仓库自带）           app/   （180 个被追踪文件 / 2.06 MB）
 共享数据目录                       D:/WorkBuddy/pawbot-bili-watch-data
@@ -24,10 +24,16 @@ Python 本体（随仓库自带）           app/   （180 个被追踪文件 / 
 ```powershell
 cd D:\WorkBuddy\pawbot-dsh
 node test/offline.mjs              # 期望 19 passed
-node test/client-meta-check.mjs    # 期望 18 passed
+node test/client-meta-check.mjs    # 期望 32 passed（344 key）
+node test/dsh-brain-offline.mjs    # 期望 15 passed（大肥鱼大脑桥）
 node bili-watch/selfcheck.mjs      # 期望 52 passed
 node test/setup-offline.mjs        # 期望 57 passed
 ```
+
+**2026-10-27 新增（读 §16）**：大肥鱼的大脑现在可以交给 **DSH 进程内的真 Agent** 跑——
+每轮一个 Agent、完整人设、能用 `pwsh / read / write / 搜索` 等电脑工具、还能回调 PawBot 的 30 个业务工具。
+入口在 `lib/dsh-brain.js`（Host）+ `app/pawbot/brain.py`（Python）；开关是 PawBot 配置 `llm.provider = "dsh"`。
+本机已切到 `dsh` 并实测 QQ 全链路（见 `docs/BRAIN-VERIFICATION.md`）。
 
 ---
 
@@ -39,10 +45,11 @@ node test/setup-offline.mjs        # 期望 57 passed
 
 | 组成 | 位置 | 干什么 |
 |---|---|---|
-| **Host 插件** | `index.js` + `lib/*.js` | 把 PawBot 当受管子进程（起停/日志/健康检查）；一键安装（建 venv、装依赖）；NapCat 编排；注册 `/pawbot-ui/*` 同源代理路由；暴露 8 个工具 |
-| **Client 面板** | `client.js` | DSH 设置页里 4 个分页：**启动 / 状态 / 设定 / 人设**。286 个 config key 的中文表单、人设编辑器、一键启动四步引导 |
+| **Host 插件** | `index.js` + `lib/*.js` | 把 PawBot 当受管子进程（起停/日志/健康检查）；一键安装（建 venv、装依赖）；NapCat 编排；注册 `/pawbot-ui/*` 同源代理路由；暴露 12 个工具 |
+| **Client 面板** | `client.js` | DSH 设置页里 5 个分页：**启动 / 状态 / API 密钥 / 设定 / 人设**。315 个 config key 的中文表单、人设编辑器、一键启动四步引导 |
 | **B 站子插件** | `bili-watch/` | 「真的去看 B 站」：抓字幕+热评 → 一次 LLM → 结构化报告；判重三层、候选池、笔记 md。同时注册 `bili_watch` / `bili_watch_status` |
-| **PawBot 本体** | `app/` | Python 项目自带在仓库里（`app/pawbot/` 核心 + `app/plugins/` 12 个内置插件 + `app/tools/` 66 个测试 + `app/web/` 自带 WebUI 页） |
+| **大肥鱼的大脑** | `lib/dsh-brain.js` + `app/pawbot/brain.py` | `llm.provider="dsh"` 时把每轮对话交给 DSH 进程内的 Agent（人设 complete 注入、电脑工具 preset、PawBot 工具回调）；默认可用、可一键回退直连 API。见 `docs/BRAIN.md` |
+| **PawBot 本体** | `app/` | Python 项目自带在仓库里（`app/pawbot/` 核心 + `app/plugins/` 12 个内置插件 + `app/tools/` 70 个测试 + `app/web/` 自带 WebUI 页） |
 
 ---
 
@@ -52,18 +59,20 @@ node test/setup-offline.mjs        # 期望 57 passed
 D:\WorkBuddy\pawbot-dsh\
 ├─ package.json              # name=@local/pawbot；files 含 app/lib/bili-watch/DEPLOY.md；dsh.bundle.patch + dsh.client
 ├─ cordis.patch.yml          # ⚠ 服务器上被本地改过（见 §9.3）；仓库版本只有两行 insert：pawbot + pawbot-bili-watch
-├─ index.js                  # ★ Host 主文件（~1300 行）：子进程管理、一键安装编排、NapCat 编排、8 个工具、路由注册
-├─ client.js                 # ★ Client 面板（~3200 行）：4 分页 + 286 key 的中文 METADATA（label/help/impact 徽章）
+├─ index.js                  # ★ Host 主文件（~1490 行）：子进程管理、一键安装编排、NapCat 编排、12 个工具、路由注册、大脑桥接线
+├─ client.js                 # ★ Client 面板（~3900 行）：5 分页 + 344 key 的中文 METADATA（label/help/impact 徽章）
 ├─ lib/
-│  ├─ hostdeps.js            # 从宿主树解析 schemastery / defineTool（拿不到就降级）
+│  ├─ hostdeps.js            # 从宿主树解析 schemastery / defineTool / 其它 @deepseek-ai/*（拿不到就降级）
 │  ├─ config-utils.js        # maskSecrets / pickUpdatable / deepMerge / pickSection / diffKeys（MASK = '***已设定***'）
 │  ├─ webui-proxy.js         # /pawbot-ui/* 全部动作 + CSRF 守卫（Origin / Sec-Fetch-Site / Referer / Content-Type）
 │  ├─ setup.js               # detectPython / ensureVenv / ensureDeps / ensureConfig / setupState / boot 状态机（可注入 run()）
-│  └─ napcat.js              # detectMode(docker|binary|none) / 生成 OneBot 反向 WS 配置 / 启动 / 读 WebUI+token / 抓二维码 / 判登录
+│  ├─ napcat.js              # detectMode(docker|binary|none) / 生成 OneBot 反向 WS 配置 / 启动 / 读 WebUI+token / 抓二维码 / 判登录
+│  └─ dsh-brain.js           # ★ 大肥鱼大脑：进程内造 Agent、complete 人设、电脑工具 preset、PawBot 工具代理、/pawbot-dsh-brain/*
 ├─ test/
 │  ├─ offline.mjs            # 19 条：config-utils 纯函数 + 代理动作 + CSRF/413/415/502
 │  ├─ setup-offline.mjs      # 57 条：装环境、NapCat 编排、boot 四步状态机、路由接线（全用假 run()/假 fetch）
-│  └─ client-meta-check.mjs  # 18 条：拿真 config（6185 或 app/data/config.json）校验 286 key 的中文字典
+│  ├─ client-meta-check.mjs  # 32 条：纯离线读 config.py DEFAULT 校验 344 key 中文字典
+│  └─ dsh-brain-offline.mjs  # 15 条：大脑桥协议/鉴权/限额 + 纯函数（不启 DSH）
 ├─ bili-watch/               # ★ B 站子插件（22 个文件）
 │  ├─ index.js               # 抓取编排、请求队列、候选池、自动备货、2 个工具
 │  ├─ lib/{bili,http,cookie,credential,wbi,subtitle,report,notes,seen,pool,queue,inflight,request-lifecycle,model-guard,atomic,hostdeps}.js
@@ -86,6 +95,7 @@ D:\WorkBuddy\pawbot-dsh\
 │  │  ├─ bili_scroll.py      # ★ 自己刷 B 站（读字幕→写 md 笔记→定时）
 │  │  ├─ bili_mcp/           # ★ 内置 bilibili-mcp（MIT）；bili_credential.json 已被 gitignore
 │  │  ├─ mem/                # 记忆 v2：assemble / layers / entities / decay（渐忘）/ write / bridge（跨会话桥）
+│  │  ├─ brain.py           # ★ 大肥鱼大脑客户端：env 门控、一轮请求、当前轮 ctx 登记表（工具回调）
 │  │  ├─ persona.py          # 人设 + owner_line（主人=老爹）
 │  │  ├─ emotion.py / proactive.py / life.py / reminders.py / qzone.py / selfedit.py …
 │  ├─ plugins/               # 12 个内置插件（ai_chat / group_events / life_events / relations / qzone …）
@@ -97,7 +107,12 @@ D:\WorkBuddy\pawbot-dsh\
 │  └─ apply-update.sh                    # 服务器上用离线包更新（先备份、不碰 app/data）
 ├─ README.md                 # 面向使用者：装什么、面板怎么用、B站这半、诚说明
 ├─ DEPLOY.md                 # 面向部署者：Linux 清单、必改配置、NapCat、SESSDATA、已知降级
-└─ docs/HANDOFF.md           # ← 本文
+└─ docs/
+   ├─ HANDOFF.md            # ← 本文
+   ├─ 2026-10-27-交付报告.md  # 这一批（人设 v3 落库 + 大肥鱼的大脑）的交付说明/验证/回滚
+   ├─ BRAIN.md              # 大肥鱼大脑：设计、协议、配置、验证、回滚
+   ├─ BRAIN-VERIFICATION.md # 大肥鱼大脑：2026-10-27 本机实测记录（含 QQ 全链路证据）
+   └─ por-20261027/         # 人设交付包归档 + 落库收据（回滚只认这里的 persona_v0 备份）
 ```
 
 ---
@@ -116,7 +131,16 @@ Host 插件 index.js  ──(CSRF 守卫)──►  lib/webui-proxy.js
    ├─ spawn/kill 子进程 ──────────────────► py run.py（cwd=appDir）
    │                                        │
    │                                        ├─ OneBot 反向 WS 监听 0.0.0.0:6199/ws ◄── NapCat（QQ 协议端）
-   │                                        └─ 读写 app/data/*（config/persona/记忆/群友档）
+   │                                        ├─ 读写 app/data/*（config/persona/记忆/群友档）
+   │                                        └─ 每轮聊天（llm.provider=dsh 时）
+   │                                              │ POST /pawbot-dsh-brain/turn（loopback + token）
+   │                                              ▼
+   │                                        lib/dsh-brain.js
+   │                                          ├─ ctx.agents.create()：进程内新 Agent（每轮）
+   │                                          ├─ complete 人设段 ← PawBot 拼好的 system
+   │                                          ├─ preset `pawbot-brain`：pwsh/read/write/edit/glob/grep/web
+   │                                          ├─ PawBot 工具代理（30 个）──► POST /api/brain/tool（真 ctx 执行）
+   │                                          └─ followup → 等 idle → 汇总文本 + 媒体段
    │
    └─ bili-watch 插件 ◄── 共享目录 D:/WorkBuddy/pawbot-bili-watch-data
                                    ▲            ▲
@@ -125,10 +149,13 @@ Host 插件 index.js  ──(CSRF 守卫)──►  lib/webui-proxy.js
                                    └──► PawBot 的 bili_watch.py 读报告 → 群聊里说出来
 ```
 
-**两条独立的数据通道，别混**：
+**三条独立的数据通道，别混**：
 
 1. **配置/控制**：面板 → `/pawbot-ui/*` → PawBot WebUI `/api/*`（改 `app/data/config.json`）
 2. **看片结果**：bili-watch 插件 → 共享目录 `reports/*.json` → PawBot `bili_watch.py` 读 → 表达层发群
+3. **大脑（2026-10-27 新增）**：PawBot → `POST /pawbot-dsh-brain/turn` → DSH 进程内 Agent；
+   工具回调反向走 `POST /api/brain/tool`。两条都是 loopback + 一次性 Bearer token，
+   与浏览器面板的 `/pawbot-ui/*`（CSRF 守卫）完全隔离。细节见 `docs/BRAIN.md`。
 
 ---
 
@@ -192,9 +219,18 @@ POST /pawbot-ui/boot               一键四步（非阻塞）
 GET  /pawbot-ui/boot/status        {phase, steps[4], done}
 ```
 
-### 6.2 工具（10 个）
+### 6.2 工具（11 个）
 
-`pawbot_status` · `pawbot_logs` · `pawbot_restart` · `pawbot_health` · `pawbot_config_get`（`reveal:true` 才回真值）· `pawbot_config_set` · `pawbot_setup` · `pawbot_napcat` · `bili_watch` · `bili_watch_status`
+`pawbot_status` · `pawbot_logs` · `pawbot_restart` · `pawbot_health` · `pawbot_config_get`（`reveal:true` 才回真值）· `pawbot_config_set` · `pawbot_setup` · `pawbot_napcat` · `pawbot_brain`（status/selftest/turn；见 `docs/BRAIN.md`）· `bili_watch` · `bili_watch_status`
+
+### 6.2b 大脑路由（loopback，不走浏览器面板）
+
+```
+POST /pawbot-dsh-brain/turn     PawBot → Host：一轮对话（Bearer: PAWBOT_DSH_BRAIN_TOKEN）
+GET  /pawbot-dsh-brain/status   只读诊断（loopback，无需 token，不含凭据）
+POST /api/brain/tool            Host → PawBot：执行一个 PawBot 业务工具（同一个 token）
+GET  /api/brain/status          PawBot 侧诊断（env 注入/当前 provider/活动轮次）
+```
 
 ### 6.3 共享目录契约（`dataRoot`）
 
@@ -230,35 +266,62 @@ top_comments[{text,like}], take, share_worthy, share_reason, created_at, source_
 | 块 | 状态 | 备注 |
 |---|---|---|
 | PawBot 包成 DSH Host 插件（起停/日志/健康） | ✅ 可用 | Windows 用 `taskkill /T /F`（优雅停止在 Windows 不可得）；Linux 走 SIGTERM |
+| **大肥鱼的大脑（DSH 进程内 Agent）** | ✅ **本机 QQ 全链路实测通过** | `llm.provider=dsh`：每轮新 Agent + complete 人设 + 电脑工具 preset + 30 个 PawBot 工具代理；**电脑工具默认只给主人**（群友轮次不挂 preset）。实测「聊一句」5.5s、主人「查 CPU/内存」真跑 pwsh 17~41s、群友同一句如实说跑不了；默认 `workspace-write`，`approval=never` 不弹窗；失败回退直连 API。见 `docs/BRAIN.md` / `docs/BRAIN-VERIFICATION.md`。**未验证**：真 NapCat、多群并发、图片进大脑 |
 | `/pawbot-ui` 同源代理 + CSRF + secrets 遮罩 | ✅ 可用并实测 | 跨源 403 / 非 JSON 415 / send ok:false→502 |
-| DSH 设置页面板（4 分页、286 key 中文表单） | ✅ 代码完成 | **真浏览器渲染未验证过**；面板改动需刷新页面或重载 bundle |
+| DSH 设置页面板（5 分页、344 key 中文表单） | ✅ 代码完成 | a11y 关联/键盘分页/搜索 debounce/状态新鲜度已实现并通过静态检查；**真浏览器与读屏实测未验证** |
 | 一键安装（venv + 依赖 + 配置） | ✅ 逻辑完成 + 离线单测 | **真跑一次 venv+pip 未验证** |
 | NapCat 编排（docker / binary / 手动步骤） | ⚠ 代码完成，**完全未实机验证** | 本机无 docker、无 NapCat |
 | B 站看片（抓字幕+热评→报告） | ✅ 可用 | 无 SESSDATA 时 `watched_level` 停在 `desc_comments`（如实降级） |
-| 判重三层 + 候选池 + 失败重试/隔离 | ✅ 可用 | 8 线程并发写 shared.json 已修（0 异常、240 笔不丢） |
+| 判重三层 + 候选池 + 失败重试/隔离 | ✅ 可用 | 8 线程并发写 shared.json 已修（0 异常、240 笔不丢）；仅送达视频段落后写 shared |
 | 模型白名单（只准 flash） | ✅ 可用 | 实测 8 种 pro 写法全部被收敛 |
-| 认人/时间戳/图片归属/去 AI 味/记忆来源标注 | ✅ 可用 | 66 个 Python 测试，65 通过 |
-| 服务器侧「自己刷 B 站」(`bili_scroll` + `bili_mcp`) | ✅ 已并入仓库 | 可选依赖 `app/requirements-bili.txt` **未纳入一键安装** |
+| 知识库导入 / 本地优先检索 | ✅ 代码完成 | 显式离线 JSON 导入；聊天 Moegirl 查找不联网、不自动写库 |
+| QQ 空间权限与写入账本 | ✅ 离线测试覆盖 | 主人 + message + whitelist；私聊读取；正每日额度、持久化预留、一次调用/回执确认；未实机验证 NapCat 扩展动作 |
+| DSH→PawBot 状态桥 | ✅ 离线测试覆盖 | 仅 `bili_watch_status`，默认关闭、loopback/token、限速/超时、投影敏感字段；未验证运行中的 DSH bridge |
+| QQ 对话草稿风格 | ✅ 代码完成 | 仅 QQ 上下文提示，不改成人向模板、不额外调用模型 |
+| **人设 v3 落库（por 交付包）** | ✅ 已应用 + 测试同步 | `persona.md` v3 + 三处代码层 + 5 个测试/自检同步 + `docs/por-20261027/` 归档；见该目录 README |
+| **人设 v4（自我认知 + RP 思考）** | ✅ 已应用（2026-10-27 追加） | `persona.md` 新增「你脑子里怎么想」（第一人称 RP、不写作者视角分析）+「你怎么看自己、你在哪」（跑在主人设备 / DeepSeek 模型 API / 有自己的性格、属于主人）；软糯活人感微调。gemini-4-argon-medium 生成 + 10 组盲评 v3 3.90 → v4 4.15；见 `docs/por-20261027/09_活人感A_B_v3v4.md` |
+| 服务器侧「自己刷 B 站」(`bili_scroll` + `bili_mcp`) | ✅ 已并入仓库 | 汇报可选「@ 谁」（off/owner/all）与「贴完再补一句」；可选依赖 `app/requirements-bili.txt` **未纳入一键安装** |
+| 自动发 B 站动态 (`bili_post`) | ✅ 离线测试覆盖，**默认关** | 需 `tools.bili_jct`；正每日上限、先预留再发、只调一次、回执要 `success is True`；同天不重发同文；**真机发布未验证** |
 | 跨会话记忆桥 (`mem/bridge.py`) | ✅ 已并入 | 默认单向 群→私聊 |
 
 **已知失败（不是这次引入的）**：`app/tools/test_pixiv_session.py::test_filters_and_sorting`
 （图片排序断言 `['9','8','7','10'] != ['9','8','2','7']`）。`pixiv_session.py` 没人改过，与主线无关。
+`test/setup-offline.mjs` 与 `bili-watch/selfcheck.mjs` 里硬编码 `C:\dsh-temp` 的用例在受限沙箱下会
+`EPERM: mkdtemp`（2026-10-27 在 danger-full-access 下已实跑全过，见 §8）。
+
+### 7.1 2.0.1 的未验证面（**别当成已验收**）
+
+- **QQ 空间真机零验证**：`get_qzone_msg_list` / `get_qzone_comments` / `update_qzone_msg` /
+  `send_qzone_comment` 都是 NapCat 扩展接口，没有官方保证；所有权限、额度、回执逻辑只用假连接测过
+- **DSH bridge 端到端未跑过**：Host 路由、子进程环境变量注入、真实 Host→PawBot 往返都没在运行中的 DSH 里验证；
+  两侧只有各自的离线测试
+- **面板只有静态检查**：真浏览器渲染、读屏、键盘焦点顺序都没实测
+- **B 站真实凭据流程未验证**：没有 SESSDATA，`watched_level` 停在 `desc_comments` 属如实降级
+- **自动发 B 站动态从未真机跑过**：`bili_post` 只用假后端测过；真实发布要 `tools.bili_jct`，
+  且 B 站风控可能让 `success` 为 false（代码会记 `unconfirmed`、照样扣额度，不会重试）
+- `app/data/config.json` 里没有 `qzone.proactive_enabled`，但 `config.py` DEFAULT 有且为 `false`；
+  运行时按 DEFAULT 合并，**不要**为了让面板「看得见」去手改运行时数据文件
 
 ---
 
 ## 8. 测试与验证
 
 ```powershell
-# JS（在 D:\WorkBuddy\pawbot-dsh）
-node test/offline.mjs             # 19 passed — 代理动作 + CSRF/413/415/502
-node test/setup-offline.mjs       # 57 passed — 装环境/NapCat/boot 状态机/路由接线（全假依赖）
-node test/client-meta-check.mjs   # 18 passed — 286 key 中文字典 vs 真 config（6185 或 app/data/config.json）
-node bili-watch/selfcheck.mjs     # 52 passed — 抓取/判重/守门/超时/去敏
+# JS（在 D:\WorkBuddy\pawbot-dsh）— 2026-10-27 实跑结果
+node test/offline.mjs              # 19 passed, 0 failed
+node test/client-meta-check.mjs    # 31 passed, 0 failed — 344 key（74 常用 + 270 进阶）vs config.py DEFAULT，纯离线
+node --test test/dsh-tool-bridge-offline.mjs  # 15 passed, 0 failed
+node test/dsh-tool-bridge-host.mjs            # 3 passed, 0 failed
+node test/dsh-brain-offline.mjs     # 20 passed, 0 failed
+node test/data-guard-offline.mjs    # 9 passed, 0 failed — 版本快照/外部 dataDir 迁移/重装不丢 key — 大脑桥协议/身份闸/超时（含注入假 agents 真跑 runTurn）
+node test/setup-offline.mjs        # 57 passed, 0 failed（danger-full-access 下 C:\dsh-temp 可写）
+node bili-watch/selfcheck.mjs      # 52 passed（同上；若沙箱受限，硬编码 C:\dsh-temp 的 6 条会 EPERM）
 
-# Python（在 D:\WorkBuddy\pawbot-dsh\app，先 $env:PYTHONPATH="."）
-py -m compileall -q pawbot plugins run.py
-py tools/test_mem.py …            # 66 个测试文件；一次全跑约 3~5 分钟（基线 65 过 / 1 个既有失败）
-Get-ChildItem tools/test_*.py | ForEach-Object { cmd /c "py $($_.FullName) 2>&1" }
+# Python（在 D:\WorkBuddy\pawbot-dsh\app，先 $env:PYTHONPATH="."）— 2026-10-27 实跑结果
+py -m unittest discover -s tools -p 'test_*.py' -q   # 1319 ran, 1 failure（既有 pixiv 排序）, 1 skipped
+py -m unittest tools.test_brain -v                   # 20 passed（大脑客户端/降级/工具回调/owner 闸）
+py -m unittest tools.test_bili_post tools.test_bili_scroll_report -q   # 27 ran, OK（自动发动态 + 刷片汇报开关）
+py -m unittest tools.test_dsh_bridge tools.test_qzone tools.test_qzone_security tools.test_qzone_tools tools.test_qzone_proactive tools.test_album tools.test_bili_post tools.test_bili_scroll_report tools.test_bili_delivery tools.test_whitelist -q  # 117 ran, OK
 ```
 
 > 坑：PowerShell 里 `py test.py 2>&1 | Select-String "OK"` 会因 stderr 噪音误判。
@@ -318,22 +381,29 @@ git archive --format=tar.gz -o pawbot-dsh-update.tgz --prefix=pawbot-dsh/ HEAD -
 
 ### P1
 
-1. **在服务器上真跑一次「一键启动」**（①③④；② 无 docker 会 skip）
+1. **「大肥鱼的大脑」的未验证面**（2026-10-27 新增，详见 `docs/BRAIN.md` §7）
+   - 真 NapCat / 真 QQ（本机用 OneBot 反向 WS 探针模拟）；多群并发压测
+   - 图片进大脑（当前降级为「看不到图，只按文字回」）
+   - 每轮一个 session 日志（7~50KB/轮）的清理策略——等 DSH 提供 delete API，或改成每会话常驻 Agent
+   - `danger-full-access` 下的长命令/交互式命令/后台任务
+2. **在服务器上真跑一次「一键启动」**（①③④；② 无 docker 会 skip）
    - 验收：`pawbot_status.ui_route === 'registered (18 routes)'`、面板四步全绿、群里能对话
    - 当前最大未知：venv/pip 真安装路径从未跑过
-2. **NapCat 全链路实机验证**（docker run/pull、`host.docker.internal` 反向连、WebUI token 正则、扫码登录判定）
+3. **NapCat 全链路实机验证**（docker run/pull、`host.docker.internal` 反向连、WebUI token 正则、扫码登录判定）
    - 验收：面板出现「打开 NapCat 登录页」，扫码后 `loggedIn:true`
-3. **`bili_scroll` 的可选依赖纳入一键安装**（`app/requirements-bili.txt`）
+4. **`bili_scroll` 的可选依赖纳入一键安装**（`app/requirements-bili.txt`）
    - 建议加 Config 开关 `installBiliDeps`（默认 false），勾了才装
-4. **把服务器的机器专属配置从源码搬到设置页**（provider / dataRoot），否则每次更新都要重配
+5. **把服务器的机器专属配置从源码搬到设置页**（provider / dataRoot），否则每次更新都要重配
 
 ### P2
 
-5. `proactive.py` 的「只看标题」分支仍不写 `shared.json`（工具路径已写）→ 可能重复推荐同一条
-6. SESSDATA 没有 UI 入口：`bili_watch.save_sessdata()` 只能从脚本调；面板缺「贴凭据」按钮
-7. 面板 a11y（label `htmlFor`、对话框 focus trap）、286 栏每次按键全量重绘、TTL 三处写死 72h、locale 文件未接上（文字硬编码）
-8. `app/data/persona.md` 含成人向内容且在**公开仓库**里 → 是否换成中性示例，需用户拍板
-9. `setup.js` 的 timer 只在 apply 时算一次：改 `pollSec`/`autoIntervalMin` 要重启 PawBot 才生效，面板没有任何提示
+6. `proactive.py` 的「只看标题」回退分支（`bilibili.pick_lively` 那条，非报告路径）仍不写 `shared.json`
+   → 可能重复推荐同一条；报告路径和工具路径都已写
+7. SESSDATA 没有 UI 入口：`bili_watch.save_sessdata()` 只能从脚本调；面板缺「贴凭据」按钮
+8. 面板真实浏览器/读屏实测（label `htmlFor` 与 focus trap 已实现，只过静态检查）、搜索时 ConfigTab 仍每次按键重绘（debounce 只延迟过滤）、TTL 三处写死 72h、locale 文件未接上（文字硬编码）
+9. `app/data/persona.md` 含成人向内容且在**公开仓库**里 → 是否换成中性示例，需用户拍板
+10. `setup.js` 的 timer 只在 apply 时算一次：改 `pollSec`/`autoIntervalMin` 要重启 PawBot 才生效，面板没有任何提示
+11. 人设 v3 之后仍残留的 P2：`style.py` 的 `strip_filler_opener`（按哈希削一半「唔/嗯」开头）与 `body_reaction_max` 还锁在旧人设口径；`test_assistant_phrases_*` 现在是空转断言（详见 `docs/por-20261027/README.md` 与审计报告）
 
 ---
 
@@ -352,6 +422,24 @@ git archive --format=tar.gz -o pawbot-dsh-update.tgz --prefix=pawbot-dsh/ HEAD -
 11. **服务器改动看起来很小，其实 8 个 py + 6 个新文件** → 只比了「差异文件数」。→ 用 `git diff --no-index --numstat` 看行数，并逐文件读 diff。
 12. **仓库里 `app/` 本地膨胀到 69MB** → 跑 Python 测试会在 `app/data/` 生成运行时数据（已被 gitignore，但别 `git add -f`）。→ 提交前看 `git count`/`git diff --cached --stat`。
 13. **v4-pro 烧 token** → 早期用 v4-pro 跑子代理，又贵又差（用户原话：「V4.1 Flash 比 V4 Pro 强很多」）。→ 只准 flash，且已做成白名单硬拦。
+14. **大脑桥 URL 拼错成 PawBot 自己的 6185** → 症状：`/api/llm/test` 报 `HTTP 404`。→ 原因：`envForChild` 用了 `pawbotBase`（Host→PawBot 的地址），但子进程要打的是 **DSH WebServer origin**。→ 现在分开两个 getter：`pawbotBase`（工具回调）/ `hostOrigin`（turn 入口），status 里有 `turn_url` 可直接核对。
+15. **`complete:true` 人设把工具说明也压掉了** → 这是**故意的**（模型只看到 PawBot 的 system）；如果哪天发现她不会用工具，先把 `brainCompletePersona` 设 false 对比，而不是改人设。
+16. **不挂 preset 的新 Agent 几乎没有工具** → 本部署 web-app 把宿主 `tool-pwsh/tool-fs/tool-fs-search/tool-web` 全 disabled 了；`lib/dsh-brain.js` 因此程序化注册 `pawbot-brain` preset。别把这段删掉。
+17. **`approval='never'` 不是放行** → 它表示「需要审批的操作直接拒」。要真正写工作区外，得同时把 `brainSandbox` 提到 `danger-full-access`；只改 approval 会得到「一直被拒」的假象。
+18. **每轮一个 Agent 的 session 日志会累积** → `~/.dsh/sessions/` 每轮 +1（7~50KB，zstd）。这是 DSH 的 persistence 语义（create 即落盘、dispose 不删、无 delete API）。→ 要么定期清，要么以后改成「每会话常驻 Agent」。别把它当 bug 排查。
+19. **测试里假 llm 的签名是 `chat_message(messages, tools)`** → 主对话路径只有 `brain_conv` 非空时才传第三个 kwarg；别改回「总是传 kwarg」，否则 test_memes/test_diary/test_longmem/test_turns 一起红。
+20. **大脑的「电脑工具」默认只给主人** → 群友轮次不挂 preset（`brainOwnerOnly=true`）。验收时如果发现她「没有 pwsh」，先看 `pawbot_status.brain.owner_only` 与 `account.owner_ids`，别去改工具白名单。
+21. **`conv` 是每轮唯一的（`session_id#uuid`）** → 不要把 tool 回调的 conv 截断/归一化成 session_id，否则旧轮次残留回调会串到新 ctx（confused deputy）。`/api/brain/tool` 的 409 `NO_ACTIVE_TURN` 是正常的自我保护，不是 bug。
+22. **`llm.provider=dsh` 但脑子没接通时不要落到 mock** → 有 `llm.api_key` 才回退直连 API；没有就直接失败（否则「（mock 模式…）我听到你说」会原样发进群）。
+23. **`pawbot_brain selftest` 是「以主人身份」跑的** → 它显示的电脑工具列表不代表群友能拿到；群友轮次的真实放行情况看 Host status 的 `last_summary.computer_tools`。
+24. **新增 config key 必须同步 client.js 元数据** → `test/client-meta-check.mjs` 会数「config 叶子数 == 元数据数」，漏一个就红；API 页的 `API_GROUPS` 还要求覆盖所有 `control:'secret'` 字段（这条也在 meta 测试里）。
+25. **表情包描述是真的了** → `data/stickers/index.json` 条目含 `desc/mood/desc_source`；旧的假 desc「斗图网：xxx」用 `app/tools/describe_stickers.py --dry/--apply` 补（写前自动备份 index）。`media.sticker_vision=true` 时收新图会调 togemini（约 7~9 秒/张，异步不卡回复）；没网/没 key 时退回标签拼人话。
+26. **表情包节奏默认很低** → `media.sticker_chance=0.12` + `persona.sticker_gap=[3,6]`；但运行态 `app/data/config.json` 里若显式写着旧值会覆盖默认，改完记得同步运行态。情绪 `intensity=="强烈"` 或 dominant ∈ 兴奋/烦躁/亲昵 时绕闸；对方明确说「发个表情包」也会放行（`_sticker_requested`）。
+27. **语气词削减只动 `啊/嘛/啦/呀/哦/哟`** → `呢/吧/吗` 保留（疑问/商量，削了会改意思）；`reply.tone_trim=0.7` 是确定性哈希，语C 分支不削；「干嘛/哎呀」有保护词表。改规则先跑 `tools.test_style` + `test_identity` + `test_roleplay_style`。
+28. **云端同步默认关闭、且 config 必须加密** → `sync.enabled=false`；`include_config=true` 且没设 `sync.passphrase` 会直接 `CONFIG_REQUIRES_ENCRYPTION`（fail-closed）。加密依赖 `cryptography`/`pycryptodome`，部署机缺库时先 `pip install cryptography`，否则只能同步人设/记忆。
+29. **pull 默认不覆盖运行态配置** → 只写 `app/data/config.synced.json` 并回 key 级 diff；要覆盖必须 `--overwrite-config` 或面板勾 `sync.overwrite_config`，覆盖前自动备份到 `data/backup-sync-<时间>/`，并保留本机 `sync` 段。
+34. **情绪维度改名要全链路同步（2026-10-27）** → `emotion.DIMS` 是契约：`decider.EMOTIONS`、`stickers.EMOTION_TAGS`、`topic._POSITIVE_DIMS/_NEGATIVE_DIMS`、`config media.sticker_force_dominant`、测试夹具都要一起改；`tools.test_emotion.DimensionDriftTests` 会拦住漂移。本次把「好奇→惊讶、亲昵→感动、疲惫→害羞」。
+33. **心情矩阵可走决策模型（emotion.decider_*，2026-10-27）** → emotion.decider_enabled=true 时优先调 OpenRouter decisions（perplexity/pplx-decider-v1.2），失败静默退回 judge/关键词，不影响回话。key 在 ~/.pawbot/decider.key 或 PAWBOT_DECIDER_KEY，别写进仓库；调试 py tools/decider_once.py --text ...。每次多 1~2.5s 网络往返，嫌慢把 decider_timeout 降到 5~6 或关掉。32. **升级不丢数据靠 data-guard.js（2026-10-27）** → 插件加载时按 package.json 版本自动快照 data/（config/persona/记忆）到 data/backups/；宿主 Config 的 dataDir 非空时会把 pp/data 换成指向外部目录的联接（迁移不覆盖外部已有文件）。手动：pawbot_data_backup action=status|backup。恢复见 docs/DATA-PERSISTENCE.md。31. **实时同步（sync.mode=realtime）不是秒级 Syncthing** → 默认本地 2s 轮询 + 3s 防抖 + 30s 远端 manifest；sessions.json 每聊一句都变，嫌吵就 include_memory=false。两边都改过默认 keep_both（远端包存 data/sync-conflict-<时间>/，本机不动）；首次运行也默认 keep_both，不会悄悄覆盖本机人设。状态文件 data/.sync-state.json 删掉=重新首次运行。观察用 py tools/cloud_sync.py watch。30. **云同步不要把本机凭据写回** → 面板 secret 留空＝保持原值；`cloud_sync.py` 输出/日志/status 均不含 password/token/passphrase；真实 WebDAV 未实机验证（先 `py tools/cloud_sync.py test`）。
 
 ---
 
@@ -378,6 +466,17 @@ plugin_manager set_plugin target=include:pawbot-bili-watch enabled=false / true
 # 运行时探针
 Invoke-RestMethod http://127.0.0.1:6185/api/status      # PawBot 直连
 Invoke-RestMethod "http://127.0.0.1:<DSH端口>/pawbot-ui/status"   # 面板走的路
+
+# 大肥鱼的大脑（2026-10-27）
+Invoke-RestMethod http://127.0.0.1:6185/api/brain/status                  # PawBot 侧：env 注入/provider
+Invoke-RestMethod "http://127.0.0.1:<DSH端口>/pawbot-dsh-brain/status"    # Host 侧：模型/preset/沙箱/计数
+Invoke-RestMethod -Method Post http://127.0.0.1:6185/api/llm/test         # provider=dsh 时测大脑
+# DSH 工具：pawbot_brain action=status|selftest|turn
+
+# 对话测试窗口（假装 NapCat，走真链路；不需要 QQ）
+cd D:\WorkBuddy\pawbot-dsh\app
+py tools\chat_window.py                 # 打开窗口（或双击 对话测试窗口.bat）
+py tools\chat_window.py --check "在吗"  # 无窗口自检：发一句、打印回复后退出
 
 # 探 DSH 端口
 Get-NetTCPConnection -State Listen | Where-Object OwningProcess -eq (Get-Process 'DeepSeek Harness').Id
@@ -409,13 +508,17 @@ Get-NetTCPConnection -State Listen | Where-Object OwningProcess -eq (Get-Process
 | **判重三层** | 看过（reports/seen）/ 挑中 / 已分享（shared）——不同闸语义不同，别混 |
 | **一枚 ‖** | 表达层的分条记号：一条回复拆成多条 QQ 消息，不会发出去 |
 | **一键四步** | env → napcat → pawbot → ready（见 §4） |
+| **大脑（DSH 大脑）** | `llm.provider="dsh"` 时，每轮对话由 DSH 进程内一个新 Agent 跑完；人设= PawBot 的 system（complete 注入），工具=电脑工具 preset + PawBot 工具代理。见 `docs/BRAIN.md` |
+| **Preset `pawbot-brain`** | 插件加载时程序化注册的 agent 组合：只含 `pwsh/read/write/edit/glob/grep/web_search/web_fetch`；不写 `~/.dsh`，卸载即消失 |
 
 ---
 
 ## 15. 新窗口第一步该做什么（checklist）
 
-1. 读完本文；再读 `README.md`（使用者视角）与 `DEPLOY.md`（部署视角）。
-2. 跑 §8 的四条 JS 测试，确认基线是 19/57/18/52 全绿。
-3. `pawbot_status` 看当前进程状态与 `ui_route`（应为 `registered (18 routes)`）。
-4. 问用户这次要做什么。若没有明确目标，按 §10 的 P1 顺序推进，**先做「在服务器上真跑一次一键启动」**——那是当前最大的未验证面。
+1. 读完本文；再读 `README.md`（使用者视角）与 `DEPLOY.md`（部署视角）；要碰大脑就先读 `docs/BRAIN.md` + `docs/BRAIN-VERIFICATION.md`。
+2. 跑 §8 的 JS 测试，确认基线是 19 / 31 / 15 / 3 / 15 / 57 / 52 全绿。
+3. `pawbot_status` 看当前进程状态与 `ui_route`（应为 `registered (18 routes)`）、`brain` 字段（模型/preset/沙箱）。
+4. 问用户这次要做什么。若没有明确目标，按 §10 的 P1 顺序推进，**先补「真 NapCat / 多群并发」这两块未验证面**。
 5. 任何要改 `app/data/`、要改源码默认值、要新增 secrets 的念头，先回看 §5。
+6. 改 Host 代码后：`plugin_manager set_plugin include:pawbot false/true` 重载（会重启 PawBot；不必重启整个 DSH）。
+   改 `index.js` 的 Config 默认值时注意：`normalize()` 现在只收 string / boolean / number / string[]，对象会被忽略（保持默认）。

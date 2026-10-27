@@ -3,6 +3,12 @@
 一个 DSH Host bundle，把 **PawBot（QQ 机器人）** 封装成 DSH 受管服务，并把原本独立的
 `@local/pawbot-bili-watch`（大肥鱼看 B 站）合并进同一个 bundle。装这一个 bundle 就有全部功能。
 
+**2026-10-27 新增「大肥鱼的大脑」**：她的一轮对话可以不再直连外部 `/chat/completions`，
+而是交给 **DSH 进程里的一个真 Agent** 跑——完整人设、能用 `pwsh / 读文件 / 写文件 / 搜索`
+这些电脑工具，还能回调 PawBot 自己的 30 个业务工具（表情包、B 站、记忆、空间……）。
+开关是 PawBot 配置 `llm.provider = "dsh"`，随时可回退。细节：[docs/BRAIN.md](docs/BRAIN.md)、
+实测记录：[docs/BRAIN-VERIFICATION.md](docs/BRAIN-VERIFICATION.md)。
+
 ## 这个仓库包含什么
 
 | 部分 | 位置 | 说明 |
@@ -18,12 +24,17 @@
 ## 结构
 
 ```
-index.js                      # pawbot 受管服务插件（apply/inject/Config + 6 个工具 + /pawbot-ui 代理路由）
-client.js                     # 设置页面板（PawBot 标签页：状态/设置/人设/工具）
-lib/hostdeps.js               # 从宿主树拿 schemastery 与 defineTool（拿不到就降级）
+index.js                      # pawbot 受管服务插件（apply/inject/Config + 11 个工具 + /pawbot-ui 代理路由）
+client.js                     # 设置页面板（PawBot 标签页：状态/API/设置/人设）
+lib/hostdeps.js               # 从宿主树拿 schemastery / defineTool / 其它 @deepseek-ai/*（拿不到就降级）
 lib/config-utils.js           # 纯函数：遮罩 secrets / 去遮罩值 / 深合并 / 区段过滤 / 差异
 lib/webui-proxy.js            # /pawbot-ui/* 同源代理路由（status/config/persona/reload-plugins/send/restart）
+lib/dsh-brain.js              # ★ 大肥鱼的大脑：进程内 Agent + complete 人设 + 电脑工具 preset + PawBot 工具代理
 test/offline.mjs              # 离线单测（node test/offline.mjs）
+test/dsh-brain-offline.mjs    # 大脑桥离线单测（协议/鉴权/限额，不启 DSH）
+docs/BRAIN.md                 # 大脑设计/协议/配置/验证/回滚
+docs/BRAIN-VERIFICATION.md    # 大脑 2026-10-27 本机实测记录（含 QQ 全链路证据）
+docs/por-20261027/            # 人设交付包归档 + 落库收据（回滚备份也在这里）
 bili-watch/                   # 从 @local/pawbot-bili-watch 原样复制过来的插件
   index.js                    #   挂成 @local/pawbot/bili-watch（subpath export）
   lib/…                       #   WBI 签名 / buvid 指纹 / view / player / subtitle / reply 等
@@ -105,6 +116,159 @@ DEPLOY.md                     # Linux 云服务器部署清单
 | `pawbot_health` | 真的请求 PawBot WebUI 的 `GET /api/status`；请求不到就只回进程层状态，不自己造 API |
 | `pawbot_config_get` | 读 config（可 `section` 只回某区段）；secrets 一律遮罩成 `***已设定***`，`reveal:true` 才回真值（有泄漏风险，除非明确要看别用） |
 | `pawbot_config_set` | 改 config（`patch` 深合并、直接写 `data/config.json`）；返回改动前后「键名」差异，不列值；遮罩值会被丢掉 |
+| `pawbot_brain` | 大肥鱼大脑自检：`action=status` 看通不通（模型路由/沙箱/工具白名单）、`selftest` 真跑一轮、`turn` 用自定义 system/prompt 跑一轮（不发 QQ） |
+
+## 她的大脑可以长在 DSH 里（2026-10-27）
+
+默认 `llm.provider` 是空的（= 直连 `llm.base_url` 的 `/chat/completions`，老行为）。
+把它改成 `dsh` 之后，一次 QQ 对话变成：
+
+```
+QQ → PawBot(Python) → POST /pawbot-dsh-brain/turn（loopback + 一次性 token）
+   → DSH 进程内新 Agent（人设 = PawBot 整段 system；工具 = 电脑工具 preset + PawBot 30 个工具代理）
+   → 最终文本 + 媒体段 → PawBot 表达层（style / ‖ 分条 / 表情包 / @ 引用 / TTS）→ QQ
+```
+
+能做什么（本机实测）：
+
+| 场景 | 旧链路 | DSH 大脑 |
+| --- | --- | --- |
+| 普通聊天 | 外部 API，1~3s | 进程内 Agent，3.7~5.5s |
+| 「看看这台电脑几个核、内存多少」（主人） | ❌ 只能编 | ✅ 真跑 `pwsh` 读真实数据（17~41s，因为她跑了好几轮） |
+| 同一句由群友说 | — | 不给电脑工具，她会如实说「真跑不了」（不会编） |
+| 表情包 / B 站 / 记忆 / 空间 | ✅ | ✅ 通过 PawBot 工具代理照旧（写类工具只认主人） |
+| 需要 API key | 要 | **不要**（用 DSH 的模型凭据） |
+
+安全默认：
+
+- `brainOwnerOnly = true`：**电脑工具只给主人**（`account.owner_ids` 里的人；设置页「账号 → 主人 QQ 名单」）。
+  没配置主人＝谁都没有电脑工具；群友轮次只给 PawBot 业务工具。
+- `brainSandbox = workspace-write`（能读、能跑命令、只能写工作目录/临时目录）、
+  `approval = never`（不弹窗，越界直接拒）；白名单 `pwsh,read,write,edit,glob,grep,web_search,web_fetch`。
+- 执行闸 fail-closed（guard 装不上就本轮失败）、写类 PawBot 工具按发起人再验一次、
+  中断/超时不算成功（残句不会发进群）。
+- 要全盘读写就把 `brainSandbox` 改成 `danger-full-access`——等于把整台电脑交给一个会读群聊的大脑，请想清楚；
+  更保守就 `brainSandbox=read-only` 并把 `pwsh`/`web_*` 从白名单拿掉。
+
+回退：设置页「主模型：大脑走哪儿」改回「直连 API」即可（热生效）；彻底关：宿主 Config `brainEnabled=false`。
+设计/协议/配置/验证/回滚：[docs/BRAIN.md](docs/BRAIN.md)；实测证据：[docs/BRAIN-VERIFICATION.md](docs/BRAIN-VERIFICATION.md)。
+
+## 对话测试窗口（不装 QQ 也能跟她聊）
+
+`app/tools/chat_window.py`：一个零依赖的 Tkinter 小窗口，**假装自己是 NapCat**，通过 OneBot 反向 WebSocket
+连到 PawBot 的 `ws://127.0.0.1:6199/ws`——所以走的是和真 QQ 完全一样的链路
+（人设 / 记忆 / 大脑 / 工具 / 表情包 / ‖ 分条都会真实发生）。
+
+打开方式（任选）：
+
+```powershell
+# A. 双击
+D:\WorkBuddy\pawbot-dsh\app\对话测试窗口.bat
+
+# B. 命令行
+cd D:\WorkBuddy\pawbot-dsh\app
+py tools\chat_window.py
+
+# C. 无窗口自检（发一句、打印回复后退出；适合脚本/排查）
+py tools\chat_window.py --check "今天好累啊"
+```
+
+窗口里：
+
+| 控件 | 作用 |
+|---|---|
+| 输入框 + 发送 | Enter 发送、Shift+Enter 换行；群聊自动 @ 她 |
+| 群号 / 我的QQ / 昵称 | 模拟哪个群、谁在说话；保存在 `app/data/chat_window.json`（不进仓库） |
+| 私聊测试 | 勾上后按私聊发（不需要 @），适合测主人专属能力 |
+| 设为主人 / 取消主人 | 把「我的QQ」写进/移出 PawBot 的 `account.owner_ids`；**只有主人能用电脑工具** |
+| 清空 | 只清窗口，不动 PawBot 的记忆 |
+
+已知注意：
+
+- 「在吗 / ping / 延迟」会命中基本插件的 `pong` 指令，不走 AI——想测人设直接说别的话。
+- 表情包/图片在窗口里显示成 `[图片/表情包]`（Tk 默认只认 PNG/GIF，不想为了测试引入图片库）。
+- 她记得之前的聊天（PawBot 记忆），所以第一次回复可能是接着旧上下文。
+- 窗口只是测试客户端：它不会改 PawBot 的记忆/人设/配置（除了你点「设为主人」）。
+
+## API 与密钥统一页（2026-10-27）
+
+以前 15 个密钥散在「高级 → 9 个原始区段」里。现在设置面板新增 **「API 密钥」** 标签页，按服务聚成卡片：
+
+| 分组 | 内容 |
+| --- | --- |
+| 主模型（聊天 + 看图） | `llm.model / api_key / base_url / reasoning_effort / timeout`，视觉模型单独一组 |
+| 评审 / 情绪判官 | `judge.*` + `emotion.judge_*`（留空＝沿用主模型 key） |
+| 联网搜索 / 图库 | `tools.search_*`、`tools.image_*` |
+| Pixiv / B 站凭证 | `pixiv_sessid`、`pixiv_refresh_token`、`bili_jct`、凭证文件 |
+| 语音（听 + 说） | `speech.*` 与 `tts.cloud_*` / `tts.url` |
+| 表情包描述（看图） | `media.sticker_vision*`：收新图时自动写画面描述的接口 |
+| 连接与网页令牌 | `server.access_token`、`webui.token`（改完要重启 PawBot） |
+
+语义和「设置」页完全一致：留空＝不改、遮罩值不回显、只送 diff、清空需二次确认；顶部实时显示「密钥已配置 x / 15」。
+
+## 表情包 2.0 与语气词收敛（2026-10-27）
+
+- **每张表情包都有真实描述**：`data/stickers/index.json` 的条目从 `{tags}` 升级为 `{tags, desc, mood, desc_source}`；入库时用看图模型（默认 togemini `gemini-4-argon-medium`）写「画面/动作/配字」，失败用标签拼人话兜底。工具 `app/tools/describe_stickers.py` 可给旧库补描述（`--dry` / `--apply`，写前备份）。
+- **按描述挑图**：`pick_sticker(query)` 的 query 现在是「想发的画面/情绪描述」，匹配时 tags +2、desc/mood/文件名 +1；系统提示里会列当前情绪下最贴的 8 条 `描述（tags）` 供她挑。
+- **不再几乎每条都发**：`media.sticker_chance` 默认 0.95 → **0.12**，`persona.sticker_gap` 默认 [1,1] → **[3,6]**；只有**情绪强烈**（默认「强烈」）或主导情绪是 **兴奋/烦躁/感动** 时才绕过随机闸主动发（`media.sticker_force_*` 可调）；对方明确说「发个表情包」也会放行。
+- **语气词收敛**：`reply.tone_trim`（默认 0.7）按确定性哈希削句末「啊/嘛/啦/呀/哦/哟」；「呢/吧/吗」作为疑问/商量语气保留（削了会改意思）；「干嘛/哎呀」这类词不误伤。人设里也把「语气词十句最多一两个」写进规则。
+
+## 心情矩阵：概率化决策模型（2026-10-27）
+
+心情从「关键词/聊天模型判官」升级为可选的**类 JEV 决策模型**：
+POST https://openrouter.ai/api/alpha/decisions，模型 perplexity/pplx-decider-v1.2。
+一次请求问三个问题：shift（会不会明显变化，noul 概率）、emotion（八种情绪 + none，choice 概率分布）、
+intensity（强度，score 0~1），拿到概率后映射成情绪增减；失败自动退回关键词/判官，聊天不中断。
+
+`ini
+emotion.decider_enabled = true
+emotion.decider_model = perplexity/pplx-decider-v1.2
+emotion.decider_base_url = https://openrouter.ai/api/alpha/decisions
+emotion.decider_timeout = 12
+emotion.decider_min_shift = 0.5
+emotion.decider_weight = 1.0
+`
+
+- Key 不写进仓库：优先面板 emotion.decider_api_key，否则环境变量 PAWBOT_DECIDER_KEY /
+  OPENROUTER_API_KEY，或专用文件 ~/.pawbot/decider.key（本机已放好；升级不碰）。
+- 单独试一句：py tools\decider_once.py --text "群友：你今天怎么这么可爱" --addressed。
+- 完整请求/响应、映射规则、费用与边界见 [docs/DECIDER.md](docs/DECIDER.md)。
+
+## 升级不丢数据（2026-10-27）
+
+插件更新/重装最怕把 `app/data`（人设、记忆、`config.json` 里的 API key）盖掉。现在有两层保护：
+
+1. **版本快照（默认开）**：插件版本一变，自动把 config/persona/记忆快照到
+   `data/backups/plugin-update-<版本>-<时间>/`，保留最近 5 份。
+   手动：`pawbot_data_backup action=backup`；查看：`action=status`。
+2. **外部数据目录（强烈推荐）**：DSH 设置 → 插件 → PawBot 的 Config 里把 `dataDir` 填成
+   插件目录外的路径（如 `D:/PawBotData`），重载插件。插件会把现有数据**不覆盖地**迁过去，
+   再把 `app/data` 换成指向它的联接；以后升级只换代码，碰不到数据。
+
+恢复步骤、留档目录（`data.migrated-*`）与边界见 [docs/DATA-PERSISTENCE.md](docs/DATA-PERSISTENCE.md)。
+
+## 云端共享（人设 / 记忆 / 配置，2026-10-27）
+
+把「人设 + 记忆 + 配置（含 API key）」打包同步到你自己的云服务器，或在另一台机器上拉回来。
+适配器三种：`local`（本机/挂载盘）、`webdav`（坚果云 / Nextcloud）、`http`（自建端点）。
+默认关闭（`sync.enabled=false`），不会自动联网；不自动 push，只有 CLI/你点操作才上传。
+
+```powershell
+cd D:\WorkBuddy\pawbot-dsh\app
+py tools\cloud_sync.py status
+py tools\cloud_sync.py test                  # 只测连通性
+py tools\cloud_sync.py push --dry            # 只打包，不上传
+py tools\cloud_sync.py push
+py tools\cloud_sync.py pull --dry            # 只看远端有什么/会改什么
+py tools\cloud_sync.py pull                  # 默认只写 data/config.synced.json
+py tools\cloud_sync.py pull --overwrite-config
+```
+
+- **含 API key 的 config 必须加密**：设 `sync.passphrase`（AES-256-GCM + PBKDF2，需 `cryptography` 或 `pycryptodome`；都没有会明确报错）。未加密时只允许同步人设/记忆，`include_config=true` 会直接拒绝（fail-closed）。
+- **拉取不粗暴覆盖**：默认只落地 `data/config.synced.json` 并给出 key 级 diff；加 `--overwrite-config` 才覆盖，覆盖前自动备份到 `data/backup-sync-<时间>/`，并保留本机 `sync` 段（不会把本机同步凭据冲掉）。
+- 启动自动拉取：`sync.auto_pull_on_start=true` 时后台拉一次，失败只记日志、不影响启动。
+- 安全：日志/返回值/status 都不含 password/token/passphrase；拒绝路径穿越/符号链接；密钥会上传到你的云，**必须信得过那台服务器**；passphrase 丢了无法恢复。
+- 配置字段在面板「设置 → 高级 → 云端同步」或「API 密钥 → 云端同步」组里填；完整说明见 [docs/CLOUD-SYNC.md](docs/CLOUD-SYNC.md)。
 
 ## 控制面板（在 DSH 内）
 
@@ -114,14 +278,15 @@ DEPLOY.md                     # Linux 云服务器部署清单
 
 ### 面板在哪、能做什么
 
-重启 DSH 后：**左侧「设置」→ 导航栏多一项「PawBot」**（`settings.section` slot，`id: pawbot`），四个标签页：
+重启 DSH 后：**左侧「设置」→ 导航栏多一项「PawBot」**（`settings.section` slot，`id: pawbot`），五个标签页：
 
 | 标签页 | 内容 |
 | --- | --- |
+| 启动 | 一键安装 / 连 NapCat / 启动 PawBot 的四步引导、日志、重载 |
 | 状态 | running / PID / uptime / spawn 次数 / PawBot `/api/status`（连接、会话、插件数、心情）；按钮：重启 PawBot（两段式确认）、重载插件；每 5 秒刷新，离开面板即停 |
-| 设置 | **全部 37 个区段、200+ 个键**分组表单（bool→开关、number→数字框、string→输入框/textarea、数组与对象→JSON），有搜索框、折叠、原始 JSON 模式；**只送出改动过的键**；机密栏显示「已设置（不改）」 |
-| 人设 | 直接编辑 `data/persona.md`（保存前两段式确认，显示字数） |
-| 工具 | 发测试消息（会真的用机器人账号发）、看上下文 `/api/context` 与记忆 `/api/memory` |
+| API 密钥 | 15 个 key / endpoint / 模型按服务分组统一填写；顶部显示密钥配置统计 |
+| 设置 | **全部 37 个区段、331 个键**分组表单（bool→开关、number→数字框、string→输入框/textarea、数组与对象→JSON），有搜索框、折叠、原始 JSON 模式；**只送出改动过的键**；机密栏显示「已设置（不改）」 |
+| 人设 | 直接编辑 `data/persona.md`（保存前两段式确认，显示字数）；发测试消息、看上下文与记忆 |
 
 | 路由（同源，相对 DSH GUI 根） | 方法 | 作用 |
 | --- | --- | --- |
@@ -187,6 +352,11 @@ DEPLOY.md                     # Linux 云服务器部署清单
   但「停机前强制 flush」这一步在 Windows 上无法触发。
 - **`pawbot_health` 依赖 PawBot 已启动且 WebUI port/host 正确**；PawBot 没连上 NapCat 时它仍会
   正常起 WS/WebUI，所以 `process_running=true` 不代表 QQ 已上线（要看 `/api/status` 的 `connections`）。
+- **大肥鱼的大脑（`llm.provider=dsh`）是「换脑」不是「加速」**：每轮在 DSH 里新建一个 Agent，
+  延迟 3.7~5.5s（纯聊天）到 40s+（多次电脑工具），比直连 API 慢；每个 Agent 会在
+  `~/.dsh/sessions/` 落一份 7~50KB 的日志（DSH 的持久化语义，当前没有 delete API）。
+  图片暂时进不了大脑（降级为「只按文字回」）。没有真 NapCat 的机器上，QQ 链路只能用协议端探针验证。
+  完整清单见 `docs/BRAIN.md` §7 与 `docs/BRAIN-VERIFICATION.md` §5。
 - 本 bundle **自带 `app/`（PawBot 源码 + `data/` 模板）**；运行时只写 `app/data/` 下的数据文件，
   **不改 `app/pawbot/` 等源码**、**不改 profile 的 package.json / cordis.patch.yml**、**不装其他 npm 包**。
 

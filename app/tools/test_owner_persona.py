@@ -54,7 +54,10 @@ class OwnerLineTests(unittest.TestCase):
 
     def test_build_without_owner_has_no_owner_section(self):
         out = self._persona([]).build(group_id=1, sender="阿明")
-        self.assertNotIn("## 你的主人", out)
+        # v3 人设自带一节通用的「你的主人」（不写死号码）；没配 owner_ids 时，
+        # 不能注入「你的主人是 …」这行具体身份，也不能出现具体尾号。
+        self.assertNotIn("你的主人是", out)
+        self.assertNotIn("0001", out)
 
 
 class OwnerHintTests(unittest.TestCase):

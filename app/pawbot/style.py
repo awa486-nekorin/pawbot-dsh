@@ -192,6 +192,20 @@ def _configured_strip_filler_opener() -> bool:
     return bool(v)
 
 
+def _configured_tone_trim() -> float:
+    """句末语气词（啊/嘛/啦/呀/哦/哟）的削减比例，0~1；0 关掉。
+
+    「吧」「吗」不在此列——它们是疑问/商量语气，删了会改意思。
+    """
+    v = _configured_reply().get("tone_trim")
+    if v is None:
+        return 0.7
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.7
+
+
 def _split_parts(text: str) -> list[str]:
     parts: list[str] = []
     start = 0
@@ -486,7 +500,45 @@ _SELF_NARRATION = (
 )
 _ACK_DECL = ("我认", "我认了", "我认错")
 _TRAIL_TAIL_PUNCT_RE = re.compile(r"^(.*?)([。！？!?…~～；;，,、]+)$")
+_TONE_TRIM_RE = re.compile(r"(?P<ch>[啊嘛啦呀哦哟])(?=[，。！？!?…～~\s]|$)")
 _TRAIL_TONE_RE = re.compile(r"[呢嘛啦呀啊哦噢诶唔哼哟]+$")
+# 这些词里的尾字不是语气词，别删（干嘛 / 哎呀 / 哎啊）
+_TONE_PROTECT_PREV = {"嘛": "干做为怎啥", "呀": "哎唉", "啊": "哎唉"}
+_TONE_KEEP_TAGS = ("<pass>",)
+
+
+def _trim_tone_particles(text: str, rate: float) -> str:
+    """按比例削句末语气词；确定性哈希，同一条回复重跑结果一致。
+
+    只动「啊嘛啦呀哦哟」的句末/停顿前位置；呢/吧/吗一律不碰；
+    「干嘛」「哎呀」这类词保留；整句只剩语气词时不动；
+    「你呢？」这种极短问句保留，否则会变成「你？」。
+    哈希种子用「去掉所有语气词后的正文 + 这个语气词」，保证多轮 polish 幂等。
+    """
+    if not text or rate <= 0:
+        return text
+    if any(tag in text for tag in _TONE_KEEP_TAGS):
+        return text
+    body_len = len(re.sub(r"[‖\s]", "", text))
+    if body_len <= 2:
+        return text
+    if body_len <= 4 and re.search(r"[？?]$", text.strip()):
+        return text
+    base = re.sub(r"[啊嘛呢啦呀哦哟]", "", text)
+
+    def repl(match: re.Match) -> str:
+        ch = match.group("ch")
+        pos = match.start()
+        prev = text[pos - 1] if pos > 0 else ""
+        if prev and prev in _TONE_PROTECT_PREV.get(ch, ""):
+            return ch
+        if rate >= 1.0:
+            return ""
+        if zlib.crc32((base + ch).encode("utf-8")) % 100 < int(rate * 100):
+            return ""
+        return ch
+
+    return _TONE_TRIM_RE.sub(repl, text)
 # 只处理这三种明确形式：不是A，而是B / 不是A，是B / 并不是A，而是B。
 # A、B 里不许再出现逗号/顿号，抽不干净就整句不动，宁可不改也不改错意思。
 _NOT_BUT_RE = re.compile(
@@ -767,6 +819,11 @@ def polish(text: str, max_parts: int | None = None) -> str:
         parts[0] = _strip_filler_opener(parts[0])
     parts = [p for p in parts if p]
     parts = _drop_tag_question(parts)
+    # 语气词削减放在「呢/吧 问句」处理之后：先判断这是不是「你呢？」这种标签问句，
+    # 否则把「呢」削掉会让问句识别失效，反而多留一句。
+    tone_trim = _configured_tone_trim()
+    if tone_trim > 0:
+        parts = [_trim_tone_particles(p, tone_trim) for p in parts]
     parts = _merge_parts(parts, limit)
     return _non_empty("‖".join(part for part in parts if part), text)
 

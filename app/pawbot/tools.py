@@ -13,7 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import time
+
+from . import dsh_bridge
 from pathlib import Path
 
 from . import message as msg
@@ -80,10 +83,17 @@ SCHEMAS: dict[str, dict] = {
     ),
     "moegirl": _fn(
         "moegirl",
-        "查萌娘百科。网络黑话、梗、缩写、二次元角色/作品/游戏术语，只要有一点可能是梗，"
-        "就先查一次再开口，别凭印象现编出处和用法。查懂了就用 learn_meme 存下来。",
+        "查本地梗库。网络黑话、梗、缩写、二次元角色/作品/游戏术语，只要可能是梗就先查；"
+        "只会读取已导入的本地参考，不联网，也不自动改写梗库。",
         {"query": {"type": "string", "description": "要查的词，原样填，别改写成长句"}},
         ["query"],
+    ),
+    "bili_watch_status": _fn(
+        "bili_watch_status",
+        "查询 B 站观看服务的只读运行状态：队列、今日观看数、自动备货和凭据是否存在。"
+        "不返回凭据值，不会开始观看或更改任何东西。",
+        {},
+        [],
     ),
     "learn_meme": _fn(
         "learn_meme",
@@ -153,10 +163,14 @@ SCHEMAS: dict[str, dict] = {
     ),
     "pick_sticker": _fn(
         "pick_sticker",
-        "挑一张表情包，作为单独一条消息发出去（正文里不用再提它）。接梗、吐槽、无语、得意、晚安时都该有一张，"
-        "几乎每次回复都可以挑一张；有贴合当下情绪或梗的就发，别客气。"
-        "会按你现在的心情挑，库里没有贴合的会去斗图网现找一张存进库。被拒就说明这轮刚发过，别硬发。",
-        {"query": {"type": "string", "description": "想要什么感觉或什么梗，如 熊猫头/无语/笑死/牢大/坤坤/晚安；不填就按当前心情挑"}},
+        "从自己的表情包库里挑一张，作为单独一条消息发出去（正文里不用再提它）。"
+        "表情包**默认少发**：多数回复不该带图，只在真的贴合当下那句话/那个情绪时才挑一张。"
+        "想发的时候 query 写你要的**画面/情绪描述**（如「猫娘叉腰得意，配字就这」「困到躺平」"
+        "「无语翻白眼」），会按库里每张图的真实描述匹配；库里没有贴合的会去斗图网现找一张存进库。"
+        "发癫、激动、被逗上头、撒娇时可以直接发一张，那是情绪表达，不用找理由。"
+        "被拒就说明这轮已经发过或刚发过，别硬发。",
+        {"query": {"type": "string",
+                   "description": "想要什么画面/情绪，如 猫娘叉腰得意/困到躺平/无语翻白眼；留空就按当前心情挑"}},
         [],
     ),
     "speak": _fn(
@@ -173,14 +187,17 @@ SCHEMAS: dict[str, dict] = {
         "save_sticker",
         "把一张好笑的表情包/梗图收进自己的表情包库，以后能用 pick_sticker 发出去。"
         "有人发了或引用了值得留的反应图、表情包、梗图，或者让你存表情包时用；"
-        "名字随便起，tags 写短的情绪标签（开心/无语/委屈/得意/生气/晚安…），"
-        "pick_sticker 以后就按这些标签找图。"
+        "名字随便起，tags 写短的情绪标签（开心/无语/委屈/得意/生气/晚安…）；"
+        "desc 写一句画面描述（谁在干嘛、什么表情、配字是什么），pick_sticker 以后就按描述和标签找图；"
+        "desc 拿不准就留空，系统会自己看一眼补上。"
         "普通照片、文字截图、NSFW 图不要存。",
         {
             "name": {"type": "string", "description": "给这张表情包起的短名字，如 狗头/震惊猫"},
             "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 8,
                      "description": "情绪/用途标签，如 开心/无语/晚安，之后按它挑图"},
-            "desc": {"type": "string", "description": "一句话描述画面，方便以后挑图"},
+            "desc": {"type": "string",
+                     "description": "一句话画面描述：人物/动作/表情/配图文字，"
+                                    "如「猫娘叉腰一脸得意，配字：就这」；留空会自动生成"},
             "source": {"type": "string", "enum": ["auto", "search"],
                        "description": "auto=先看本条消息、再看引用；search=存刚才 search_image 搜到的第一张"},
         },
@@ -264,8 +281,9 @@ SCHEMAS: dict[str, dict] = {
     ),
     "post_qzone": _fn(
         "post_qzone",
-        "发一条 QQ 空间说说。自己想發就發。配图从图库挑（先用 album_search 找），"
-        "不要临时识图——图库里每条都带描述。",
+        "按当前主人消息的明确要求发布一条 QQ 空间说说。需要 qzone.enabled=true、"
+        "消息发送者在 qzone.owner_ids 中、通过全局白名单，并且今日写操作未达正整数上限。"
+        "这是对外发布，不要自行决定发布。配图从图库挑（先用 album_search 找）。",
         {
             "content": {"type": "string", "description": "说说正文，不带话题标签就自己加"},
             "images": {"type": "array", "items": {"type": "string"}, "maxItems": 9,
@@ -296,20 +314,21 @@ SCHEMAS: dict[str, dict] = {
     ),
     "qzone_list": _fn(
         "qzone_list",
-        "看看自己 QQ 空间里最近发过什么（想接上以前的话题、或者想改旧说说时用）。",
+        "在授权主人私聊中查看自己 QQ 空间最近发过的内容；私密动态不会带入群聊。",
         {"limit": {"type": "integer", "description": "看几条，默认 10"}},
         [],
     ),
     "qzone_comments": _fn(
         "qzone_comments",
-        "读某条说说的正文和**全部留言**。回留言前必须先调这个，不然不知道别人都说了什么。",
+        "在授权主人私聊中读取某条空间说说的正文和全部留言；私密内容不会传入群聊。"
+        "回留言前先读完整对话。",
         {"tid": {"type": "string", "description": "说说 id（qzone_list 拿到的 tid）"}},
         ["tid"],
     ),
     "qzone_reply": _fn(
         "qzone_reply",
-        "回一条空间留言。回之前先 qzone_comments 把正文和全部留言读一遍，"
-        "回复要接得上整串对话，不只是被回的那一条。",
+        "按当前授权主人消息的明确要求回复一条空间留言；需通过白名单并受每日写操作上限约束。"
+        "先用 qzone_comments 在私聊里读正文和全部留言，再回应整段对话。",
         {
             "tid": {"type": "string", "description": "说说 id"},
             "comment_id": {"type": "string", "description": "要回的那条留言 id"},
@@ -332,7 +351,8 @@ SCHEMAS: dict[str, dict] = {
     ),
     "qzone_edit": _fn(
         "qzone_edit",
-        "改自己发过的说说正文（错字、想补一句）。改之前先 qzone_list 确认是哪一条。",
+        "按当前授权主人消息的明确要求修改自己发过的空间说说；需通过白名单并受每日写操作上限约束。"
+        "修改前先在私聊中用 qzone_list 确认目标。",
         {
             "tid": {"type": "string", "description": "说说 id"},
             "content": {"type": "string", "description": "新的正文"},
@@ -453,6 +473,55 @@ def _bili_extra(days, order, num=None) -> dict | None:
     return out or None
 
 
+def _bili_delivery_segments(segments, bvid: str, directory: str) -> list[dict]:
+    """Selection is not sharing: bind a pending receipt to each actual segment."""
+    out = []
+    for segment in msg.normalize(segments):
+        data = dict(segment.get("data") or {})
+        out.append({**segment, "_bili_share": {
+            "bvid": bvid, "dir": directory,
+            "type": segment.get("type"), "data": data}})
+    return out
+
+
+def prepare_bili_delivery(segments, *, include: bool = True) -> tuple[list[dict], list[dict]]:
+    """Strip private metadata; retain receipts only for unchanged included segments."""
+    payload, pending = [], []
+    for segment in msg.normalize(segments):
+        receipt = segment.get("_bili_share")
+        if receipt is not None and not include:
+            continue
+        clean = {k: v for k, v in segment.items() if k != "_bili_share"}
+        payload.append(clean)
+        if (isinstance(receipt, dict)
+                and receipt.get("type") in ("text", "json")
+                and receipt.get("type") == clean.get("type")
+                and receipt.get("data") == clean.get("data")
+                and clean.get("data")):
+            pending.append(receipt)
+    return payload, pending
+
+
+def commit_bili_delivery(pending: list[dict], session_id: str) -> None:
+    """Call only after reply/send confirms delivery, including delivered exceptions."""
+    if not pending:
+        return
+    if session_id:
+        bilibili.mark_shared(session_id)
+    seen = set()
+    for receipt in pending:
+        bvid = str(receipt.get("bvid") or "").strip()
+        directory = receipt["dir"]
+        key = (bvid, directory)
+        if not bvid or key in seen:
+            continue
+        seen.add(key)
+        try:
+            bili_watch.mark_shared(bvid, session_id, dir=directory)
+        except Exception as e:
+            log.warn(f"标记已送达的 B 站视频失败：{type(e).__name__} {e}")
+
+
 class ToolBox:
     def __init__(self, bot):
         self.bot = bot
@@ -464,6 +533,8 @@ class ToolBox:
         # 库是空的也留着 pick_sticker：它会去网上找一张存进库
         names.append("search_image")          # 免 key 也能用，不必再挑图源
         names.append("bili_video")            # B 站接口免登录
+        if dsh_bridge.is_configured():
+            names.append("bili_watch_status")  # 只读查询 Host 的 B 站观看服务状态
         if self.bot.config.get("tools.bili_scroll_enabled", True):
             names.append("bili_scroll")       # 自己刷一轮 B 站（搜+读字幕+写笔记）
             names.append("bili_notes")        # 翻自己攒的笔记
@@ -546,6 +617,22 @@ class ToolBox:
         lines.append("需要细节就用 fetch_url 打开其中一条。")
         return "\n".join(lines), []
 
+    async def _t_bili_watch_status(self, ctx):
+        status = await asyncio.to_thread(dsh_bridge.bili_watch_status)
+        if not status.get("ok"):
+            return "B 站观看服务状态暂时不可用。", []
+        labels = {
+            "queue_length": "队列长度",
+            "inflight_watches": "正在观看",
+            "watched_today": "今日已看",
+            "daily_limit": "每日上限",
+            "auto_stock": "自动备货",
+            "has_credential": "已配置凭据",
+            "credential_source": "凭据来源",
+        }
+        lines = [f"{labels[key]}：{status[key]}" for key in labels if key in status]
+        return "B 站观看服务状态（只读）：\n" + "\n".join(lines), []
+
     async def _t_fetch_url(self, ctx, url: str):
         if not url.startswith(("http://", "https://")):
             return "网址要以 http:// 或 https:// 开头", []
@@ -590,7 +677,9 @@ class ToolBox:
 
     async def _t_moegirl(self, ctx, query: str):
         loop = asyncio.get_running_loop()
-        out = await loop.run_in_executor(None, lambda: moegirl.lookup(query))
+        book = getattr(self.bot, "memes", None)
+        out = await loop.run_in_executor(
+            None, lambda: moegirl.lookup(query, book=book, allow_network=False))
         if not out.get("ok"):
             return (f"萌娘百科没查到「{query}」（{out.get('error') or '没有条目'}）。"
                     "别硬猜出处，就说没见过、让对方讲讲，或者换个词再查。"), []
@@ -738,13 +827,6 @@ class ToolBox:
                 bvid = str(report.get("bvid") or "")
                 title = (report.get("title") or "").strip()
                 url = report.get("url") or ""
-                if sid:
-                    bilibili.mark_shared(sid)
-                if bvid:
-                    try:
-                        bili_watch.mark_shared(bvid, sid, dir=wdir)
-                    except Exception as e:
-                        log.warn(f"标记已分享失败：{type(e).__name__} {e}")
                 segs: list[dict] = []
                 # 默认不发 JSON 卡片（手机 QQ 会提示「发送者版本过低」）。
                 if bilibili.card_enabled(self.bot.config):
@@ -754,9 +836,10 @@ class ToolBox:
                         pass
                 if title and url:
                     segs.append(msg.Text(f"{title}\n{url}"))
-                log.info(f"B站分享（看过报告 {report.get('watched_level')}）："
+                log.info(f"B站候选（看过报告 {report.get('watched_level')}）："
                          f"{title[:40]} {url}")
-                return bili_watch.format_for_model(report), segs
+                return (bili_watch.format_for_model(report),
+                        _bili_delivery_segments(segs, bvid, wdir))
 
             # 没有报告：让插件去看一眼，同时退回 pick_lively（只看标题）。
             # up 的契约只认 kind/value，给 days/order 插件也不看（P2-8），所以不传 extra。
@@ -779,17 +862,8 @@ class ToolBox:
             return "B 站这会儿没刷出东西，换个时间或者换个关键词。", []
 
         v = picks[0]
-        log.info(f"B站分享（只看标题）：{v['title'][:40]} {v['url']}")
-        if sid:
-            bilibili.mark_shared(sid)
-        # 只看标题发出去的片也要记进 shared.json：插件只认这份档，
-        # 不记的话下一次很可能又挑到同一条（P2-7）。
+        log.info(f"B站候选（只看标题）：{v['title'][:40]} {v['url']}")
         v_bvid = str(v.get("bvid") or "").strip()
-        if v_bvid:
-            try:
-                bili_watch.mark_shared(v_bvid, sid, dir=wdir)
-            except Exception as e:
-                log.warn(f"标记只看标题的 B 站视频失败：{type(e).__name__} {e}")
         segs: list[dict] = []
         # 默认不发 JSON 卡片（手机 QQ 会提示「发送者版本过低」）。
         # 纯文本 + 链接由 QQ 自己展开，比坏卡片强。
@@ -804,7 +878,7 @@ class ToolBox:
         tip = f"备选（别都发）：{others}" if others else ""
         return (f"挑到一条：{bilibili.brief(v)}\n{tip}\n"
                 f"这条你还没看过内容，只知道标题，别假装看过；"
-                f"可以说「还没看，标题看着挺有意思」。"), segs
+                f"可以说「还没看，标题看着挺有意思」。"), _bili_delivery_segments(segs, v_bvid, wdir)
 
     async def _t_bili_scroll(self, ctx, topic: str = "", want=None):
         """刷一轮 B 站：搜 → 去重 → 读字幕 → 判断 → 写笔记。"""
@@ -870,44 +944,123 @@ class ToolBox:
         log.info(f"语音已准备：{len(tts.clean_for_speech(text))} 字 / {len(segs)} 条")
         return ("语音已经发出去了，文字里别再重复这句。", segs)
 
+    @staticmethod
+    def _sticker_bypass(config, emotion) -> bool:
+        """情绪顶上来了就可以绕过随机闸：发癫/激动/被逗上头不按「顺手发」的节奏走。
+
+        判定写死成两条（都可在 media.* 里改）：
+          · 主导情绪强度 == media.sticker_force_intensity（默认「强烈」）—— 用 intensity
+            而不是「weights 最高值 ≥ 0.5」：只有一个主导情绪时 weights 恒为 (1.0,)，
+            那样等于只要有一点情绪就放行，不是「剧烈」才放行；
+          · 主导情绪 ∈ media.sticker_force_dominant（默认 兴奋/烦躁/亲昵）。
+        """
+        try:
+            blend = emotion.blend() if emotion is not None else {}
+        except Exception:
+            blend = {}
+        if not isinstance(blend, dict):
+            blend = {}
+        dominant = str(blend.get("dominant") or "").strip()
+        intensity = str(blend.get("intensity") or "").strip()
+        try:
+            want = str(config.get("media.sticker_force_intensity", "强烈") or "").strip()
+        except Exception:
+            want = "强烈"
+        try:
+            conf = config.get("media.sticker_force_dominant")
+        except Exception:
+            conf = None
+        if isinstance(conf, str):
+            conf = [t for t in conf.replace("，", ",").replace("、", ",")
+                    .replace(" ", ",").split(",") if t]
+        doms = [str(t).strip() for t in conf if str(t).strip()] \
+            if isinstance(conf, (list, tuple)) else []
+        if not doms:
+            doms = ["兴奋", "烦躁", "亲昵"]
+        if dominant and dominant in doms:
+            return True
+        return bool(want) and intensity == want
+
     async def _t_pick_sticker(self, ctx, query: str = ""):
+        """按「画面/情绪描述」挑一张表情包；query 允许为空（空就交给当前情绪）。"""
         sid = getattr(ctx, "session_id", "") if ctx else ""
+        picked = ctx.state.setdefault("_picked", []) if ctx is not None else []
+        if picked:
+            return ("这条回复已经带过一张表情包了，一张就够，别再挑第二张；"
+                    "正文正常把话说说完。"), []
+
         ledger = None
         try:
             from . import media
             ledger = media.ledger_for(self.bot)
         except Exception:
             pass
+        emotion = getattr(self.bot, "emotion", None)
+        # 对方明确点名要表情包时也放行（这是被邀请，不是「随机顺手发」）
+        requested = bool(ctx is not None and ctx.state.get("_sticker_requested"))
+        bypass = requested or self._sticker_bypass(self.bot.config, emotion)
         if ledger is not None and sid and not ledger.sticker_allowed(sid):
-            return ("这轮先别发表情包了，也别解释为什么没发、别提发送失败，"
-                    "就当没这回事，正常说句话。"), []
+            if not bypass:
+                return ("这轮先别发表情包了，也别解释为什么没发、别提发送失败，"
+                        "就当没这回事，正常说句话。"), []
+            # 情绪顶上来了：放行本轮。resolve() 同一轮还会再问一次，必须一起放行，
+            # 否则挑好的图会在发送层被悄悄丢掉。
+            allow = getattr(ledger, "force_sticker", None)
+            if callable(allow):
+                allow(sid)
 
         from .stickers import EMOTION_TAGS
-        emotion = getattr(self.bot, "emotion", None)
-        mood = (emotion.blend().get("dominant") if emotion else None) or ""
+        try:
+            blend = emotion.blend() if emotion else {}
+        except Exception:
+            blend = {}
+        mood = str((blend or {}).get("dominant") or "") if isinstance(blend, dict) else ""
         mood_tags = EMOTION_TAGS.get(mood, [])
         wanted = " ".join(x for x in [str(query or "").strip(), *mood_tags] if x)
-        exclude = set(ctx.state.get("_picked", [])) if ctx else set()
-        path = self.bot.stickers.pick(wanted, exclude=exclude) if wanted else None
+        book = self.bot.stickers
+        exclude = set(picked)
+
+        path, meta = None, {}
+        if hasattr(book, "pick_with_meta"):
+            hit = book.pick_with_meta(wanted, exclude=exclude)
+        else:                       # 老接口兜底
+            picked_path = book.pick(wanted, exclude=exclude) if wanted else None
+            hit = ((picked_path, book.index().get(os.path.basename(picked_path)) or {})
+                   if picked_path else None)
+        if hit:
+            path, meta = hit
+
         if not path and self.bot.config.get("persona.sticker_fetch", True):
-            seed = str(query or "").strip() or (mood_tags[0] if mood_tags else "")
+            # 库里没有贴合的：描述/情绪当搜索词，现抓一张存进库再发
+            seed = str(query or "").strip() or (mood_tags[0] if mood_tags else (mood or ""))
             if seed:
-                names = await asyncio.to_thread(
-                    self.bot.stickers.fetch_from_doutu, seed, 1)
+                names = await asyncio.to_thread(book.fetch_from_doutu, seed, 1)
                 if names:
-                    path = str(Path(self.bot.stickers.dir) / names[0])
+                    name = names[0]
+                    path = (book.path_of(name) if hasattr(book, "path_of")
+                            else os.path.join(book.dir, name))
+                    meta = book.index().get(name) or {}
                 else:
-                    path = await asyncio.to_thread(
-                        self.bot.stickers.fetch_remote, seed, [seed, *mood_tags])
+                    fetched = await asyncio.to_thread(
+                        book.fetch_remote, seed, [seed, *mood_tags])
+                    if fetched:
+                        path = fetched
+                        meta = book.index().get(os.path.basename(fetched)) or {}
         if not path:
             return "这轮没有合适的表情包，别硬发，也别提这件事，正常说话。", []
+
         name = os.path.basename(path)
-        if ctx:
+        if ctx is not None:
             ctx.state.setdefault("_picked", []).append(name)
-        self.bot.stickers.mark_used(name)
-        log.info(f"挑表情包：{name} ← {wanted or '随机'}")
-        return ("表情包已准备，会作为单独一条消息发出，正文别再描述它。",
-                [msg.Text(f"[STICKER:{Path(path).resolve().as_uri()}]")])
+        book.mark_used(name)
+        desc = str((meta or {}).get("desc") or "").strip() if isinstance(meta, dict) else ""
+        log.info(f"挑表情包：{name} ← {wanted or '随机'}" + ("（情绪绕过随机闸）" if bypass else ""))
+        if desc:
+            text = (f"表情包已准备（描述：{desc}），会作为单独一条消息发出；"
+                    "正文别再描述它。")
+        else:
+            text = "表情包已准备，会作为单独一条消息发出；正文别再描述它。"
+        return text, [msg.Text(f"[STICKER:{Path(path).resolve().as_uri()}]")]
 
     async def _t_save_sticker(self, ctx, name: str, tags=None, desc: str = "",
                               source: str = "auto"):
@@ -965,12 +1118,17 @@ class ToolBox:
             return f"图没下载下来（{origin}），这次没存成。", []
 
         try:
-            fname = self.bot.stickers.save(raw, name, tags, desc)
+            # 收图时要「尽可能」看一眼生成真实描述（网络），丢线程里别卡事件循环
+            fname = await asyncio.to_thread(
+                self.bot.stickers.save, raw, name, tags, desc)
         except ValueError as e:
             return f"没存成：{e}", []
-        saved = [str(t) for t in ((self.bot.stickers.index().get(fname) or {})
-                                  .get("tags") or tags or []) if str(t).strip()]
+        meta = self.bot.stickers.index().get(fname) or {}
+        saved = [str(t) for t in (meta.get("tags") or tags or []) if str(t).strip()]
         tail = f"（标签：{'、'.join(saved)}）" if saved else ""
+        desc_now = str(meta.get("desc") or "").strip()
+        if desc_now:
+            tail += f"（描述：{desc_now}）"
         log.info(f"存表情包：{fname} ← {origin}")
         return f"存好了：{fname}{tail}", []
 
@@ -1140,7 +1298,7 @@ class ToolBox:
         return "已经撤回了。这次别说多余的话解释。", []
 
     async def _t_post_qzone(self, ctx, content: str, images=None):
-        ok, why = self.bot.qzone.check_permission(ctx)
+        ok, why = self.bot.qzone.check_permission(ctx, mutation=True)
         if not ok:
             return f"不能发：{why}", []
         图们 = []
@@ -1153,10 +1311,11 @@ class ToolBox:
             if p and os.path.isfile(p):
                 图们.append(p)
         try:
-            data = await self.bot.qzone.post(content, 图们)
+            data = await self.bot.qzone.post(content, 图们, ctx=ctx)
         except Exception as e:
             return f"发空间失败：{type(e).__name__} {e}", []
-        tid = (data or {}).get("tid", "")
+        receipt = data.get("data", data) if isinstance(data, dict) else {}
+        tid = receipt.get("tid", "") if isinstance(receipt, dict) else ""
         log.info(f"已发 QQ 空间：{content[:40]} tid={tid} 图 {len(图们)} 张")
         后缀 = f"（带了 {len(图们)} 张图）" if 图们 else ""
         return f"说说发出了{后缀}，tid={tid or '未知'}。", []
@@ -1191,7 +1350,7 @@ class ToolBox:
         ok, why = self.bot.qzone.check_permission(ctx)
         if not ok:
             return f"看不了：{why}", []
-        结果 = await self.bot.qzone.list_own(limit)
+        结果 = await self.bot.qzone.list_own(limit, ctx=ctx)
         if not 结果.get("ok"):
             return f"看不了自己的空间：{结果.get('reason') or '未知原因'}", []
         if not 结果.get("items"):
@@ -1206,7 +1365,7 @@ class ToolBox:
         ok, why = self.bot.qzone.check_permission(ctx)
         if not ok:
             return f"看不了：{why}", []
-        结果 = await self.bot.qzone.comments(tid)
+        结果 = await self.bot.qzone.comments(tid, ctx=ctx)
         if not 结果.get("ok"):
             return f"读不到留言：{结果.get('reason') or '未知原因'}", []
         段 = [f"说说正文：{结果.get('content') or '（没读到正文）'}"]
@@ -1221,10 +1380,10 @@ class ToolBox:
         return "\n".join(段), []
 
     async def _t_qzone_reply(self, ctx, tid: str, comment_id: str, text: str):
-        ok, why = self.bot.qzone.check_permission(ctx)
+        ok, why = self.bot.qzone.check_permission(ctx, mutation=True)
         if not ok:
             return f"回不了：{why}", []
-        结果 = await self.bot.qzone.reply(tid, comment_id, text)
+        结果 = await self.bot.qzone.reply(tid, comment_id, text, ctx=ctx)
         if not 结果.get("ok"):
             return f"没回成：{结果.get('reason') or '未知原因'}", []
         return "回了。", []
@@ -1240,10 +1399,10 @@ class ToolBox:
                 f"{果['note']}。旧版本备份在 {果['backup']}。"), []
 
     async def _t_qzone_edit(self, ctx, tid: str, content: str):
-        ok, why = self.bot.qzone.check_permission(ctx)
+        ok, why = self.bot.qzone.check_permission(ctx, mutation=True)
         if not ok:
             return f"改不了：{why}", []
-        结果 = await self.bot.qzone.edit(tid, content)
+        结果 = await self.bot.qzone.edit(tid, content, ctx=ctx)
         if not 结果.get("ok"):
             return f"没改成：{结果.get('reason') or '未知原因'}", []
         return "改好了。", []
