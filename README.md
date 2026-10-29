@@ -35,6 +35,7 @@ test/dsh-brain-offline.mjs    # 大脑桥离线单测（协议/鉴权/限额，�
 docs/BRAIN.md                 # 大脑设计/协议/配置/验证/回滚
 docs/BRAIN-VERIFICATION.md    # 大脑 2026-10-27 本机实测记录（含 QQ 全链路证据）
 docs/PROJECT-STRUCTURE-AND-WORKFLOW-2026-10-29.md  # ★ 结构/目录/流程/部署/坑（新窗口先读）
+docs/PROJECT-STRUCTURE-AND-WORKFLOW-2026-10-29-DETAILED.md # ★★ 详细版：拓扑图/每个文件职责/实现/开发索引
 docs/por-20261027/            # 人设交付包归档 + 落库收据（回滚备份也在这里）
 bili-watch/                   # 从 @local/pawbot-bili-watch 原样复制过来的插件
   index.js                    #   挂成 @local/pawbot/bili-watch（subpath export）

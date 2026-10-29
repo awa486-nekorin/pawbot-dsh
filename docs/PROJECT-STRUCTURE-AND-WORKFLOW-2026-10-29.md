@@ -7,6 +7,8 @@
 > 历史交接与决策背景见 `docs/HANDOFF.md`；界面现状见 `docs/UI-CURRENT.md` / `docs/UI-PLAN-v2.md`；
 > 云同步见 `docs/CLOUD-SYNC.md`；数据保护见 `docs/DATA-PERSISTENCE.md`；决策模型见 `docs/DECIDER.md`。
 >
+> **详细实现版（含拓扑图/每个文件职责/实现细节/开发索引）：** [`PROJECT-STRUCTURE-AND-WORKFLOW-2026-10-29-DETAILED.md`](PROJECT-STRUCTURE-AND-WORKFLOW-2026-10-29-DETAILED.md)
+>
 > 最后核对：**2026-10-29** · 本机分支 `upload-2026-10-27`（工作区含本文件）· 远端 `main` = `6539deb`
 
 ---
