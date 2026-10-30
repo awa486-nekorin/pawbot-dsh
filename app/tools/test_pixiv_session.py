@@ -116,7 +116,7 @@ class PixivSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image["tags"], "blue sky")
 
     async def test_filters_and_sorting(self):
-        details = [artwork(1, xRestrict=1), artwork(2, title="blue sky child"),
+        details = [artwork(1, xRestrict=1), artwork(2, title="blue sky clear day"),
                    artwork(3, title="blue sky furry"), artwork(4, bookmarkCount=1),
                    artwork(5, width=100), artwork(6, title="unrelated", tags={}),
                    artwork(7), artwork(8, bookmarkCount=900),
@@ -125,11 +125,25 @@ class PixivSessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser.details = {v["id"]: v for v in details}
         self.browser.stages[0] = [{"id": v["id"]} for v in details]
         report = await self.session.search_report("blue sky", n=4, popular="1000")
-        # SFW 结果即使标题沾未成年词也放行（查询层只降级为 SFW，不拒绝）
+        # 中性 SFW 候选按相关度、收藏和尺寸排序；受限内容另有独立覆盖。
         self.assertEqual([v["illust_id"] for v in report["images"]], ["9", "8", "2", "7"])
         self.assertEqual(set(report["filtered"]), {"r18", "furry", "bookmarks", "resolution", "relevance"})
         # 合格只有 4 张、不够 n*2 的挑选池，所以会继续第二阶段（不带热门门槛）补候选
         self.assertEqual(len(report["stages"]), 2)
+
+    async def test_minor_metadata_is_excluded_even_for_sfw_results(self):
+        for allow_r18 in (False, True):
+            with self.subTest(allow_r18=allow_r18):
+                self.browser.urls.clear()
+                self.browser.stages = [[{"id": "1"}, {"id": "2"}], [], [], []]
+                self.browser.details = {
+                    "1": artwork(1, title="blue sky child", xRestrict=0),
+                    "2": artwork(2, title="blue sky clear day", xRestrict=0),
+                }
+                report = await self.session.search_report(
+                    "blue sky", n=2, popular="off", allow_r18=allow_r18)
+                self.assertFalse(report["error"], report)
+                self.assertEqual([v["illust_id"] for v in report["images"]], ["2"])
 
     async def test_global_candidate_cap_and_duplicates(self):
         self.browser.stages[0] = [{"id": str(i)} for i in range(40)] * 2

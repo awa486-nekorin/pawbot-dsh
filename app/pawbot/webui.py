@@ -33,6 +33,7 @@ import time
 from urllib.parse import parse_qs, quote, urlparse
 
 from .log import log
+from .lifecycle import peer_is_loopback
 
 
 # 大脑回调里「有副作用/会写数据」的 PawBot 工具：只允许主人发起。
@@ -46,6 +47,11 @@ SENSITIVE_BRAIN_TOOLS = frozenset({
 
 # 单个 HTTP 请求体上限（本 WebUI 只服务本机面板与大脑回调；4MB 足够人设/配置）
 MAX_HTTP_BODY = 4 * 1024 * 1024
+# 控制面只接受极小的 reason 体；鉴权通过前不读 body，读的时候也必须有界。
+CONTROL_MAX_BODY = 64 * 1024
+CONTROL_BODY_TIMEOUT = 3.0
+# 其它路由的 body 读取也要有超时，不能让一个慢连接永久占住 worker。
+BODY_READ_TIMEOUT = 20.0
 
 
 class WebUI:
@@ -53,12 +59,20 @@ class WebUI:
     MODELS_FILE = "models.json"
 
     def __init__(self, bot, host: str = "127.0.0.1", port: int = 6185,
-                 token: str = "", root: str = "web"):
+                 token: str = "", root: str = "web",
+                 control_token: str = "", lifecycle=None):
         self.bot = bot
         self.host = host
         self.port = port
         self.token = token
         self.root = root
+        # 控制面 token 与面板 token 完全独立：只从 PAWBOT_CONTROL_TOKEN 注入；
+        # 留空 = 控制面关闭（GET/POST /api/control/* 一律拒绝）。
+        self.control_token = str(control_token or "")
+        self.lifecycle = lifecycle
+        # 停机时先置 draining：拒绝新的变更类请求；在途请求由 lifecycle 取消/等待。
+        self.draining = False
+        self._active_requests: set[asyncio.Task] = set()
         self._server: asyncio.AbstractServer | None = None
         self._started = time.time()
 
@@ -72,7 +86,25 @@ class WebUI:
             await self._server.wait_closed()
 
     # ---------------------------------------------------------- HTTP 基础
+    def begin_draining(self) -> None:
+        """停机开始：新变更类请求一律 409；控制面重复 ack 仍可用。"""
+        self.draining = True
+
+    def active_requests(self) -> list[asyncio.Task]:
+        """当前在途 HTTP 请求任务快照（供生命周期在 ack 前取消/等待）。"""
+        return [task for task in list(self._active_requests) if not task.done()]
+
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_requests.add(task)
+        try:
+            await self._handle_inner(reader, writer)
+        finally:
+            if task is not None:
+                self._active_requests.discard(task)
+
+    async def _handle_inner(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=20)
         except Exception:
@@ -92,6 +124,34 @@ class WebUI:
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
 
+        parsed = urlparse(target)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # 控制面必须最先分流：独立 token、只认真实 loopback peer、不接受查询参数，
+        # 也不复用下面的面板 token（更不能经浏览器代理进来）。控制面在**鉴权之前
+        # 不读 body**，读 body 时也有硬超时，避免未认证的慢连接占住 worker。
+        if path.startswith("/api/control/"):
+            try:
+                await self._control(writer, reader, method, path, headers)
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        # 停机闸门：进入 draining / shutting_down 后不再接受任何变更类 POST。
+        # 放在读 body 之前，未认证的慢请求也不能拖住停机。
+        if method == "POST" and (
+                self.draining
+                or (self.lifecycle is not None
+                    and bool(getattr(self.lifecycle, "shutting_down", False)))):
+            await self._json(writer, 409, {"ok": False, "error": "shutting_down"})
+            writer.close()
+            return
+
         body = b""
         try:
             length = int(headers.get("content-length") or 0)
@@ -104,11 +164,17 @@ class WebUI:
             writer.close()
             return
         if length:
-            body = await reader.readexactly(length)
-
-        parsed = urlparse(target)
-        path = parsed.path
-        query = parse_qs(parsed.query)
+            try:
+                body = await asyncio.wait_for(
+                    reader.readexactly(length), timeout=BODY_READ_TIMEOUT)
+            except asyncio.TimeoutError:
+                await self._json(writer, 408, {"ok": False, "error": "body read timeout"})
+                writer.close()
+                return
+            except asyncio.IncompleteReadError:
+                await self._json(writer, 400, {"ok": False, "error": "incomplete body"})
+                writer.close()
+                return
 
         # webui.token 留空则不校验；配置后可用页面现有的 ?token=<token>，
         # 或 Authorization: Bearer <token>。所有页面、API 与 SSE 都走同一道检查。
@@ -150,6 +216,83 @@ class WebUI:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    # ---------------------------------------------------------- 控制面
+    async def _control(self, writer, reader, method: str, path: str, headers: dict):
+        """GET /api/control/ready + POST /api/control/shutdown。
+
+        安全边界：真实 loopback peer + 非空独立 Bearer control token；
+        面板 token、查询参数、Host 浏览器代理都不算数。token 不进日志/回包。
+        鉴权在任何 body 读取之前完成；body 读取有大小上限和硬超时。
+        """
+        try:
+            peer = writer.get_extra_info("peername")
+            if not peer_is_loopback(peer):
+                await self._json(writer, 403, {"ok": False, "error": "forbidden_peer"})
+                return
+            if not self.control_token:
+                await self._json(writer, 403, {"ok": False, "error": "control_disabled"})
+                return
+            auth = headers.get("authorization", "")
+            bearer = auth[7:] if auth[:7].lower() == "bearer " else ""
+            expected = self.control_token.encode("utf-8")
+            if not bearer or not hmac.compare_digest(bearer.encode("utf-8"), expected):
+                await self._json(writer, 401, {"ok": False, "error": "unauthorized"})
+                return
+            if path == "/api/control/ready":
+                if method != "GET":
+                    await self._json(writer, 405, {"ok": False, "error": "method not allowed"})
+                    return
+                if self.lifecycle is None:
+                    await self._json(writer, 503, {"ok": False, "error": "control_unavailable"})
+                    return
+                await self._json(writer, 200, self.lifecycle.ready_state())
+                return
+            if path == "/api/control/shutdown":
+                if method != "POST":
+                    await self._json(writer, 405, {"ok": False, "error": "method not allowed"})
+                    return
+                if self.lifecycle is None:
+                    await self._json(writer, 503, {"ok": False, "error": "control_unavailable"})
+                    return
+                # 鉴权已通过，才允许读 body；读也有大小上限与硬超时。
+                if not await self._read_control_body(writer, reader, headers):
+                    return
+                result = await self.lifecycle.request_shutdown()
+                log.info("控制面 shutdown：ok=%s flushed=%s"
+                         % (bool(result.get("ok")), bool(result.get("flushed"))))
+                await self._json(writer, 200 if result.get("ok") else 500, result)
+                return
+            await self._json(writer, 404, {"ok": False, "error": "not found"})
+        except Exception as exc:  # noqa: BLE001
+            # 错误里只放类型与消息；不碰 headers/token。
+            try:
+                await self._json(writer, 500, {
+                    "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _read_control_body(self, writer, reader, headers: dict) -> bool:
+        """控制面 body 读取：鉴权之后调用；有上限 + 硬超时，失败已回包。"""
+        try:
+            length = int(headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            await self._json(writer, 400, {"ok": False, "error": "bad content-length"})
+            return False
+        if length < 0 or length > CONTROL_MAX_BODY:
+            await self._json(writer, 413, {"ok": False, "error": "body too large"})
+            return False
+        if not length:
+            return True
+        try:
+            await asyncio.wait_for(reader.readexactly(length), timeout=CONTROL_BODY_TIMEOUT)
+        except asyncio.TimeoutError:
+            await self._json(writer, 408, {"ok": False, "error": "body read timeout"})
+            return False
+        except asyncio.IncompleteReadError:
+            await self._json(writer, 400, {"ok": False, "error": "incomplete body"})
+            return False
+        return True
 
     async def _json(self, writer, status: int, payload: dict):
         data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -903,4 +1046,5 @@ class WebUI:
 def _reason(code: int) -> str:
     return {200: "OK", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
-            500: "Internal Server Error", 501: "Not Implemented"}.get(code, "OK")
+            413: "Payload Too Large", 500: "Internal Server Error",
+            501: "Not Implemented", 503: "Service Unavailable"}.get(code, "OK")

@@ -23,7 +23,7 @@ import uuid
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import wsproto
+from . import tasks, wsproto
 from .log import log
 
 
@@ -199,7 +199,9 @@ class OneBotServer:
         log.info(f"协议端已连接 {peer} self_id={conn.self_id or '未知'} "
                  f"role={conn.role} path={request.path}")
 
-        conn.worker = asyncio.create_task(self._worker(conn))
+        # Keep workers visible through asynchronous disconnect cleanup, even after
+        # _handle removes their connection from the active connection map.
+        conn.worker = tasks.spawn(self._worker(conn), name="onebot-worker")
 
         try:
             while True:
@@ -255,7 +257,7 @@ class OneBotServer:
                     if not conn.self_id and data.get("self_id"):
                         conn.self_id = int(data["self_id"])
                         self._register(conn)
-                    asyncio.create_task(self._probe_login(conn))
+                    tasks.spawn(self._probe_login(conn), name="onebot-login-probe")
                 return
 
         # 3) 其他业务事件 —— 丢进队列，由 worker 串行处理

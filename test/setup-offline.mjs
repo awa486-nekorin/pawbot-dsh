@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   createBootOrchestrator,
@@ -456,6 +456,68 @@ await t('venv + 依賴 + config 都齊 → phase ready progress 100', async () =
   assert.equal(st.config.valid, true)
   assert.equal(st.phase, 'ready')
   assert.equal(st.progress, 100)
+})
+
+console.log('\n== dataRoot 接线（自定义 projectDir ≠ appDir 时同一真实根） ==')
+
+await t('ensureConfig 写入 dataRoot，不写 appDir/data', async () => {
+  const appDir = tempDir('root-cfg')
+  const dataRoot = tempDir('root-cfg-data')
+  const r = ensureConfig({ appDir, dataRoot, onebotToken: 'root-token' })
+  assert.equal(r.ok, true, r.error || '')
+  assert.equal(r.data_dir, resolve(dataRoot))
+  assert.equal(r.config_path, join(resolve(dataRoot), 'config.json'))
+  assert.ok(existsSync(join(dataRoot, 'config.json')), 'config 应落在 dataRoot')
+  assert.ok(existsSync(join(dataRoot, 'people')), 'people 应落在 dataRoot')
+  assert.ok(!existsSync(join(appDir, 'data')), '不应再写 appDir/data')
+  const cfg = JSON.parse(readFileSync(join(dataRoot, 'config.json'), 'utf8'))
+  assert.equal(cfg.server.access_token, 'root-token')
+})
+
+await t('runEnvSetup 的 config 步骤也落到 dataRoot', async () => {
+  const appDir = tempDir('root-env')
+  const dataRoot = tempDir('root-env-data')
+  writeFileSync(join(appDir, 'run.py'), '# fake\n')
+  writeFileSync(join(appDir, 'requirements.txt'), 'pillow>=10.0\nwebsockets>=12.0\n')
+  const run = fakeRun((cmd, args) => {
+    if (args.length === 1 && args[0] === '--version') {
+      if (cmd === 'python3') return { ok: true, stdout: 'Python 3.12.4\n' }
+      return { ok: false }
+    }
+    if (args.join(' ') === '-m venv .venv') {
+      mkdirSync(join(appDir, '.venv', 'bin'), { recursive: true })
+      writeFileSync(join(appDir, '.venv', 'bin', 'python'), '')
+      return { ok: true }
+    }
+    if (args.includes('show')) return { ok: false, stdout: 'not found' }
+    if (args.includes('install')) return { ok: true, stdout: 'installed' }
+    return { ok: false }
+  })
+  const r = await runEnvSetup({ appDir, dataRoot, run, platform: 'linux' })
+  assert.equal(r.ok, true, r.hint || r.error || '')
+  assert.equal(r.config.data_dir, resolve(dataRoot))
+  assert.ok(existsSync(join(dataRoot, 'config.json')), 'config 应落在 dataRoot')
+  assert.ok(!existsSync(join(appDir, 'data')), '不应再写 appDir/data')
+})
+
+await t('setupState 从 dataRoot 读 config', async () => {
+  const appDir = tempDir('root-state')
+  const dataRoot = tempDir('root-state-data')
+  writeFileSync(join(appDir, 'run.py'), '# fake\n')
+  mkdirSync(join(appDir, '.venv', 'bin'), { recursive: true })
+  writeFileSync(join(appDir, '.venv', 'bin', 'python'), '')
+  writeFileSync(join(dataRoot, 'config.json'),
+    JSON.stringify({ llm: {}, memory: {}, tools: {} }))
+  const run = fakeRun((cmd, args) => {
+    if (args.length === 1 && args[0] === '--version') return { ok: true, stdout: 'Python 3.12.1' }
+    if (args.includes('show')) return { ok: true, stdout: 'Name: pillow\n---\nName: websockets\n' }
+    return { ok: false }
+  })
+  const st = await setupState({ appDir, dataRoot, run, platform: 'linux' })
+  assert.equal(st.config.path, join(resolve(dataRoot), 'config.json'))
+  assert.equal(st.config.exists, true)
+  assert.equal(st.config.valid, true)
+  assert.equal(st.phase, 'ready')
 })
 
 await t('boot 進行中時 setupState 的 phase/progress 以 boot 為準', async () => {

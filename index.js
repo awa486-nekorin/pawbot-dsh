@@ -24,6 +24,18 @@ import { fileURLToPath } from 'node:url'
 
 import { createPawbotProxy } from './lib/webui-proxy.js'
 import * as dataGuard from './lib/data-guard.js'
+import { DATA_ROOT_ENV, dataPaths, resolveDataRoot } from './lib/data-root.js'
+import { inspectRuntimeLock } from './lib/instance-lock.js'
+import {
+  CONTROL_TOKEN_ENV,
+  HOST_PID_ENV,
+  RUNTIME_VERSION_ENV,
+  createControlToken,
+  createOperationGate,
+  gracefulStop,
+  redactControlTokens,
+  sendControlShutdown,
+} from './lib/lifecycle.js'
 import { BRIDGE_PATH, createToolBridge, redactBridgeText, stripBridgeEnv } from './lib/dsh-tool-bridge.js'
 import { BRAIN_TURN_PATH, BRAIN_STATUS_PATH, BRAIN_URL_ENV, BRAIN_TOKEN_ENV, createBrainBridge, DEFAULT_NATIVE_TOOLS } from './lib/dsh-brain.js'
 import { maskSecrets, pickUpdatable, pickSection, diffKeys } from './lib/config-utils.js'
@@ -111,6 +123,8 @@ export const Config = (() => {
       healthTimeoutMs: z.natural().default(3000).extra('volatile', true),
       /** 崩潰自動重啟最多幾次（之後停止並記 last_error） */
       maxCrashRestarts: z.natural().default(5).extra('volatile', true),
+      /** 優雅停機超時（毫秒）：先控制面 shutdown；超時後 Windows taskkill /T /F、POSIX SIGTERM→SIGKILL */
+      gracefulStopMs: z.natural().default(10000),
       /** PawBot 源碼目錄（run.py / requirements.txt / data/ 所在）。預設＝插件目錄下的 app/ */
       appDir: z.string().default(DEFAULT_APP_DIR).extra('volatile', true),
       /** 数据守卫：把 data/ 放到插件目录外面（例如 D:/PawBotData），DSH 升级/重装不会碰它；留空＝用 appDir/data。 */
@@ -155,6 +169,7 @@ export function apply(ctx, config) {
     webuiToken: '',
     healthTimeoutMs: 3000,
     maxCrashRestarts: 5,
+    gracefulStopMs: 10000,
     appDir: DEFAULT_APP_DIR,
     dataDir: '',
     dataGuardEnabled: true,
@@ -184,8 +199,13 @@ export function apply(ctx, config) {
   const cfg = normalize(config, DEFAULTS)
   const refreshCfg = () => Object.assign(cfg, normalize(config, DEFAULTS))
 
+  // 控制面 token：每次 spawn 重新生成；只注入子进程 env，绝不进日志/工具回包。
+  let activeControlToken = ''
+  const redactAll = (text) =>
+    redactControlTokens(redactBridgeText(String(text ?? '')), [activeControlToken])
+
   const log = (msg) => {
-    const line = `[pawbot] ${redactBridgeText(msg)}`
+    const line = `[pawbot] ${redactAll(msg)}`
     try {
       if (ctx.logger?.info) ctx.logger.info(line)
       else console.log(line)
@@ -199,7 +219,7 @@ export function apply(ctx, config) {
   const MAX_BUFFER = 5000
   const ring = [] // { ts, stream, line }
   const pushLine = (stream, line) => {
-    ring.push({ ts: Date.now(), stream, line: redactBridgeText(line) })
+    ring.push({ ts: Date.now(), stream, line: redactAll(line) })
     if (ring.length > MAX_BUFFER) ring.splice(0, ring.length - MAX_BUFFER)
   }
   const tail = (n) => ring.slice(-Math.max(0, n))
@@ -229,7 +249,7 @@ export function apply(ctx, config) {
   const SETUP_LOG_TAIL = 60
   const setupRing = []
   const setupLog = (msg) => {
-    const text = redactBridgeText(msg == null ? '' : msg)
+    const text = redactAll(msg == null ? '' : msg)
     if (!text) return
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trimEnd()
@@ -276,32 +296,6 @@ export function apply(ctx, config) {
    * 有 app/.venv 時優先拿 venv 的 python 起 PawBot（依賴才裝得到）。
    */
   const appDirectory = () => resolve(String(cfg.appDir || DEFAULTS.appDir))
-  const dataDirectory = () => join(appDirectory(), 'data')
-
-  /* ── 数据守卫：防止 DSH 更新 / 插件重装 / 版本升级把 data/ 冲掉 ──────────
-   * 1) dataDir 非空时把 app/data 换成指向外部目录的联接（升级只覆盖 app/，不碰外部数据）；
-   * 2) 版本变化时自动快照 config.json + persona.md + 记忆文件到 data/backups/。
-   * 迁移/快照都不覆盖已有文件：外部已有数据优先，不会用插件模板盖掉你的 key。
-   */
-  let dataGuardInfo = { enabled: false, dataDir: '', warnings: [] }
-  try {
-    dataGuardInfo = dataGuard.prepareData({
-      appDir: appDirectory(),
-      dataDir: cfg.dataDir || process.env.PAWBOT_DATA_DIR || '',
-      version: PKG_VERSION,
-      keep: cfg.dataBackupKeep,
-      enabled: cfg.dataGuardEnabled !== false,
-      log,
-    })
-    for (const warning of dataGuardInfo.warnings || []) log(`数据守卫：${warning}`)
-    if (dataGuardInfo.dataDir) {
-      log(`数据守卫：data = ${dataGuardInfo.dataDir}${dataGuardInfo.external ? '（外部目录）' : ''}` +
-        (dataGuardInfo.snapshot ? `；版本快照：${dataGuardInfo.snapshot}` : ''))
-    }
-  } catch (error) {
-    log(`数据守卫初始化失败（不影响启动）：${error?.message || error}`)
-  }
-  const DataGuardDir = () => dataGuardInfo.dataDir || dataDirectory()
   // 專案目錄（run.py 所在）：
   //   1. 使用者**明確**設了非預設的 projectDir，且那裡有 run.py → 尊重它（升級/自訂安裝不被搶走）
   //   2. 否則 app/ 有 run.py → 用 app/（一鍵安裝的預設佈局，venv/data 也都在這裡）
@@ -314,11 +308,69 @@ export function apply(ctx, config) {
     if (existsSync(join(app, 'run.py'))) return app
     return configured
   }
+  // Python 的 BASE_DIR = run.py 所在目录；数据根必须与它一致，否则 Host 与 Python 各写各的。
+  const runtimeBaseDir = () => {
+    const project = projectDirectory()
+    return existsSync(join(project, 'run.py')) ? project : appDirectory()
+  }
   const venvPythonPath = () => venvPaths(appDirectory()).python
   const pythonForRun = () => {
     const vp = venvPythonPath()
     if (vp && existsSync(vp)) return vp
     return String(cfg.pythonExe || DEFAULTS.pythonExe)
+  }
+
+  /* ── 统一数据根 + 数据守卫 ────────────────────────────────────────────
+   * DataRoot 优先级：Config.dataDir > PAWBOT_DATA_DIR > <runtimeBase>/data。
+   * 迁移/联接复用 lib/data-guard.js；迁移失败会回退到 app/data（Host 与 Python 同根）。
+   * 版本变化时自动快照 config.json + persona.md + 记忆文件到 <dataRoot>/backups/。
+   * 注意：解析阶段不创建业务子目录（避免只读解析也写盘）。
+   */
+  let dataRootInfo
+  try {
+    dataRootInfo = resolveDataRoot({
+      appDir: runtimeBaseDir(),
+      configDataDir: cfg.dataDir,
+      env: process.env,
+      version: PKG_VERSION,
+      keep: cfg.dataBackupKeep,
+      enabled: cfg.dataGuardEnabled !== false,
+      log,
+    })
+  } catch (error) {
+    const fallbackRoot = join(runtimeBaseDir(), 'data')
+    dataRootInfo = {
+      appDir: runtimeBaseDir(),
+      appData: fallbackRoot,
+      dataRoot: fallbackRoot,
+      requested: '',
+      source: 'default',
+      enabled: cfg.dataGuardEnabled !== false,
+      external: false,
+      migrated: false,
+      version: PKG_VERSION,
+      snapshot: null,
+      warnings: [`数据根解析失败（回退 app/data）：${error?.message || error}`],
+    }
+  }
+  for (const warning of dataRootInfo.warnings || []) log(`数据根：${warning}`)
+  log(`数据根：${dataRootInfo.dataRoot}（来源：${dataRootInfo.source}` +
+    `${dataRootInfo.external ? '，外部目录' : ''}${dataRootInfo.migrated ? '，已迁移' : ''}）` +
+    (dataRootInfo.snapshot ? `；版本快照：${dataRootInfo.snapshot}` : ''))
+  const dataRoot = () => dataRootInfo.dataRoot || join(runtimeBaseDir(), 'data')
+  const dataDirectory = () => dataRoot()
+  const dataPathsNow = () => dataPaths(dataRoot())
+  const DataGuardDir = () => dataRoot()
+  // 兼容旧字段（pawbot_status / pawbot_data_backup 仍在用）。
+  const dataGuardInfo = {
+    enabled: cfg.dataGuardEnabled !== false,
+    dataDir: dataRoot(),
+    external: Boolean(dataRootInfo.external),
+    migrated: Boolean(dataRootInfo.migrated),
+    snapshot: dataRootInfo.snapshot || null,
+    warnings: dataRootInfo.warnings || [],
+    source: dataRootInfo.source,
+    requested: dataRootInfo.requested || '',
   }
 
   /* ── 大肥鱼的大脑：PawBot 每轮对话 → 进程内 DSH Agent（可用电脑工具） ──
@@ -339,7 +391,7 @@ export function apply(ctx, config) {
     pawbotBase: () => `http://${cfg.webuiHost || '127.0.0.1'}:${Number(cfg.webuiPort) || 6185}`,
     // 子进程要打的是 DSH WebServer 的 origin（/pawbot-dsh-brain/turn 注册在这里），不是 6185。
     hostOrigin: () => (typeof ctx.webServer?.getOrigin === 'function' ? ctx.webServer.getOrigin() : ''),
-    workDir: () => String(cfg.brainCwd || '').trim() || join(dataDirectory(), 'brain'),
+    workDir: () => String(cfg.brainCwd || '').trim() || dataPathsNow().brain,
     onAudit: ({ outcome, elapsed_ms }) => log(`brain turn outcome=${outcome} elapsed_ms=${elapsed_ms}`),
   })
 
@@ -347,10 +399,9 @@ export function apply(ctx, config) {
    * 為什麼必須 taskkill /T /F：
    *   - `py run.py` 實際是 py.exe（launcher）→ python.exe 兩層；直接 child.kill() 只殺 py.exe，
    *     會把 python.exe 留下變孤兒。
-   *   - Windows 上 Node 的 child.kill('SIGTERM'/'SIGINT') 都只是 TerminateProcess，沒有 POSIX 信號語義；
-   *     run.py 的 SIGINT/SIGTERM handler 在 Windows 上也收不到（add_signal_handler 會 NotImplementedError）。
-   *   - 所以「優雅停止」在 Windows 上不可得，只能用 taskkill /T /F 原子收掉整棵樹（含 PawBot 可能
-   *     拉起的 TTS 等孫進程），保證不留孤兒 python。
+   *   - 批次 2 起，Windows 的优雅路径是 HTTP 控制面（run.py 收到 shutdown 後 flush 再退出）；
+   *     taskkill /T /F 只在控制面不可用/超時時兜底，原子收掉整棵樹（含 TTS 等孫進程）。
+   *   - POSIX 上控制面之后还可以 SIGTERM（run.py 注册了信号 handler），最后 SIGKILL。
    */
   const taskkillTree = (pid) =>
     new Promise((resolve) => {
@@ -387,50 +438,99 @@ export function apply(ctx, config) {
       c.once('exit', onExit)
     })
 
-  /**
-   * 停掉 currentChild（整棵進程樹）。
-   * 回傳 { stopped, alive?, pid?, error? }：
-   *   - stopped:true          確認已退出
-   *   - stopped:false,alive:true  SIGKILL 後仍活著（殺不掉）——呼叫端不能假裝成功
-   *   - stopped:false,alive:false 本來就沒在跑
+  /* ── 控制面地址 + 优雅停机 ──────────────────────────────────────────
+   * Windows 的优雅路径是 HTTP 控制面（run.py 收不到 POSIX 信号）；控制端点只绑
+   * loopback peer + 独立 Bearer token，所以这里固定连 127.0.0.1（除非用户把
+   * webuiHost 明确设成别的 loopback 地址）。
    */
-  const stopChild = async () => {
-    bridge?.revoke()
-    brain.revoke()
+  const stopGate = createOperationGate()
+  const controlHost = () => {
+    const host = String(cfg.webuiHost || DEFAULTS.webuiHost).trim()
+    // 只连字面 loopback；'localhost' 与通配地址统一收敛到 127.0.0.1。
+    if (!host || host === 'localhost' || host === '0.0.0.0'
+        || host === '::' || host === '[::]') return '127.0.0.1'
+    return host
+  }
+  const controlPort = () => Number(cfg.webuiPort) || DEFAULTS.webuiPort
+  const gracefulStopTimeout = () =>
+    Math.max(100, Number(cfg.gracefulStopMs) || DEFAULTS.gracefulStopMs)
+
+  /**
+   * 停掉 currentChild（整棵進程樹）。顺序固定：
+   *   控制面 shutdown → 等 ack/退出（默认 10s，Config.gracefulStopMs 可配）
+   *   → POSIX SIGTERM → Windows taskkill /T /F → SIGKILL 兜底。
+   * 并发 stop/restart/dispose 由 stopGate 去重（同一时间只执行一次 stop）。
+   * 回傳 { stopped, alive?, pid?, method?, graceful?, error? }；杀不掉绝不回 stopped:true。
+   */
+  const stopChild = () => stopGate.runStop(async () => {
+    refreshCfg()
     const child = currentChild
     if (!child) return { stopped: false, alive: false }
     const pid = child.pid
     if (!isRunning(child)) {
-      if (currentChild === child) currentChild = null
+      if (currentChild === child) {
+        currentChild = null
+        activeControlToken = ''
+      }
       return { stopped: false, alive: false }
     }
     stopping = true
+    // 桥 revoke 与停机协调：先让 Host 侧桥失效，再进行优雅停机/兜底强杀。
+    bridge?.revoke()
+    brain.revoke()
     try {
-      if (isWin) {
-        await taskkillTree(pid)
-      } else {
-        // POSIX：SIGTERM 讓 run.py 的 signal handler 優雅關閉（flush 存儲、關 WS/WebUI）。
-        try {
-          child.kill('SIGTERM')
-        } catch {}
+      const token = activeControlToken
+      const graceMs = gracefulStopTimeout()
+      const result = await gracefulStop({
+        pid,
+        isWin,
+        graceMs,
+        isRunning: () => isRunning(child),
+        requestShutdown: ({ timeoutMs }) => sendControlShutdown({
+          host: controlHost(),
+          port: controlPort(),
+          token,
+          timeoutMs: timeoutMs || graceMs,
+          reason: 'host-stop',
+        }),
+        waitExit: (ms) => waitForExit(child, ms),
+        signalTerm: () => {
+          try {
+            child.kill('SIGTERM')
+          } catch {}
+        },
+        killTree: () => taskkillTree(pid),
+        kill: () => {
+          try {
+            child.kill('SIGKILL')
+          } catch {}
+        },
+        onPhase: (phase) => log(`停机阶段：${phase}`),
+      })
+      if (result.stopped) {
+        if (currentChild === child) {
+          currentChild = null
+          activeControlToken = ''
+        }
+        return {
+          stopped: true,
+          pid,
+          method: result.method,
+          graceful: result.method === 'control',
+          ack: result.ack || null,
+        }
       }
-      let exited = await waitForExit(child, 1500)
-      if (!exited) {
-        try {
-          child.kill('SIGKILL')
-        } catch {}
-        exited = await waitForExit(child, 1000)
+      return {
+        stopped: false,
+        alive: true,
+        pid,
+        method: result.method,
+        error: result.error || `PawBot 进程（pid=${pid}）杀不掉，仍存活`,
       }
-      if (!exited || isRunning(child)) {
-        // 1500ms 等不到退出、SIGKILL 也沒效：坦白回報，不要回 stopped:true。
-        return { stopped: false, alive: true, pid, error: `PawBot 进程（pid=${pid}）杀不掉，仍存活` }
-      }
-      if (currentChild === child) currentChild = null
-      return { stopped: true, pid }
     } finally {
       stopping = false
     }
-  }
+  })
 
   const startChild = () => {
     // 禁止雙 spawn：已經有一個活著的子進程就直接回它。
@@ -438,10 +538,29 @@ export function apply(ctx, config) {
       log(`startChild 略过：已有运行中的 PawBot（pid=${currentChild.pid}）`)
       return currentChild
     }
+    // 停机 / 重启 / 卸载过程中绝不 spawn 新进程（避免双 spawn 或漏清理）。
+    if (disposed || stopping || stopGate.busy) {
+      const msg = disposed ? '插件已卸载，不再启动 PawBot' : '正在停止/重启 PawBot，未启动新进程'
+      lastSpawnError = msg
+      log(msg)
+      return null
+    }
     refreshCfg()
     const cwd = projectDirectory()
     const exe = pythonForRun()
+    const root = dataRoot()
     const runPy = join(cwd, 'run.py')
+    // 只读预检：运行锁由 Python 真实进程持有；Host 不持锁（py.exe launcher pid 不同）。
+    try {
+      const preflight = inspectRuntimeLock(root)
+      if (preflight.present && preflight.alive === true) {
+        log(`警告：数据根已有运行锁（pid=${preflight.lock?.pid}），PawBot 可能因单实例拒绝启动`)
+      } else if (preflight.present && preflight.error) {
+        log(`警告：运行锁状态未知（${preflight.error}），PawBot 可能因 fail-closed 拒绝启动`)
+      }
+    } catch (error) {
+      log(`运行锁预检失败（不影响启动）：${error?.message || error}`)
+    }
     if (!existsSync(runPy)) {
       const msg = `run.py 不存在：${runPy}`
       lastSpawnError = msg
@@ -450,11 +569,17 @@ export function apply(ctx, config) {
       return null
     }
     let child
+    const controlToken = createControlToken()
     try {
       const baseEnv = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' }
       const withBridge = bridge ? bridge.childEnv(baseEnv) : stripBridgeEnv(baseEnv)
       // 大腦橋的 env 永遠最後套：即使只读桥关着，也要把 brain 的 URL/token 注进去。
       const childEnv = brain.envForChild(withBridge)
+      // 数据根 / 归属 / 控制 token 以 Host 本次解析为准（覆盖父进程继承值）。
+      childEnv[DATA_ROOT_ENV] = root
+      childEnv[HOST_PID_ENV] = String(process.pid)
+      childEnv[RUNTIME_VERSION_ENV] = PKG_VERSION
+      childEnv[CONTROL_TOKEN_ENV] = controlToken
       child = spawn(exe, ['run.py'], {
         cwd,
         env: childEnv,
@@ -464,7 +589,7 @@ export function apply(ctx, config) {
     } catch (e) {
       bridge?.revoke()
       brain.revoke()
-      const msg = redactBridgeText(`spawn 抛错：${e?.message}`)
+      const msg = redactAll(`spawn 抛错：${e?.message}`)
       lastSpawnError = msg
       lastError = msg
       log(msg)
@@ -473,8 +598,9 @@ export function apply(ctx, config) {
     spawnCount += 1
     startedAt = Date.now()
     currentChild = child
+    activeControlToken = controlToken
     lastSpawnError = ''
-    log(`spawn ${exe} run.py (cwd=${cwd}, pid=${child.pid})`)
+    log(`spawn ${exe} run.py (cwd=${cwd}, pid=${child.pid}, dataRoot=${root}, control=on)`)
 
     try {
       child.stdout?.setEncoding('utf8')
@@ -487,7 +613,7 @@ export function apply(ctx, config) {
         bridge?.revoke()
         brain.revoke()
       }
-      const msg = redactBridgeText(`进程错误：${err?.message}`)
+      const msg = redactAll(`进程错误：${err?.message}`)
       lastError = msg
       lastSpawnError = msg
       pushLine('stderr', msg)
@@ -506,6 +632,7 @@ export function apply(ctx, config) {
       pushLine('stderr', `[pawbot] process exited code=${code} signal=${signal}`)
       log(`进程退出 code=${code} signal=${signal}`)
       currentChild = null
+      activeControlToken = ''
       // 非有意停止 && 配置了崩潰重啟 && 未 dispose → 指數退避後重啟（2s→4s→8s…上限 60s）
       if (!disposed && !stopping && cfg.restartOnCrash) {
         // 穩定跑過一段時間才崩，視為新的連續崩潰序列（不要累積到幾個月後才停）。
@@ -546,6 +673,7 @@ export function apply(ctx, config) {
       timers.clear()
       crashRestarts = 0
       const stop = await stopChild()
+      if (disposed) return { ok: false, error: '插件已卸载，已放弃重启' }
       if (stop && stop.stopped === false && stop.alive) {
         return {
           ok: false,
@@ -557,7 +685,7 @@ export function apply(ctx, config) {
       const started = startChild()
       if (!started) return { ok: false, error: lastSpawnError || 'spawn 失败' }
       await new Promise((r) => setTimeout(r, 500))
-      return { ok: true, restarted_from_running: wasRunning, pid: started.pid, spawn_count: spawnCount }
+      return { ok: true, restarted_from_running: wasRunning, pid: started.pid, spawn_count: spawnCount, stop }
     } finally {
       restarting = false
     }
@@ -565,12 +693,12 @@ export function apply(ctx, config) {
 
   /* ── DSH 工具 ── */
   const safe = (v) => {
-    if (typeof v === 'string') return redactBridgeText(v)
+    if (typeof v === 'string') return redactAll(v)
     if (v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean') return v
     try {
-      return JSON.parse(redactBridgeText(JSON.stringify(v)))
+      return JSON.parse(redactAll(JSON.stringify(v)))
     } catch {
-      return redactBridgeText(String(v))
+      return redactAll(String(v))
     }
   }
   const textOutput = {
@@ -619,13 +747,41 @@ export function apply(ctx, config) {
         ui_route: uiRouteState,
         // 「大肥鱼的大脑」是否通：模型路由 / 沙箱 / 电脑工具白名单 / 最近失败
         brain: await brain.describe(),
-        // 数据守卫：data 放哪、是否外部目录、最近一次版本快照
+        // 数据根 / 数据守卫：data 放哪、是否外部目录、最近一次版本快照
         data_guard: {
           data_dir: DataGuardDir(),
+          data_root: dataRoot(),
+          source: dataGuardInfo.source,
+          requested: dataGuardInfo.requested || null,
           external: Boolean(dataGuardInfo.external),
+          migrated: Boolean(dataGuardInfo.migrated),
           plugin_version: PKG_VERSION,
           last_snapshot: dataGuardInfo.snapshot || null,
           warnings: dataGuardInfo.warnings || [],
+          // 只读预检：运行锁由 Python 真实进程持有；这里不获取锁、不改文件。
+          runtime_lock: (() => {
+            try {
+              const preflight = inspectRuntimeLock(dataRoot())
+              if (!preflight.present) return { present: false }
+              return {
+                present: true,
+                pid: preflight.lock?.pid ?? null,
+                version: preflight.lock?.version || '',
+                alive: preflight.alive,
+                stale: preflight.stale,
+                error: preflight.error || null,
+              }
+            } catch (error) {
+              return { present: null, error: redactAll(error?.message || error) }
+            }
+          })(),
+        },
+        // 控制面只报「开没开 + 路径」，永远不回 token。
+        control_plane: {
+          enabled: Boolean(activeControlToken),
+          ready_path: '/api/control/ready',
+          shutdown_path: '/api/control/shutdown',
+          graceful_stop_ms: gracefulStopTimeout(),
         },
         // webServer 實際綁在哪個 origin（面板就是從這個 origin 的同源路徑打的）
         web_origin: (() => {
@@ -779,7 +935,7 @@ export function apply(ctx, config) {
   const readPawbotServer = () => {
     const fallback = { host: '0.0.0.0', port: 6199, path: '/ws', access_token: '' }
     try {
-      const json = JSON.parse(readFileSync(join(dataDirectory(), 'config.json'), 'utf8'))
+      const json = JSON.parse(readFileSync(dataPathsNow().config, 'utf8'))
       const server = json && typeof json.server === 'object' && json.server ? json.server : {}
       return { ...fallback, ...server }
     } catch {
@@ -829,6 +985,7 @@ export function apply(ctx, config) {
       refreshCfg()
       return runEnvSetup({
         appDir: appDirectory(),
+        dataRoot: dataRoot(),
         pythonExe: String(cfg.pythonExe || DEFAULTS.pythonExe),
         onLog: setupLog,
         onProgress,
@@ -850,6 +1007,7 @@ export function apply(ctx, config) {
     try {
       r = await runEnvSetup({
         appDir: appDirectory(),
+        dataRoot: dataRoot(),
         pythonExe: String(cfg.pythonExe || DEFAULTS.pythonExe),
         onLog: setupLog,
         platform: process.platform,
@@ -904,7 +1062,7 @@ export function apply(ctx, config) {
     // 設了 onebotToken 才同步寫回 PawBot 的 server.access_token（不設就不動既有值）
     if (String(cfg.onebotToken || '')) {
       try {
-        const cfgRes = ensureConfig({ appDir: appDirectory(), onebotToken: String(cfg.onebotToken || '') })
+        const cfgRes = ensureConfig({ appDir: appDirectory(), dataRoot: dataRoot(), onebotToken: String(cfg.onebotToken || '') })
         if (!cfgRes.ok) setupLog(`同步 server.access_token 失败：${cfgRes.error || ''}`)
         else if (cfgRes.token_updated) setupLog('已把 onebotToken 写进 PawBot 的 server.access_token（PawBot 需重启才生效）')
       } catch (e) {
@@ -1035,6 +1193,7 @@ export function apply(ctx, config) {
     try {
       state = await setupState({
         appDir: appDirectory(),
+        dataRoot: dataRoot(),
         pythonExe: String(cfg.pythonExe || DEFAULTS.pythonExe),
         run: defaultRun,
         platform: process.platform,
@@ -1432,8 +1591,12 @@ export function apply(ctx, config) {
         action,
         plugin_version: PKG_VERSION,
         data_dir: dir,
+        data_root: dataRoot(),
+        data_source: dataGuardInfo.source,
         external: Boolean(dataGuardInfo.external),
+        migrated: Boolean(dataGuardInfo.migrated),
         config_data_dir: String(cfg.dataDir || ''),
+        env_data_dir: String(process.env[DATA_ROOT_ENV] || ''),
         guard_enabled: cfg.dataGuardEnabled !== false,
         guard_warnings: dataGuardInfo.warnings || [],
         ...info,
@@ -1597,35 +1760,9 @@ export function apply(ctx, config) {
       stopping = true
       for (const t of timers) clearTimeout(t)
       timers.clear()
-      const child = currentChild
-      currentChild = null
-      return (async () => {
-        try {
-          if (child && isRunning(child)) {
-            if (isWin) {
-              await taskkillTree(child.pid)
-              await waitForExit(child, 1000)
-              if (isRunning(child)) {
-                try {
-                  child.kill('SIGKILL')
-                } catch {}
-              }
-            } else {
-              try {
-                child.kill('SIGTERM')
-              } catch {}
-              const exited = await waitForExit(child, 1200)
-              if (!exited) {
-                try {
-                  child.kill('SIGKILL')
-                } catch {}
-              }
-            }
-          }
-        } catch {
-          /* dispose 時絕不拋 */
-        }
-      })()
+      // 走与 restart 相同的串行 stop：先控制面 shutdown，再按平台兜底强杀；
+      // 并发 dispose/restart 由 stopGate 去重，不会双 spawn 或漏清理。
+      return stopChild().catch(() => ({ stopped: false, alive: true, error: 'dispose 停机失败' }))
     },
     'pawbot: 子进程/定时器回收',
   )

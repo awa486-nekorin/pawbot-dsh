@@ -144,7 +144,7 @@ class Bot:
         # 云同步：开启 sync.auto_pull_on_start 才后台拉一次；失败只告警，不影响启动
         try:
             from . import cloudsync
-            cloudsync.start_auto_pull(self.config, self.base_dir)
+            self._auto_pull_thread = cloudsync.start_auto_pull(self.config, self.base_dir)
         except Exception as e:
             log.warn(f"云同步启动拉取调度失败（不影响启动）：{type(e).__name__} {e}")
         # 实时同步：sync.mode=realtime 时起后台线程（本地变化防抖上传 + 远端轮询拉取）
@@ -302,7 +302,9 @@ class Bot:
                 and getattr(self, "emotion", None) is not None
                 and self.config.get("emotion.enabled", True)
                 and (will_speak or ctx.state["group_observe"])):
-            feel = asyncio.create_task(self._feel(ev, use_judge=will_speak))
+            # 登记到 tasks registry：停机时 lifecycle 才能真正取消/等待它，
+            # 而不是只取消事件 worker 后留下一个还在写 Store 的孤儿任务。
+            feel = tasks.spawn(self._feel(ev, use_judge=will_speak), name="feel")
         if ev.type == "message" and (will_speak or ctx.state["group_observe"]):
             try:
                 await perceive.enrich(self, conn, ev)

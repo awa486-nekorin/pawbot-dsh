@@ -40,7 +40,13 @@ class HomeReportTests(unittest.IsolatedAsyncioTestCase):
         self.session = ps.PixivSession()
         self.details = {}
         self.raw = {}
-        for item in (patch.object(ps.PixivSession, "status", AsyncMock(return_value={
+        browser_guard = patch.object(ps.subprocess, "Popen", side_effect=AssertionError("offline test must not launch a browser"))
+        self.addCleanup(browser_guard.stop)
+        browser_process = browser_guard.start()
+        self.addCleanup(browser_process.assert_not_called)
+        for item in (patch.object(ps.PixivSession, "chrome_cdp_ready", return_value=True),
+                     patch.object(ps, "_local_get", side_effect=AssertionError("offline test must not connect to browser CDP")),
+                     patch.object(ps.PixivSession, "status", AsyncMock(return_value={
                          "ready": True, "page_on_pixiv": True, "logged_in": True, "error": ""})),
                      patch.object(ps.PixivSession, "_fetch_raw", side_effect=self._raw),
                      patch.object(ps.PixivSession, "_fetch_json", side_effect=self._json)):
@@ -126,6 +132,16 @@ class _Cfg(dict):
 
 
 class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        browser_guard = patch.object(ps.subprocess, "Popen", side_effect=AssertionError("offline test must not launch a browser"))
+        self.addCleanup(browser_guard.stop)
+        browser_process = browser_guard.start()
+        self.addCleanup(browser_process.assert_not_called)
+        for item in (patch.object(ps.PixivSession, "chrome_cdp_ready", return_value=True),
+                     patch.object(ps, "_local_get", side_effect=AssertionError("offline test must not connect to browser CDP"))):
+            item.start()
+            self.addCleanup(item.stop)
+
     def test_empty_query_routes_to_home(self):
         with patch.object(ps.PixivSession, "home_report", AsyncMock(return_value={
                 "provider": "pixiv(浏览器)", "images": [], "error": ""})) as home, \
@@ -153,6 +169,13 @@ class AutoLaunchTests(unittest.TestCase):
 
 class ToolMarkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        history_guard = patch.object(ps.PixivSession, "record_views", new_callable=AsyncMock, return_value=0)
+        history_guard.start()
+        self.addCleanup(history_guard.stop)
+        browser_guard = patch.object(ps.subprocess, "Popen", side_effect=AssertionError("offline test must not launch a browser"))
+        self.addCleanup(browser_guard.stop)
+        browser_process = browser_guard.start()
+        self.addCleanup(browser_process.assert_not_called)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         config = _Cfg({"persona.stickers_dir": self.tmp.name, "persona.sticker_fetch": False})

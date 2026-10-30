@@ -1,0 +1,150 @@
+PawBot DSH architecture baseline verification report
+generated_utc: 2026-10-30T02:31:55Z
+node: v24.14.0
+platform: MINGW64_NT-10.0-19045 3.6.6-1cdd4371.x86_64 x86_64
+staging: D:\claude-tmp\pawbot-arch-baseline
+target_repo: D:\paw-old\pawbot-dsh
+
+== node --check ==
+node --check scripts/architecture-baseline.mjs exit=0
+node --check test/architecture-baseline.mjs exit=0
+node --check index.js exit=0
+node --check client.js exit=0
+node --check bili-watch/index.js exit=0
+node --check lib/webui-proxy.js exit=0
+node --check lib/dsh-tool-bridge.js exit=0
+node --check lib/dsh-brain.js exit=0
+
+== baseline human output (complete staging, 29 files) ==
+PawBot DSH 架构基线检查
+root: D:\claude-tmp\pawbot-arch-baseline
+node: v24.14.0
+schema: pawbot-dsh/architecture-baseline@1
+
+[PASS] files.required — 关键文件齐全
+[PASS] package.contract — package 身份 / engines / exports / dsh
+[PASS] entry.node.index — Node 主入口 index.js
+[PASS] entry.node.client — 浏览器客户端 client.js
+[PASS] entry.node.bili-watch — bili-watch 入口 bili-watch/index.js
+[PASS] entry.python.run — Python 入口 app/run.py
+[PASS] entry.relative-imports — 入口直接相对依赖可解析
+[PASS] routes.pawbot-ui.subpaths — 旧 /pawbot-ui 注册与 exact 子路径
+[PASS] routes.pawbot-ui.methods — 旧 /pawbot-ui 方法与子路径
+[PASS] bridge.tool.constants — 只读桥常量与 Host exact 注册
+[PASS] bridge.tool.allowlist-limits — 只读桥白名单与限额
+[PASS] bridge.tool.python-client — Python 只读桥客户端协议
+[PASS] bridge.brain.protocol — 大脑桥路径 / 客户端 / Host 注册
+[PASS] python.config.default — config DEFAULT 段 / 默认值 / 单一赋值来源
+[PASS] python.config.source — DEFAULT 是运行态配置的来源
+[PASS] python.config.wiring — config.py / core.py / run.py 接线
+[PASS] python.webui.endpoints.get — WebUI 关键 GET 端点
+[PASS] python.webui.endpoints.post — WebUI 关键 POST 端点
+[PASS] python.webui.security-static — WebUI 安全边界（静态观测）
+
+结果: PASS — 19 passed, 0 failed, 19 total
+exit=0
+
+== baseline --json --out (reports/) ==
+exit=0
+same_as_stdout true
+schema pawbot-dsh/architecture-baseline@1
+root D:\claude-tmp\pawbot-arch-baseline
+ok true
+summary {"total":19,"passed":19,"failed":0}
+failed 0
+bytes 19648
+static python.config.source,python.webui.security-static
+
+== new offline test output ==
+== 成功路径 ==
+  ok   --help 退出 0 并列出参数/安全说明
+  ok   --json：19/19 通过、退出 0、数据目录不被写
+  ok   默认 cwd 可用
+  ok   人类输出与 --verbose
+  ok   --json --out 新建报告，内容与 stdout 一致
+  ok   --root= / --out= 等号形式可用
+
+== --out 保守策略 ==
+  ok   拒绝覆盖已有普通文件，内容不变
+  ok   package.json 目标始终拒绝（存在/缺失/reports 内）
+  ok   root 内只允许 reports/ 下的新报告
+  ok   只允许 .json、父目录必须存在
+  ok   --out --json 不被吞掉，按缺值报错
+  ok   同一路径第二次运行被拒绝，报告不被覆盖
+
+== 负例：缺文件 / 契约漂移 ==
+  ok   缺关键文件 → files.required 失败
+  ok   入口相对依赖 hostdeps 缺失 → relative-imports 失败
+  ok   package engines 漂移 → package.contract 失败
+  ok   旧 /pawbot-ui 子路径漂移 → subpaths 失败
+  ok   代理 import 单双引号/空白变化仍通过
+  ok   只读桥路径漂移 → tool.constants 失败
+  ok   Host 只读桥 exact 注册缺失 → tool.constants 失败
+  ok   大脑桥 turn 路由改成 prefix → brain.protocol 失败
+  ok   大脑桥 status 路由改成 prefix → brain.protocol 失败
+
+== 数值表达式 / DEFAULT / 端点解析 ==
+  ok   JS 限额写成 1024 * 1024 → 按值失败
+  ok   Python 限额写成 1024 * 1024 → 按值失败
+  ok   等价数值表达式 2 * 512 仍通过
+  ok   DEFAULT 后续赋值 → config.default 失败
+  ok   DEFAULT 重复键 webui: None → config.default 失败
+  ok   第二次 DEFAULT = {} 赋值 → config.default 失败
+  ok   端点被注释/False and 吞掉 → POST 端点检查失败
+  ok   单双引号 + json.load/merge 同步改名 + 额外 deepcopy 仍通过
+  ok   只改 json.load 变量、不同步 _deep_merge → config.source 失败
+  ok   注释伪合并 + 非合并赋值 → config.source 失败
+
+== 参数错误 ==
+  ok   未知参数 / 缺值 / 不存在根目录 → exit 2
+
+== --out 数据目录拒写 ==
+  ok   data / app/data / 嵌套 / .. 回溯拒绝且不创建报告
+  ok   --out 指向已有 data 目录也拒绝
+  ok   父目录 junction 指向 data → 按 realpath 拒绝
+  ok   外部 app/data junction → 按真实数据根拒绝
+  ok   root 本身是 junction 链接 → 仍按真实数据根拒绝
+  ok   叶子 file symlink → 拒绝；平台不支持创建时 skip
+
+== 运行行为：/pawbot-ui CSRF 守卫 ==
+  ok   跨源 POST 被 403 拒绝且不调用 action
+  ok   同源 POST 但 content-type 非 JSON → 415
+  ok   同源 POST + JSON → 200 且调用 action
+  ok   跨源 GET Referer → 403 且不访问 PawBot
+  ok   拿不到 Host origin 时非 GET fail-closed → 403
+
+43 passed, 0 failed, 0 skipped
+exit=0
+
+== baseline against real repo (read-only) ==
+exit=1
+ok false summary {"total":19,"passed":18,"failed":1}
+FAIL files.required "缺少 3 个：scripts/architecture-baseline.mjs, test/architecture-baseline.mjs, docs/ARCHITECTURE-BASELINE.md" 
+
+== staging --out refusal: root 内非 reports ==
+exit=2
+错误: root 内只允许写入 <root>/reports/ 下的新 .json 报告：D:\claude-tmp\pawbot-arch-baseline\out\should-not-exist.json（父目录真实路径 D:\claude-tmp\pawbot-arch-baseline\out）
+file=ABSENT
+
+== real repo --out refusal: package.json ==
+exit=2
+错误: 拒绝把 package.json 作为报告目标：D:\paw-old\pawbot-dsh\package.json
+
+== real repo --out refusal: app/data ==
+exit=2
+错误: 拒绝写入报告：--out 不能位于 <root>/data 或 <root>/app/data 内；收到 D:\paw-old\pawbot-dsh\app\data\should-not-exist.json，父目录真实路径 D:\paw-old\pawbot-dsh\app\data
+file=ABSENT
+
+== git status (target repo) ==
+## upload-2026-10-27...origin/upload-2026-10-27
+?? docs/por-20261027/
+git diff --stat:
+
+== sha256 / sizes ==
+076f4c15013bcfbf90d703bf71cfc395680cd50a526a4cdc1367e68d78c0399b */d/claude-tmp/pawbot-arch-baseline/scripts/architecture-baseline.mjs
+d70d481e9ff539cbcf874eb8cd0605e904bbff5e26d03162815c1bd14d00a133 */d/claude-tmp/pawbot-arch-baseline/test/architecture-baseline.mjs
+3fdc9bfcbaf818251c9f213dc8c988e202219d00ee26d7cf78dbc344c084747b */d/claude-tmp/pawbot-arch-baseline/docs/ARCHITECTURE-BASELINE.md
+  1542  55231 /d/claude-tmp/pawbot-arch-baseline/scripts/architecture-baseline.mjs
+   936  34147 /d/claude-tmp/pawbot-arch-baseline/test/architecture-baseline.mjs
+   413  16984 /d/claude-tmp/pawbot-arch-baseline/docs/ARCHITECTURE-BASELINE.md
+  2891 106362 total
