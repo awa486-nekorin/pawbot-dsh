@@ -69,5 +69,10 @@ app/data/.data-guard.json
 app/data/backups/
 app/data/*.migrated-*/
 
+# 批次2 运行时单实例锁与迁移稳定守卫：互斥元数据随进程生灭，不进库
+app/data/.runtime.lock
+app/data/.locks/
+app/.data.pawbot-migration/
+
 # 上传包产物（2026-10-27）
 dist/
