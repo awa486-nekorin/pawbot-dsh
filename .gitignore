@@ -69,5 +69,26 @@ app/data/.data-guard.json
 app/data/backups/
 app/data/*.migrated-*/
 
+# ── 批次3：DataRoot 两层布局（content/ = 用户内容、state/ = 机器状态） ──
+# 两层里长出来的都是本机真实数据（人设正文、记忆、表情、相册、B 站笔记；config/会话/心情/日志…），
+# 一律不进库；只放行下面显式列出的「模板 / 占位」。
+# 注意规则顺序：先整层排除，再用 ! 放行目录本身与模板；父目录被排除时 ! 对更深层无效，
+# 所以每一层目录都要单独放行，模板才能被重新包含。
+app/data/content/**
+app/data/state/**
+!app/data/content/*/
+!app/data/state/*/
+# 模板：空 persona.md / config.json 模板 / 记忆模板 / 占位 .gitkeep
+# （config.json 与 persona.md 在生产目录里也是真实文件的名字：提交前务必确认已清空密钥与人设）
+!app/data/content/persona.md
+!app/data/content/hobbies.json
+!app/data/content/memory/
+!app/data/content/memory/*.md
+!app/data/content/memory/.gitkeep
+!app/data/content/people/.gitkeep
+!app/data/content/diary/.gitkeep
+!app/data/state/config.json
+!app/data/state/plugin_state.json
+
 # 上传包产物（2026-10-27）
 dist/

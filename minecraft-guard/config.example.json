@@ -1,0 +1,16 @@
+{
+  "secret": "REPLACE_WITH_RANDOM_32+_CHARS",
+  "world_id": "pawbot-test-1",
+  "save_path": "C:\\absolute\\path\\to\\saves\\PawBotTestWorld",
+  "actor_uuid": "00000000-0000-0000-0000-000000000000",
+  "pvp_uuids": [],
+  "enabled": false,
+  "write_enabled": false,
+  "pvp_enabled": false,
+  "backup_root": "C:\\absolute\\path\\to\\pawbot-guard-backups",
+  "retention": 7,
+  "backup_interval_sec": 1800,
+  "port": 6198,
+  "max_backup_files": 20000,
+  "max_backup_bytes": 2147483648
+}

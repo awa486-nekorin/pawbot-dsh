@@ -1,0 +1,56 @@
+plugins {
+    id 'fabric-loom' version '1.5.7'
+}
+
+version = project.mod_version
+group = 'dev.pawbot'
+base { archivesName = 'pawbot-guard' }
+
+repositories {
+    maven { url = 'https://maven.fabricmc.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// The regression suite is a JDK-only main class (no JUnit download), so it also runs with plain
+// javac/java. `check`/`build` invokes it here; the stock `test` task is intentionally unused.
+tasks.register('selfTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the dependency-free guard regression runner (synthetic temp data only).'
+    dependsOn testClasses
+    // Deliberately not testRuntimeClasspath: the runner only needs JDK classes and this module's
+    // own output, so it stays runnable offline without Loom's dev-launch runtime.
+    classpath = files(sourceSets.main.output, sourceSets.test.output)
+    mainClass = 'dev.pawbot.guard.GuardSelfTest'
+}
+
+tasks.named('check') {
+    dependsOn 'selfTest'
+}
+
+tasks.named('test') {
+    enabled = false
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand 'version': project.version
+    }
+}

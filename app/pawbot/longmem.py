@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 
 from . import judge
+from . import paths as layout
 from .log import log
 from .memory import _tokens
 
@@ -26,8 +27,12 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(float(ts or time.time())).strftime("%Y-%m-%d")
 
 
-def _source(session_id: str) -> str:
+def _source(session_id: str, source: str = "") -> str:
     sid = str(session_id or "")
+    origin = str(source or "").strip().lower()
+    if origin == "minecraft":
+        world = sid.removeprefix("minecraft_") or sid
+        return f"在 Minecraft 世界 {world}"
     if sid.startswith("group_"):
         return f"在 QQ 群 {sid[6:]}"
     if sid.startswith("private_"):
@@ -52,15 +57,16 @@ def _clean_keywords(values, text: str = "") -> list[str]:
 
 
 class LongMemory:
-    def __init__(self, base_dir: str, config, memory=None):
+    def __init__(self, base_dir: str, config, memory=None, *, paths=None):
         self.base_dir = base_dir
         self.config = config
         self.memory = memory
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
         self.enabled = bool(config.get("longmem.enabled", True))
         if memory is not None:
             memory.longmem = self
-        directory = config.get("longmem.dir", "data/longmem")
-        self.dir = directory if os.path.isabs(directory) else os.path.join(base_dir, directory)
+        self.dir = self.paths.setting(config.get("longmem.dir", ""),
+                                      kind="content", default="longmem")
         self.path = os.path.join(self.dir, "episodes.jsonl")
         self.episodes: list[dict] = []
         self._lock = asyncio.Lock()
@@ -153,6 +159,8 @@ class LongMemory:
             "importance": max([int(row.get("importance") or 1) for row in rows] or [1]),
             "day": day,
             "daily_digest": True,
+            **({"source": str(rows[0].get("source"))}
+               if rows and rows[0].get("source") else {}),
         }
 
     async def _maintain(self, bot):
@@ -163,17 +171,18 @@ class LongMemory:
 
         # 保留期外只保留每個 session/day 的日摘要。
         cutoff = now - keep_days * 86400
-        groups: dict[tuple[str, str], list[dict]] = {}
+        groups: dict[tuple[str, str, str], list[dict]] = {}
         fresh = []
         for row in self.episodes:
             day = str(row.get("day") or _day(float(row.get("ts") or now)))
             ts = float(row.get("ts") or now)
             if ts < cutoff:
-                groups.setdefault((str(row.get("session_id") or ""), day), []).append(row)
+                groups.setdefault((str(row.get("source") or "qq"),
+                                   str(row.get("session_id") or ""), day), []).append(row)
                 changed = True
             else:
                 fresh.append(row)
-        for (sid, day), rows in groups.items():
+        for (source, sid, day), rows in groups.items():
             if len(rows) == 1 and rows[0].get("daily_digest"):
                 fresh.append(rows[0])
                 continue
@@ -186,8 +195,9 @@ class LongMemory:
         groups = {}
         for row in self.episodes:
             day = str(row.get("day") or _day(float(row.get("ts") or now)))
-            groups.setdefault((str(row.get("session_id") or ""), day), []).append(row)
-        for (sid, day), rows in groups.items():
+            groups.setdefault((str(row.get("source") or "qq"),
+                               str(row.get("session_id") or ""), day), []).append(row)
+        for (source, sid, day), rows in groups.items():
             if len(rows) <= threshold:
                 continue
             rows.sort(key=lambda item: float(item.get("ts") or 0))
@@ -217,7 +227,8 @@ class LongMemory:
 
     async def add_episode(self, bot, *, ts: float, session_id: str,
                           participants: list[str], summary: str,
-                          keywords: list[str] | None = None, importance: int = 2):
+                          keywords: list[str] | None = None, importance: int = 2,
+                          source: str = "qq"):
         if not self._cfg("enabled", True) or not summary.strip():
             return
         row = {
@@ -228,6 +239,7 @@ class LongMemory:
             "keywords": _clean_keywords(keywords, summary),
             "importance": max(1, min(5, int(importance or 2))),
             "day": _day(float(ts or time.time())),
+            "source": str(source or "qq").strip().lower()[:32],
         }
         async with self._lock:
             self._append(row)
@@ -311,7 +323,7 @@ class LongMemory:
                     text_value = str(row.get("summary") or "").strip()
                     key = "episode:" + " ".join(text_value.split()).casefold()
                     candidates.append({"score": score, "text": text_value,
-                                       "source": _source(sid), "key": key,
+                                       "source": _source(sid, str(row.get("source") or "")), "key": key,
                                        "kind": "episode"})
         candidates.sort(key=lambda item: (-item["score"], item["key"]))
         # 保底：話題完全對不上時，至少撈一條跟這個人相關的經歷。
@@ -329,7 +341,7 @@ class LongMemory:
                 if not text_value or key in picked_keys:
                     continue
                 candidates.append({"score": 0.01, "text": text_value,
-                                   "source": _source(str(row.get("session_id") or "")),
+                                   "source": _source(str(row.get("session_id") or ""), str(row.get("source") or "")),
                                    "key": key, "kind": "episode"})
                 break
         picked = []

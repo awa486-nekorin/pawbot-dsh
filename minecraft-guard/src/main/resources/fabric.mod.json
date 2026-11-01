@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "pawbot-guard",
+  "version": "${version}",
+  "name": "PawBot Guard",
+  "description": "Loopback permit guard for a dedicated disposable integrated-server test world.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.pawbot.guard.GuardMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "1.20.1",
+    "java": ">=17",
+    "fabric-lifecycle-events-v1": "*"
+  }
+}

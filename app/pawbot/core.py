@@ -29,8 +29,11 @@ from collections import deque
 from typing import Any
 
 from . import event as ev_mod
+from . import identity
 from . import message as msg
+from . import paths as layout
 from . import perceive
+from . import shortterm
 from . import tasks
 from .agent import Agent
 from .bus import BUS
@@ -43,13 +46,14 @@ from .log import log
 from .memory import Memory
 from .memes import MemeBook
 from .longmem import LongMemory
-from .onebot import ActionError, Connection, OneBotServer
+from .onebot import ActionError, Connection, OneBotClient, OneBotServer
 from .persona import Persona
 from .people import PersonBook
 from .spice import Spice
 from .plugin import PluginManager
 from .proactive import Proactive
 from .qzone import Qzone
+from .relay_client import RelayClient
 from .reminders import ReminderService, ReminderStore
 from .safety import SafetyGuard
 from .stickers import StickerBook
@@ -64,11 +68,145 @@ from .tools import ToolBox
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _incoming_body(ev) -> str:
+    """入站消息写进 Store 的正文：文字优先，纯图片保留 `[图片]` 占位。
+
+    ``event.parse`` 已经把消息段转成 ``plain``（图片就是 ``[图片]``），所以正常
+    情况下这里只做去空白；只有上游漏填 ``plain`` 时才按消息段重建，绝不因为
+    「没有文字」把一条只有图片消息丢掉。
+    """
+    body = str(getattr(ev, "plain", "") or "").strip()
+    if body:
+        return body
+    try:
+        return msg.to_plain(getattr(ev, "message", None) or [],
+                            self_id=getattr(ev, "self_id", 0)).strip()
+    except Exception:
+        return ""
+
+
+def _hearing_text(value) -> str:
+    """压成一行、去首尾空白；情绪上下文与判官输入共用。"""
+    return " ".join(str(value or "").split())
+
+
+def _has_meaning(text: str) -> bool:
+    """有没有可解读的内容（字母/数字/汉字）。
+
+    纯标点（「？？！」）不构成情绪刺激：那只是语气符号，不能让她的八维情绪
+    因为一个标点被推着走。图片/语音占位里有汉字，仍然会进判官。
+    """
+    return any(ch.isalnum() for ch in str(text or ""))
+
+
+def _feel_line(row: dict) -> str:
+    """情绪上下文的一行：完整 uid + 清洗过的昵称 + 去换行正文。"""
+    if not isinstance(row, dict):
+        return ""
+    body = _hearing_text(row.get("content"))
+    if not _has_meaning(body):
+        return ""
+    return f"{identity.label(row)}：{body[:60]}"
+
+
+def _open_config(base_dir: str, data_paths) -> Config:
+    """读配置：正常在 ``state/config.json``，还没迁移的数据根就地读旧位置。
+
+    迁移由 ``run.py`` 在 Bot 之前做完；这里只是兜底——直接跑工具脚本、
+    或还没跑过迁移的老数据目录，配置不会「看起来丢了」。
+    """
+    state_config = data_paths.canonical("state", "config.json")
+    if not os.path.isfile(state_config):
+        legacy = os.path.join(base_dir, "data", "config.json")
+        if os.path.isfile(legacy):
+            log.warn("配置仍在旧位置 data/config.json（尚未迁移），本次就地读取；"
+                     "用 run.py 启动时会自动搬进 state/")
+            return Config(os.path.join(base_dir, "data", "config.json"))
+    return Config(state_config)
+
+
+def build_onebot_transport(config, on_event) -> OneBotServer | OneBotClient | RelayClient:
+    """按 ``server.mode`` 选传输方式：reverse（默认，本机监听）/ forward（外拨中继）/
+    relay（高可用后端，lease + ready 门禁 + 内容副本）。
+
+    三者对调用方暴露同一套接口（start/stop/get/connections/on_event），
+    所以 ``Bot.server`` 的既有用法不需要改。forward/relay 不会绑定本地端口。
+    relay 的生命周期回调（on_acquired/on_lost/before_release）由 ``Bot`` 在
+    构造时交给 ``ha_runtime.HARuntime`` 接线；这里只负责按配置构造传输。
+    """
+    mode = str(config.get("server.mode", "reverse") or "reverse").strip().lower()
+    if mode == "forward":
+        return OneBotClient.from_config(config, on_event=on_event)
+    if mode == "relay":
+        return RelayClient.from_config(config, on_event=on_event)
+    if mode not in ("reverse", ""):
+        log.warn(f"未知 server.mode={mode!r}，按 reverse 处理")
+    return OneBotServer(
+        host=config.get("server.host", "0.0.0.0"),
+        port=int(config.get("server.port", 6199)),
+        path=config.get("server.path", "/ws"),
+        access_token=config.get("server.access_token", ""),
+        on_event=on_event,
+    )
+
+
+def _durable_revoke_receipts(bot) -> set:
+    """本进程已拿到签名 `revoke` 回执的守卫身份集合。
+
+    守卫只在撤销标记**已落盘并校验通过**后才签名回执，所以签名回执是可验证
+    的持久化证据。裸的 `409 revoked` 只证明内存闩锁：守卫在写标记之前就返回
+    409，因此「第一次 503（没落盘）→ 第二次 409」不能算持久化。
+    """
+    receipts = getattr(bot, "_minecraft_durable_revokes", None)
+    if not isinstance(receipts, set):
+        receipts = set()
+        bot._minecraft_durable_revokes = receipts
+    return receipts
+
+
+def _guard_identity(guard) -> tuple | None:
+    """稳定的守卫身份（复用途），不参与任何授权判断。"""
+    settings = getattr(guard, "settings", None)
+    if settings is None:
+        return None
+    values = []
+    for field in ("url", "world_id", "world_path", "actor_uuid"):
+        value = getattr(settings, field, None)
+        if not isinstance(value, str) or not value:
+            return None
+        values.append(value.lower() if field == "actor_uuid" else value)
+    return tuple(values)
+
+
+def _record_revoke_outcome(result: dict, revoked: bool, issue: str | None) -> None:
+    """把撤销结果翻译成可审计字段，不夸大持久化状态。"""
+    result["revoked"] = revoked
+    result["revoke_durable"] = revoked
+    # 重试后状态可能变化（失败→成功/409），旧字段不得残留。
+    result.pop("already_revoked", None)
+    result.pop("revoke_error", None)
+    if issue == "already_revoked_unverified":
+        result["already_revoked"] = True
+        result["revoke_receipt"] = "already_revoked"
+        result["revoke_durable"] = False
+        result["revoke_error"] = issue
+    elif issue == "already_revoked":
+        result["already_revoked"] = True
+        result["revoke_receipt"] = "already_revoked"
+        result["revoke_durable"] = True
+    elif revoked:
+        result["revoke_receipt"] = "signed"
+    elif issue:
+        result["revoke_error"] = issue
+
+
 class Bot:
     def __init__(self, base_dir: str = BASE_DIR):
         self.base_dir = base_dir
-        self.config = Config(os.path.join(base_dir, "data", "config.json"))
-        self.store = Store(os.path.join(base_dir, "data", "sessions.json"),
+        # 数据布局：content/（可搬走）+ state/（机器状态）。数据根仍由 lifecycle 决定。
+        self.paths = layout.resolve(base_dir)
+        self.config = _open_config(base_dir, self.paths)
+        self.store = Store(self.paths.state("sessions.json"),
                            max_turns=int(self.config.get("chat.context_turns", 8)),
                            max_messages=int(self.config.get("chat.context_keep",
                                             self.config.get("chat.context_messages", 300))))
@@ -76,22 +214,22 @@ class Bot:
         self.safety = SafetyGuard(self)
 
         # 人设 / 记忆 / 表情包 / 空间 / 工具 —— 都是纯本地文件，随时可改
-        self.persona = Persona(base_dir, self.config)
-        self.memory = Memory(base_dir, self.config)
-        self.memes = MemeBook(os.path.join(base_dir, "data", "memes.json"), self.config)
-        self.longmem = LongMemory(base_dir, self.config, self.memory)
-        self.diary = Diary(base_dir, self.config)
-        self.hobbies = Hobbies(base_dir, self.config)
-        self.reminders = ReminderStore(os.path.join(base_dir, "data", "reminders.json"))
+        self.persona = Persona(base_dir, self.config, paths=self.paths)
+        self.memory = Memory(base_dir, self.config, paths=self.paths)
+        self.memes = MemeBook(self.paths.content("memes.json"), self.config)
+        self.longmem = LongMemory(base_dir, self.config, self.memory, paths=self.paths)
+        self.diary = Diary(base_dir, self.config, paths=self.paths)
+        self.hobbies = Hobbies(base_dir, self.config, paths=self.paths)
+        self.reminders = ReminderStore(self.paths.state("reminders.json"))
         self.reminder_service = ReminderService(self)
         self._store_flush_task: asyncio.Task | None = None
         self._compress_locks: dict[str, asyncio.Lock] = {}
-        self.people = PersonBook(base_dir, self.config)
-        self.spice = Spice(os.path.join(base_dir, "data", "spice.json"),
+        self.people = PersonBook(base_dir, self.config, paths=self.paths)
+        self.spice = Spice(self.paths.state("spice.json"),
                            default=int(self.config.get("spice.default", 0)))
-        self.stickers = StickerBook(base_dir, self.config)
+        self.stickers = StickerBook(base_dir, self.config, paths=self.paths)
         # 图库：带描述的图，专门给「不用再看一遍图」用（跟表情包分开）
-        self.album = Album(base_dir, self.config)
+        self.album = Album(base_dir, self.config, paths=self.paths)
         # 自主改提示词（默认关，见 selfedit.py 的三条硬约束）
         self.selfeditor = SelfEditor(self)
         self.qzone = Qzone(self)
@@ -107,26 +245,34 @@ class Bot:
 
         # 读空气 / 心情 / 主动说话
         self.topic = TopicTracker(self.config.get("topic.history_size", 30),
-                                  os.path.join(base_dir, "data", "topic.json"))
-        self.mood = Mood(os.path.join(base_dir, "data", "mood.json"))
-        self.emotion = Emotion(os.path.join(base_dir, "data", "emotion.json"), self.config)
+                                  self.paths.state("topic.json"))
+        self.mood = Mood(self.paths.state("mood.json"))
+        self.emotion = Emotion(self.paths.state("emotion.json"), self.config)
         # 心情不再单独漂移，改成从八维情绪推导，免得两套状态各说各话
         if self.config.get("emotion.enabled", True):
             self.mood.bind_emotion(self.emotion)
-        self.libido = Libido(os.path.join(base_dir, "data", "libido.json"), self.config)
+        self.libido = Libido(self.paths.state("libido.json"), self.config)
         self.proactive = Proactive(self)
 
         self.plugins = PluginManager(
             os.path.join(base_dir, "plugins"),
-            os.path.join(base_dir, "data", "plugin_state.json"),
+            self.paths.state("plugin_state.json"),
         )
-        self.server = OneBotServer(
-            host=self.config.get("server.host", "0.0.0.0"),
-            port=int(self.config.get("server.port", 6199)),
-            path=self.config.get("server.path", "/ws"),
-            access_token=self.config.get("server.access_token", ""),
-            on_event=self._on_event,
-        )
+        self.minecraft_resident = None
+        self._minecraft_resident_task = None
+        # 本机紧急停止闩锁：一旦置上，本进程不再启动 Minecraft 常驻，
+        # 直到 PawBot 重启（谁都不能在运行中把它解开）。
+        self._minecraft_estop = False
+        # 已拿到签名 revoke 回执（= 撤销标记已落盘）的守卫身份；裸 409 不算。
+        self._minecraft_durable_revokes = set()
+        # 紧急停止 / 启动 / 正常停机互相串行：不允许一边 stop 一边拉起。
+        self._minecraft_lock = asyncio.Lock()
+        self.server = build_onebot_transport(self.config, self._on_event)
+        # 高可用（server.mode=relay）只在构造时接线一次：reverse / forward 的
+        # 行为完全不变（没有 ha_runtime，也不启动任何额外循环）。
+        self._ha_mode = str(getattr(self.server, "mode", "") or "").lower() == "relay"
+        self._ha_stopping = False
+        self.ha_runtime = self._build_ha_runtime() if self._ha_mode else None
         self.started_at = time.time()
         self.stats = {"recv": 0, "sent": 0, "errors": 0}
         self.recent_events: deque[dict] = deque(maxlen=100)
@@ -138,22 +284,99 @@ class Bot:
         # 用来判断「我这句还没说完，群里是不是已经有人接话了」。
         self.inbound: dict[str, int] = {}
 
+    # ------------------------------------------------------------ 高可用接线
+    def _build_ha_runtime(self):
+        """构造 relay 模式的 HA 运行时，并把三个生命周期回调挂到 ``self.server``。
+
+        这里只依赖 ``RelayClient`` 现有的回调契约（on_acquired/on_lost/
+        before_release）；没有回调或回调失败时返回 None，relay 业务保持关闭
+        （fail closed），但传输层仍可启动。reverse / forward 不会走到这里。
+        """
+        try:
+            from .ha_runtime import HARuntime  # noqa: PLC0415 - 仅 relay 模式需要
+        except Exception as e:  # noqa: BLE001 - 模块缺失时明确降级
+            log.warn(f"HA 运行时不可用，relay 业务保持关闭：{type(e).__name__} {e}")
+            return None
+        try:
+            # 调用方显式注入的副本优先；没有时 HARuntime 会按 relay 的
+            # content_root/content_url 自己构造真实 ContentReplica。
+            replica = getattr(self.server, "replica", None)
+            runtime = HARuntime(self, self.server, replica=replica,
+                                auto_attach=False)
+            base_acquired = runtime.on_acquired
+
+            async def on_acquired(client=None, lease=None):
+                # 先经过 HARuntime 的真实 pull/apply/缓存刷新与 revision 门禁，
+                # 再补刷 core 独有的缓存；两步都完成后才允许返回 revision，
+                # RelayClient 之后才会发 ready。
+                revision = await base_acquired(client, lease)
+                self._refresh_ha_caches()
+                return revision
+
+            # 用包装后的回调接管；attach() 会把它写到 relay 上，并保留旧值。
+            runtime.on_acquired = on_acquired
+            runtime.attach()
+            return runtime
+        except Exception as e:  # noqa: BLE001 - 初始化失败时 relay 仍可启动但无业务
+            log.warn(f"HA 运行时初始化失败，relay 业务保持关闭："
+                     f"{type(e).__name__} {e}")
+            return None
+
+    def _refresh_ha_caches(self) -> dict:
+        """刷新 HARuntime 未覆盖的 core 内存缓存（只读盘，绝不 flush）。
+
+        persona / longmem / memes / hobbies / album / relations 由 HARuntime 的
+        ``refresh_content_caches`` 处理；这里补上 core 自己的 people 与 stickers。
+        失败只记录，不把旧缓存写回磁盘，也不静默假装刷新成功。
+        """
+        refreshed: list[str] = []
+        errors: list[str] = []
+        people = getattr(self, "people", None)
+        cache = getattr(people, "_cache", None)
+        if isinstance(cache, dict):
+            try:
+                cache.clear()
+                refreshed.append("people")
+            except Exception as e:  # noqa: BLE001 - 单个缓存失败不影响其它
+                errors.append(f"people:{type(e).__name__}")
+        stickers = getattr(self, "stickers", None)
+        index = getattr(stickers, "index", None)
+        if callable(index):
+            try:
+                # StickerBook 没有常驻索引缓存，这里做一次显式磁盘读取，
+                # 保证接管后立即看到 canonical 的 stickers/index.json。
+                index()
+                refreshed.append("stickers")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"stickers:{type(e).__name__}")
+        for label in errors:
+            log.warn(f"HA 内容缓存刷新失败：{label}")
+        return {"ok": not errors, "refreshed": refreshed, "errors": errors}
+
     # ------------------------------------------------------------ 生命周期
     async def start(self):
         self.plugins.reload_all()
-        # 云同步：开启 sync.auto_pull_on_start 才后台拉一次；失败只告警，不影响启动
-        try:
-            from . import cloudsync
-            cloudsync.start_auto_pull(self.config, self.base_dir)
-        except Exception as e:
-            log.warn(f"云同步启动拉取调度失败（不影响启动）：{type(e).__name__} {e}")
-        # 实时同步：sync.mode=realtime 时起后台线程（本地变化防抖上传 + 远端轮询拉取）
-        try:
-            from . import sync_realtime
-            self.realtime_sync = sync_realtime.start_realtime(self.config, self.base_dir)
-        except Exception as e:
+        self._ha_stopping = False
+        relay_mode = bool(getattr(self, "_ha_mode", False))
+        if relay_mode:
+            # relay 模式的内容只允许 HARuntime 一条通道：legacy 云同步的
+            # auto_pull 与实时同步都是双写来源，必须明确不启动。
+            self._auto_pull_thread = None
             self.realtime_sync = None
-            log.warn(f"实时同步启动调度失败（不影响启动）：{type(e).__name__} {e}")
+        else:
+            # 云同步：开启 sync.auto_pull_on_start 才后台拉一次；失败只告警，不影响启动
+            try:
+                from . import cloudsync
+                self._auto_pull_thread = cloudsync.start_auto_pull(self.config, self.base_dir)
+            except Exception as e:
+                log.warn(f"云同步启动拉取调度失败（不影响启动）：{type(e).__name__} {e}")
+            # 实时同步：sync.mode=realtime 时起后台线程（本地变化防抖上传 + 远端轮询拉取）
+            try:
+                from . import sync_realtime
+                self.realtime_sync = sync_realtime.start_realtime(self.config, self.base_dir)
+            except Exception as e:
+                self.realtime_sync = None
+                log.warn(f"实时同步启动调度失败（不影响启动）：{type(e).__name__} {e}")
         # 本地 TTS 服务不在就后台拉起一次；不 await，别挡住启动
         try:
             from . import tts
@@ -162,13 +385,26 @@ class Bot:
             log.warn(f"TTS 自启动调度失败：{type(e).__name__} {e}")
         if not self._store_flush_task or self._store_flush_task.done():
             self._store_flush_task = asyncio.create_task(self._flush_store_loop(), name="store-flush")
-        try:
-            await self.longmem.maintain(self)
-        except Exception as e:
-            log.warn(f"長期記憶維護失敗：{type(e).__name__} {e}")
+        if not relay_mode:
+            # longmem.maintain 会写 content；standby 阶段不能抢先改便携内容。
+            try:
+                await self.longmem.maintain(self)
+            except Exception as e:
+                log.warn(f"長期記憶維護失敗：{type(e).__name__} {e}")
+        if relay_mode and self.ha_runtime is not None:
+            # 先挂好内容同步循环；业务生产者仍要等 relay ready/can_emit。
+            await self.ha_runtime.start()
         await self.server.start()
+        if relay_mode:
+            # relay 模式的生产者由 HARuntime 在 ready/can_emit 后启动；
+            # 这里绝不提前启动主动发言 / 提醒 / B 站定时任务。
+            if self.ha_runtime is None:
+                log.warn("relay 模式下 HA 运行时不可用：业务生产者保持关闭（fail closed）")
+            return
         await self.proactive.start()
         await self.reminder_service.start()
+        # 本机紧急停止已置上：重启前一律不再拉起 Minecraft 常驻。
+        await self._start_minecraft_resident()
         # 定时刷 B 站（tools.bili_scroll_times，如 12:40 / 20:00）；没配时间就自己退掉
         try:
             from . import bili_scroll as _bili_scroll
@@ -194,6 +430,261 @@ class Bot:
                 log.warn(f"会话存储落盘失败：{type(e).__name__} {e}")
 
     async def stop(self):
+        if getattr(self, "_ha_mode", False):
+            await self._stop_relay()
+            return
+        await self._stop_legacy()
+
+    # ------------------------------------------------------- Minecraft 生命周期
+    def _minecraft_lifecycle_lock(self) -> asyncio.Lock:
+        """拿本进程的 Minecraft 生命周期锁（测试壳对象也可能没有它）。"""
+        lock = getattr(self, "_minecraft_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._minecraft_lock = lock
+        return lock
+
+    async def _start_minecraft_resident(self):
+        """只在本地主人模式、闩锁未置上、显式 enabled=True 时拉起常驻。
+
+        relay（HA 中继）在 ``start`` 更早的分支就返回了，绝不会走到这里；
+        侧车/守卫/常驻启动失败只警告，不影响 QQ 主流程。
+        """
+        async with self._minecraft_lifecycle_lock():
+            if self._minecraft_estop:
+                log.warn("Minecraft 常驻已被紧急停止闩锁关闭：PawBot 重启前不再启动")
+                return False
+            if self.config.get("minecraft.enabled", False) is not True:
+                return False
+            try:
+                from .minecraft_resident import MinecraftResident
+                resident = MinecraftResident(self)
+                self.minecraft_resident = resident
+                started = await resident.start()
+                if started is False:
+                    # resident 自己按 enabled 关闭（或尚未连接）时不保留半活对象。
+                    self.minecraft_resident = None
+                    return False
+                return True
+            except Exception as e:  # noqa: BLE001 - 绝不因 Minecraft 拖垮主进程
+                self.minecraft_resident = None
+                log.warn(f"Minecraft resident remains offline: {type(e).__name__}")
+                return False
+
+    def _minecraft_guard_settings(self):
+        """从本机配置 + 环境推导守卫客户端设置（不含任何新权限）。
+
+        Endpoint precedence: ``PAWBOT_MC_GUARD_URL`` (environment override) then
+        ``minecraft.guard_url`` (the resident already uses this key) then the
+        documented default. The secret is environment-only.
+        """
+        from .minecraft_guard import GuardSettings
+        try:
+            port = int(self.config.get("minecraft.port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        configured_url = str(self.config.get("minecraft.guard_url", "") or "").strip()
+        url = (os.environ.get("PAWBOT_MC_GUARD_URL") or configured_url
+               or "http://127.0.0.1:6198/v1/permit")
+        return GuardSettings(
+            url,
+            os.environ.get("PAWBOT_MC_GUARD_SECRET", ""),
+            str(self.config.get("minecraft.test_world_id", "") or ""),
+            str(self.config.get("minecraft.world_path", "") or ""),
+            str(self.config.get("minecraft.owner_player_uuid", "") or ""),
+            port)
+
+    async def _minecraft_guard_revoke(self, guard) -> tuple[bool, str | None]:
+        """确认**持久化**撤销；裸 409 绝不算成功。
+
+        返回 ``(revoked, receipt_or_error)``：
+
+        * 签名回执（`request` 正常返回）→ 标记已落盘，``True``；并记住该守卫
+          身份，之后同一进程再收到 409 时可作为「已持久化撤销」的证据。
+        * 已认证的 ``409 revoked`` 且本进程此前拿到过该守卫的签名回执 →
+          ``(True, "already_revoked")``：合法的「已撤销且持久化」语义。
+        * 其它已认证 409 → ``(False, "already_revoked_unverified")``：只证明
+          内存闩锁，持久化未知，绝不能据此返回 ok=True。
+        """
+        if guard is None:
+            return False, "no_guard_client"
+        request = getattr(guard, "request", None)
+        if not callable(request):
+            return False, "no_guard_client"
+        from .minecraft_guard import GuardAlreadyRevoked
+        receipts = _durable_revoke_receipts(self)
+        identity = _guard_identity(guard)
+        try:
+            await request("revoke")
+        except GuardAlreadyRevoked:
+            # Authenticated 409 revoked: the guard latched in memory, but it
+            # answers 409 before persisting the marker. Only a signed revoke
+            # receipt (seen earlier in this process) proves durability.
+            if identity is not None and identity in receipts:
+                return True, "already_revoked"
+            return False, "already_revoked_unverified"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 只记录类型，不带消息/路径
+            return False, type(exc).__name__
+        if identity is not None:
+            receipts.add(identity)
+        return True, None
+
+    async def _minecraft_stop_session(self, resident) -> dict:
+        """撤销 → 取消并关闭常驻/侧车 → 回收；返回可审计的结构化结果。
+
+        顺序固定：先确认守卫撤销，再让常驻任务取消（在途技能请求会被
+        侧车客户端隔离并杀掉子进程，绝不重放），最后等侧车进程被回收。
+        ``resident.estop()`` 会同时置上常驻自己的闩锁。
+        """
+        result = {"revoked": False, "revoke_durable": False,
+                  "resident_stopped": False,
+                  "sidecar_reaped": False, "writes_drained": False}
+        guard = getattr(resident, "guard", None)
+        sidecar = getattr(resident, "sidecar", None)
+        revoked, issue = await self._minecraft_guard_revoke(guard)
+        _record_revoke_outcome(result, revoked, issue)
+        estop = getattr(resident, "estop", None)
+        stop = estop if callable(estop) else getattr(resident, "stop", None)
+        if callable(stop):
+            try:
+                await stop()
+                result["resident_stopped"] = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                result["stop_error"] = type(exc).__name__
+        # 常驻自己没收干净时，宿主再兜底关一次侧车（异常不外溢）。
+        if not result["resident_stopped"] and sidecar is not None:
+            sidecar_stop = getattr(sidecar, "stop", None)
+            if callable(sidecar_stop):
+                try:
+                    await sidecar_stop(graceful=False)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    result["sidecar_stop_error"] = type(exc).__name__
+        # 首次撤销失败（守卫短暂不可达）时，停机后再确认一次；仍失败就诚实报告。
+        # 409「已撤销但持久化未知」不重试：粘性闩锁重试不可能变成签名回执。
+        if (not result["revoked"] and guard is not None
+                and result.get("revoke_error") != "already_revoked_unverified"):
+            revoked, issue = await self._minecraft_guard_revoke(guard)
+            _record_revoke_outcome(result, revoked, issue)
+        reaped = bool(sidecar is None
+                      or (getattr(sidecar, "process", None) is None
+                          and not bool(getattr(sidecar, "alive", False))))
+        result["sidecar_reaped"] = reaped
+        result["writes_drained"] = bool(result["resident_stopped"] and reaped)
+        return result
+
+    async def minecraft_emergency_stop(self, *, source: str = "control") -> dict:
+        """本机紧急停止：先撤销守卫授权，再停常驻/侧车，最后闩死不再重启。
+
+        与模型、判官、QQ 权限完全无关：任何调用方都只能让它更严，不能反解。
+        成功（ok=True）的条件严格为：
+
+        * 守卫撤销**已被持久化确认**（签名回执；或本进程此前拿到过该守卫的
+          签名回执后再收到已认证 409）。裸 ``409 revoked`` 只证明内存闩锁，
+          守卫在写标记之前就返回 409，因此「503 → 409」绝不能变成成功；
+        * 常驻已停止、侧车进程已回收、写入已排空（无活动居民时由本进程保证）；
+        * 闩锁 ``latched`` 已置上。
+
+        没有活动居民时，只有完全没有守卫凭证（``PAWBOT_MC_GUARD_SECRET``
+        为空）才是独立的诚实 noop（``revoke_skipped="no_guard_configured"``，
+        ``ok=False``，绝不声称已撤销）；其它任何 invalid_guard_settings、
+        不可达、拒绝或不可持久化都诚实返回 ok=False。
+
+        返回结构化结果供控制面/CLI 回报（不含密钥、路径、attestation）。
+        """
+        self._minecraft_estop = True   # 先关闸，再等待任何进行中的启动/停止
+        async with self._minecraft_lifecycle_lock():
+            resident = getattr(self, "minecraft_resident", None)
+            self.minecraft_resident = None
+            result = {"ok": False, "latched": True, "revoked": False,
+                      "revoke_durable": False,
+                      "resident_stopped": False, "sidecar_reaped": False,
+                      "writes_drained": False, "source": str(source)[:32]}
+            if resident is not None:
+                result.update(await self._minecraft_stop_session(resident))
+                result["session"] = "resident"
+            else:
+                result["session"] = "none"
+                result["resident_stopped"] = True
+                result["sidecar_reaped"] = True
+                result["writes_drained"] = True
+                settings = self._minecraft_guard_settings()
+                if not settings.secret:
+                    # No guard credential exists in this process, so there is
+                    # nothing this process could revoke. Report that honestly
+                    # and separately; never claim a revoke or a success.
+                    result["guard_configured"] = False
+                    result["revoke_skipped"] = "no_guard_configured"
+                    result["noop"] = True
+                    result["error"] = "guard_not_configured"
+                else:
+                    result["guard_configured"] = True
+                    from .minecraft_guard import (GuardAlreadyRevoked, GuardClient,
+                                                  GuardDenied)
+                    try:
+                        client = GuardClient(settings, revoke_only=True)
+                        identity = _guard_identity(client)
+                        try:
+                            await client.request("revoke")
+                        except GuardAlreadyRevoked:
+                            # Authenticated 409: in-memory latch only unless
+                            # this process already holds a signed receipt for
+                            # this exact guard (durable already-revoked).
+                            result["already_revoked"] = True
+                            result["revoke_receipt"] = "already_revoked"
+                            if (identity is not None
+                                    and identity in _durable_revoke_receipts(self)):
+                                result["revoked"] = True
+                                result["revoke_durable"] = True
+                            else:
+                                result["revoked"] = False
+                                result["revoke_durable"] = False
+                                result["revoke_error"] = "already_revoked_unverified"
+                                result["error"] = "already_revoked_unverified"
+                        else:
+                            result["revoked"] = True
+                            result["revoke_durable"] = True
+                            result["revoke_receipt"] = "signed"
+                            if identity is not None:
+                                _durable_revoke_receipts(self).add(identity)
+                    except asyncio.CancelledError:
+                        raise
+                    except GuardDenied as exc:  # 诚实记录，不外抛
+                        result["revoke_error"] = type(exc).__name__
+                        result["error"] = str(exc)
+                    except Exception as exc:  # noqa: BLE001 - 诚实记录，不外抛
+                        result["revoke_error"] = type(exc).__name__
+                        result["error"] = "guard_unavailable"
+            # ok 只由持久化撤销 + 停/回收/排空 + 闩锁共同决定；任何一步缺失
+            # 或已有错误都不得返回成功（含 409 只证明内存闩锁的情况）。
+            result["ok"] = bool(
+                result["latched"]
+                and result.get("revoke_durable") is True
+                and result["revoked"] is True
+                and result["resident_stopped"] is True
+                and result["sidecar_reaped"] is True
+                and result["writes_drained"] is True
+                and not result.get("error"))
+            if result["ok"]:
+                log.warn(f"Minecraft 紧急停止已生效（source={result['source']}，"
+                         f"revoked={result['revoked']}，"
+                         f"durable={result.get('revoke_durable')}，闩锁到重启）")
+            else:
+                log.warn(f"Minecraft 紧急停止不完整（source={result['source']}，"
+                         f"revoked={result['revoked']}，"
+                         f"durable={result.get('revoke_durable')}，"
+                         f"stopped={result['resident_stopped']}，"
+                         f"reaped={result['sidecar_reaped']}）：闩锁已置上，请人工核实")
+            return result
+
+    async def _stop_legacy(self):
+        # 停机闸门先置上：之后任何路径都不能再拉起 Minecraft 写入。
+        self._minecraft_estop = True
         # 部分测试用 Bot.__new__ 造壳，没走 __init__，这里容错一下
         刷站 = getattr(self, "_bili_scroll_task", None)
         if 刷站 is not None:
@@ -214,6 +705,21 @@ class Bot:
         reminder_service = getattr(self, "reminder_service", None)
         if reminder_service is not None:
             await reminder_service.stop()
+        # Minecraft 最先收尾且异常不外溢：侧车进程必须被回收，后面的
+        # proactive/store/server 收尾也绝不能被它挡住。
+        resident = getattr(self, "minecraft_resident", None)
+        self.minecraft_resident = None
+        if resident is not None:
+            try:
+                steps = await self._minecraft_stop_session(resident)
+                if not (steps.get("resident_stopped") and steps.get("sidecar_reaped")):
+                    log.warn("Minecraft 停机不完整："
+                             f"stopped={steps.get('resident_stopped')}，"
+                             f"reaped={steps.get('sidecar_reaped')}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warn(f"Minecraft resident 停机异常：{type(exc).__name__}")
         await self.proactive.stop()
         if self._store_flush_task:
             self._store_flush_task.cancel()
@@ -231,6 +737,51 @@ class Bot:
         if memes is not None:
             memes.flush()
 
+    async def _stop_relay(self):
+        """relay 模式停机：先让 HARuntime 在仍持 lease 时排空并 flush，再 bye。
+
+        顺序由 ``RelayClient.stop`` 的回调契约保证：它先调 ``before_release``
+        （停生产者 / 排空本 owner 业务 / flush 内容 / push），再发 bye。
+        这里只负责先停本机 state 落盘循环，且**不**使用全局 ``tasks.drain``，
+        更不在非 owner 状态下 flush 便携内容（避免旧缓存覆盖 canonical）。
+        """
+        # 先关 core 自己的业务入口：即使 relay 还在处理停止前的最后一帧，
+        # 也不能再进入业务流水线。
+        self._ha_stopping = True
+        # relay 实例从不启动 Minecraft 常驻；这里只做防御性收尾（异常不外溢）。
+        self._minecraft_estop = True
+        resident = getattr(self, "minecraft_resident", None)
+        self.minecraft_resident = None
+        if resident is not None:
+            try:
+                await self._minecraft_stop_session(resident)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warn(f"Minecraft resident relay 停机异常：{type(exc).__name__}")
+        flush_task, self._store_flush_task = self._store_flush_task, None
+        if flush_task is not None:
+            flush_task.cancel()
+            try:
+                await flush_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        server = getattr(self, "server", None)
+        runtime = getattr(self, "ha_runtime", None)
+        try:
+            if server is not None:
+                await server.stop()
+        finally:
+            if runtime is not None:
+                try:
+                    await runtime.stop()
+                except Exception as e:  # noqa: BLE001 - 停机清理不应阻断最后 flush
+                    log.warn(f"停止 HA 运行时失败：{type(e).__name__} {e}")
+            # 只保存本机状态（state）；便携内容已由 before_release 在持 lease 时处理。
+            self.mood.save()
+            self.topic.save(force=True)
+            self.store.flush(force=True)
+
     def conn_for(self, self_id: int | None = None) -> Connection | None:
         return self.server.get(self_id)
 
@@ -244,6 +795,20 @@ class Bot:
 
     # ------------------------------------------------------------ 事件入口
     async def _on_event(self, conn: Connection, raw: dict):
+        """传输层事件入口：relay 模式先过 HA 准入。
+
+        standby / 接管中 / 丢租约后 / fail-closed 时直接丢弃，不解析、不写
+        Store、不产生业务副作用；只有在 active 且 relay 可外发时才进入原流水线。
+        reverse / forward 没有 ``ha_runtime``，行为与旧版完全一致。
+        """
+        runtime = getattr(self, "ha_runtime", None)
+        if getattr(self, "_ha_stopping", False):
+            return None
+        if runtime is None or not callable(getattr(runtime, "handle_event", None)):
+            return await self._on_event_business(conn, raw)
+        return await runtime.handle_event(conn, raw, self._on_event_business)
+
+    async def _on_event_business(self, conn: Connection, raw: dict):
         ev = ev_mod.parse(raw)
         if ev is None:
             return
@@ -278,12 +843,21 @@ class Bot:
 
         # --- 全量入库：300 条上下文靠的是「每条都记」，不是「回过的才记」
         if ev.type == "message" and ev.user_id != ev.self_id:
-            body = ev.plain.strip()
+            body = _incoming_body(ev)
             if body:
-                self.store.append(ev.session_id, "user", body,
-                                  who=ev.sender_name,
-                                  ts=float(getattr(ev, "time", time.time())),
-                                  uid=ev.user_id)
+                # uid / 真实事件时间 / 稳定 message_id 一起进 Store：
+                # 活跃期要靠 message_id 精确认出「当前这条」，只靠昵称或秒级
+                # 时间都可能把同一个人同一秒的两条消息混成一条。
+                extra = {}
+                message_id = getattr(ev, "message_id", 0)
+                if message_id:
+                    extra["message_id"] = message_id
+                self.store.append(
+                    ev.session_id, "user", body,
+                    who=ev.sender_name,
+                    ts=float(getattr(ev, "time", 0) or time.time()),
+                    uid=ev.user_id,
+                    **extra)
 
         # --- 流水线 3：群聊旁听不依赖 @ 或唤醒词
         ctx.state["group_observe"] = bool(
@@ -302,7 +876,9 @@ class Bot:
                 and getattr(self, "emotion", None) is not None
                 and self.config.get("emotion.enabled", True)
                 and (will_speak or ctx.state["group_observe"])):
-            feel = asyncio.create_task(self._feel(ev, use_judge=will_speak))
+            # 登记到 tasks registry：停机时 lifecycle 才能真正取消/等待它，
+            # 而不是只取消事件 worker 后留下一个还在写 Store 的孤儿任务。
+            feel = tasks.spawn(self._feel(ev, use_judge=will_speak), name="feel")
         if ev.type == "message" and (will_speak or ctx.state["group_observe"]):
             try:
                 await perceive.enrich(self, conn, ev)
@@ -331,13 +907,35 @@ class Bot:
             tasks.spawn(self._maybe_compress(ev.session_id), name="compress")
 
     async def _feel(self, ev, *, use_judge: bool):
-        """过一遍情绪，回复时就用更新后的情绪。永不抛异常。"""
+        """过一遍情绪，回复时就用更新后的情绪。永不抛异常。
+
+        喂给情绪层的上下文带**完整 uid + 清洗后的昵称**（`identity.label`），
+        不再只给昵称/尾号；当前这条如果已经入库，用 message_id 精确剔掉，
+        不让它同时出现在「上下文」和「新消息」里。纯标点消息不构成刺激，
+        直接跳过，避免一个「？」就把她的心情推走。
+
+        ``addressed`` 沿用调用方已经算好的 ``use_judge``（是否在叫她），
+        这里不重新猜，也不改 emotion.update 的既有契约。
+        """
+        text = _hearing_text(getattr(ev, "plain", "") or "")
+        if not _has_meaning(text):
+            return {}
         window = getattr(self.store, "window", None)
-        rows = window(ev.session_id, 6) if window else []
-        context = "\n".join(f"{r.get('who') or ''}：{str(r.get('content') or '')[:60]}"
-                            for r in rows[:-1][-4:])
-        applied = await self.emotion.update(ev.plain or "", config=self.config,
-                                            context=context, addressed=use_judge,
+        rows = window(ev.session_id, 6) if callable(window) else []
+        try:
+            history = shortterm.exclude_current_event(rows, ev)
+            if (len(history) == len(rows) and rows
+                    and not getattr(ev, "message_id", 0)):
+                # 事件没有 message_id 可定位时，沿用旧行为：
+                # 当前这条刚写进 Store，上下文里去掉最后一条。
+                history = rows[:-1]
+        except Exception:
+            history = rows[:-1] if rows else []
+        context = "\n".join(
+            line for line in (_feel_line(row) for row in history[-4:]) if line)
+        applied = await self.emotion.update(text, config=self.config,
+                                            context=context,
+                                            addressed=use_judge,
                                             use_judge=use_judge)
         if applied:
             log.debug(f"情绪变化 {ev.session_id}：{applied}")
@@ -534,7 +1132,7 @@ class Bot:
                 "online_sec": int(time.time() - c.connected_at),
                 "last_alive": int(time.time() - c.alive_at),
             })
-        return {
+        result = {
             "uptime": int(time.time() - self.started_at),
             "connections": conns,
             "handlers": len(BUS.handlers),
@@ -551,6 +1149,13 @@ class Bot:
             "libido": {"value": round(self.libido.value, 1), "label": self.libido.label()},
             "proactive": self.proactive.snapshot(),
         }
+        runtime = getattr(self, "ha_runtime", None)
+        if runtime is not None and callable(getattr(runtime, "status", None)):
+            try:
+                result["ha"] = runtime.status()
+            except Exception as e:  # noqa: BLE001 - 状态展示失败不影响主状态
+                result["ha"] = {"error": type(e).__name__}
+        return result
 
     async def manual_send(self, target: str, message: str, is_group: bool = True) -> dict:
         conn = self.conn_for()
