@@ -184,9 +184,7 @@
     "sticker_vision_key": ""
   },
   "account": {
-    "owner_ids": [
-      "123456"
-    ]
+    "owner_ids": []
   },
   "tools": {
     "enabled": true,
