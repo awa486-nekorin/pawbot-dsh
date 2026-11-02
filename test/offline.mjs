@@ -247,6 +247,41 @@ function proxyWith(env, extra = {}) {
   })
 }
 
+await t('停止路由：同源调用协调停机，失败不能假报已停止', async () => {
+  const env = makeEnv({})
+  let calls = 0
+  const stop = async () => { calls++; return { stopped: true, alive: false, pid: 123, graceful: true } }
+  const { dispatch } = proxyWith(env, { stop })
+  const req = mockReq({ method: 'POST', url: '/pawbot-ui/stop', headers: { origin: SAME_ORIGIN, 'content-type': 'application/json' } })
+  const res = mockRes()
+  await dispatch(req, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().stopped, true)
+  assert.equal(calls, 1)
+  assert.equal(env.calls.length, 0, 'stop 走 Host，不转发给 PawBot WebUI')
+  const failed = await proxyWith(env, { stop: async () => ({ stopped: false, alive: true, error: '仍在运行' }) }).actions.stopAction()
+  assert.equal(failed.status, 500)
+  assert.equal(failed.payload.ok, false)
+})
+
+await t('停止路由：跨来源请求不会调用停机', async () => {
+  const env = makeEnv({})
+  let calls = 0
+  const { dispatch } = proxyWith(env, { stop: async () => { calls++; return { stopped: true } } })
+  const req = mockReq({ method: 'POST', url: '/pawbot-ui/stop', headers: { origin: 'http://evil.example', 'sec-fetch-site': 'cross-site', 'content-type': 'application/json' } })
+  const res = mockRes()
+  await dispatch(req, res)
+  assert.equal(res.statusCode, 403)
+  assert.equal(calls, 0)
+})
+
+await t('停止路由：未接入 Host 停机时返回 501', async () => {
+  const env = makeEnv({})
+  const result = await proxyWith(env).actions.stopAction()
+  assert.equal(result.status, 501)
+  assert.equal(result.payload.ok, false)
+})
+
 await t('跨來源 GET（Origin 不同 + Sec-Fetch-Site: cross-site）→ 403 cross-origin denied', async () => {
   const env = makeEnv({})
   const { dispatch } = proxyWith(env)

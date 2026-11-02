@@ -107,6 +107,32 @@ python -m py_compile run.py         # 可选自检（不联网、不连 QQ）
 
 两头不一致的典型症状：插件一直「兜底看片」，PawBot 却说「没看过任何视频」——因为它们各写各的目录。
 
+### 3.2 数据与密钥分离：升级不覆盖（推荐，2026-11-02）
+
+**目标**：程式目录可整包替换，人设/记忆/设定/key 都在程式目录外。
+
+| 层 | 位置 | 说明 |
+| --- | --- | --- |
+| 程式 | `/opt/pawbot-dsh` | 可升级/重装 |
+| 数据 | `/opt/pawbot-data` | `content/`（人设/记忆）、`state/`（设定/会话/状态）、`backups/` |
+| 密钥 | DSH 凭证 + 可选 `/opt/pawbot-secrets` | 模型 key、B站 SESSDATA、判官/决策 key |
+
+1. 插件设置 `dataDir=/opt/pawbot-data`（或环境变量 `PAWBOT_DATA_DIR`；优先级：Config.dataDir > env > `app/data`）。
+2. 重启 DSH 时资料守卫会自动：复制 `app/data` → `/opt/pawbot-data` → 把 `app/data` 改名留档 → 建立符號联接；失败自动回退，不删原数据。
+3. 人设/记忆放 `content/`，设密鑰不要写进 `content/`；`state/config.json` 敏感栏位建议留空，用环境变量/DSH 凭证。
+4. 日常升级只换程式（插件升级或解压新包覆盖 `/opt/pawbot-dsh`），**不要删/覆盖 `/opt/pawbot-data`**；版本变化时守卫会自动快照到 `backups/`。
+
+本机/服务器都可用随包脚本：
+
+```bash
+py -3.13 scripts/data_separation.py --mode plan
+py -3.13 scripts/data_separation.py --mode apply --data-dir /opt/pawbot-data
+py -3.13 scripts/data_separation.py --mode verify
+py -3.13 scripts/update_code_safe.py --package dist/pawbot-server-no-mc-*.tar.gz --apply
+```
+
+完整设计、自动迁移机制、回滚步骤与检查表见 [docs/DATA-SEPARATION.md](docs/DATA-SEPARATION.md)。
+
 ---
 
 ## 4. QQ 那一头

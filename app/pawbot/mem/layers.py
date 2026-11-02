@@ -58,6 +58,18 @@ def l0_window(bot, session_id: str, *, limit: int = 100, hours: float = 6.0,
     return 文本, stats
 
 
+def active_episode(bot, session_id: str, *, event=None, now: float | None = None
+                   ) -> tuple[str, dict]:
+    """活跃期（本段对话的完整、带完整 uid 的原始记录）。
+
+    它**不是** L0：不吃 `memory.l0_*` / `chat.context_*` 这些偏好预算，只受
+    `shortterm` 自己的硬容量约束。老 Store / 假 Store 没有活跃期时返回空，
+    assemble 会照旧走 L0。
+    """
+    from .. import shortterm
+    return shortterm.build(bot, session_id, event=event, now=now)
+
+
 def l1_turn(bot, session_id: str, *, chars: int = 600) -> tuple[str, dict]:
     """L1 这一轮：**本轮增量**小结。v2 里它不再包含历史 —— 历史在 L2/L3。"""
     文本 = " ".join((bot.store.turn_summary(session_id) or "").split())

@@ -32,6 +32,7 @@ import os
 import re
 import time
 
+from .. import paths as layout
 from ..log import log
 from ..memory import _tokens
 from ..longmem import _WEAK_TOKENS
@@ -119,13 +120,14 @@ def _来源标注(source: str, sources=None, 名字: str = "") -> str:
 class EntityStore:
     """一个 jsonl 文件，读时去重（同 key+kind 取最新），写时只追加。"""
 
-    def __init__(self, base_dir: str, config=None):
+    def __init__(self, base_dir: str, config=None, *, paths=None):
         self.base_dir = base_dir
         self.config = config
-        d = "data/memory"
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
+        raw = ""
         if config is not None:
-            d = config.get("persona.memory_dir", d) or d
-        self.dir = d if os.path.isabs(d) else os.path.join(base_dir, d)
+            raw = config.get("persona.memory_dir", "") or ""
+        self.dir = self.paths.setting(raw, kind="content", default="memory")
         self.path = os.path.join(self.dir, "entities.jsonl")
         self._cache: list[dict] | None = None
         self._cache_mtime = -1.0
@@ -387,7 +389,7 @@ class EntityStore:
         }
 
     def _对方名字(self, uid: str) -> str:
-        """从 data/people/<uid>.md 里捞私聊对方的名字；取不到返回空串。带一层缓存。"""
+        """从 content/people/<uid>.md 里捞私聊对方的名字；取不到返回空串。带一层缓存。"""
         uid = str(uid or "").strip()
         if not uid:
             return ""
@@ -399,10 +401,10 @@ class EntityStore:
             return 缓存[uid]
         名 = ""
         try:
-            d = "data/people"
+            raw = "people"
             if self.config is not None:
-                d = self.config.get("people.dir", d) or d
-            d = d if os.path.isabs(d) else os.path.join(self.base_dir, d)
+                raw = self.config.get("people.dir", "") or raw
+            d = self.paths.setting(raw, kind="content", default="people")
             with open(os.path.join(d, uid + ".md"), "r", encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r"名字[：:]\s*(.+)", text)

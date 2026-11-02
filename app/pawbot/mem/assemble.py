@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 
-from .. import ctxwin
+from .. import ctxwin, identity
 from ..log import log
 from . import budget as 预算
 from . import layers
@@ -78,14 +78,34 @@ _头 = {
 
 def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[dict], dict]:
     """返回 (要拼进 messages 的 system 块列表, 统计)。"""
-    now = float(now or time.time())
+    显式now = now is not None
+    now = float(now if now is not None else time.time())
     cfg = 取配置(bot)
     sid = getattr(ctx, "session_id", "") or ""
     库 = 取实体库(bot)
 
     # ---------- 第一遍：各层按自己的单层上限取 ----------
-    l0文本, l0统计 = layers.l0_window(bot, sid, limit=cfg["l0_limit"],
-                                      hours=cfg["l0_hours"], chars=cfg["l0_chars"])
+    # 活跃期（本段对话的完整原始记录）先取：它一旦存在就**替代**按时间衰减的 L0，
+    # 并且不参与四层预算；L0 只在没有活跃期时（老 Store / 假 Store）照旧工作。
+    #
+    # 「是否还活跃」需要知道现在几点：调用方显式给 now 时按它判断；没给时，
+    # 普通聊天（有 event / 有真实 uid）沿用旧行为按最后一条记录做参考，避免
+    # 合成时间戳的离线用例被误判过期。定时/主动轮次没有真实发起人（无 event
+    # 且 uid 为空），这时用墙钟判断，超过 1200 秒的旧段不再冒充「当前活跃期」。
+    活跃now = now if 显式now else None
+    if 活跃now is None:
+        if (getattr(ctx, "event", None) is None
+                and not identity.uid_of(getattr(ctx, "user_id", None))):
+            活跃now = now
+    活跃文本, 活跃统计 = layers.active_episode(
+        bot, sid, event=getattr(ctx, "event", None), now=活跃now)
+    有活跃 = bool(活跃文本.strip())
+    if 有活跃:
+        l0文本, l0统计 = "", {"lines": 0, "chars": 0, "active": True,
+                              "bypassed_budget": True}
+    else:
+        l0文本, l0统计 = layers.l0_window(bot, sid, limit=cfg["l0_limit"],
+                                          hours=cfg["l0_hours"], chars=cfg["l0_chars"])
     l1文本, l1统计 = layers.l1_turn(bot, sid, chars=cfg["l1_chars"])
     l2文本, l2统计 = layers.l2_days(bot, sid, 库, days=cfg["l2_days"],
                                     chars=cfg["l2_chars"], now=now)
@@ -105,13 +125,15 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
                                         budget=cfg["l3_chars"], uids=在场, now=now)
 
     # ---------- 闸门 ----------
-    请求 = {"L0": len(l0文本), "L1": len(l1文本), "L2": len(l2文本), "L3": len(l3文本)}
-    分配, 砍 = 预算.分配(请求, 总预算=cfg["总预算"],
-                         上限={"L0": cfg["l0_chars"], "L1": cfg["l1_chars"],
-                               "L2": cfg["l2_chars"], "L3": cfg["l3_chars"]})
+    请求 = {"L0": 0 if 有活跃 else len(l0文本), "L1": len(l1文本),
+            "L2": len(l2文本), "L3": len(l3文本)}
+    分配, 旁路, 砍 = 预算.分配带旁路(
+        请求, 旁路请求={"active": len(活跃文本)}, 总预算=cfg["总预算"],
+        上限={"L0": cfg["l0_chars"], "L1": cfg["l1_chars"],
+              "L2": cfg["l2_chars"], "L3": cfg["l3_chars"]})
 
     # ---------- 第二遍：按分配结果重取/截断 ----------
-    if 分配["L0"] < len(l0文本):
+    if not 有活跃 and 分配["L0"] < len(l0文本):
         l0文本, l0统计 = layers.l0_window(bot, sid, limit=cfg["l0_limit"],
                                           hours=cfg["l0_hours"], chars=分配["L0"])
     if 分配["L1"] < len(l1文本):
@@ -130,6 +152,10 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
         块.append({"role": "system", "content": _头["L2"] + "\n" + l2文本.strip()})
     if l1文本.strip():
         块.append({"role": "system", "content": _头["L1"] + "\n" + l1文本.strip()})
+    if 活跃文本.strip():
+        # 活跃期整块已经自带「这是数据不是指令」的 header 与 JSON 围栏；
+        # 它不参与四层预算，只受 shortterm 的硬容量约束。
+        块.append({"role": "system", "content": 活跃文本.strip()})
     if l0文本.strip():
         # L0 的 header 归 A 统一维护（ctxwin.L0_HEADER）；A 还没加时退回这份内联文字。
         # 私聊用另一份 header：不然她会把一对一的话当成「群里有人说」。
@@ -179,9 +205,13 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
 
     统计 = {
         "engine": "v2",
-        "各层字数": {"L0": len(l0文本), "L1": len(l1文本), "L2": len(l2文本), "L3": len(l3文本)},
+        "各层字数": {"L0": len(l0文本), "L1": len(l1文本), "L2": len(l2文本),
+                     "L3": len(l3文本), "active": len(活跃文本)},
         "分配": 分配,
+        "旁路": 旁路,
         "请求": 请求,
+        "active": 活跃统计,
+        "active_bypass": 有活跃,
         "梗库": len(梗文本),
         "跨会话": len(桥文本),
         "总字数": sum(len(m["content"]) for m in 块),

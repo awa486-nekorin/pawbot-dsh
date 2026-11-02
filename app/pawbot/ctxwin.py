@@ -13,14 +13,17 @@
 时间参照点用「最后一条消息的时间」而不是「现在」——群里可能一晚上没说话，
 用 now 会让所有消息权重都趋零，窗口就白留了。
 
-每一行开头都带时间戳（[HH:MM] / 跨天 [MM-DD HH:MM]），说话人用「昵称(尾号1234)」，
-同名的人靠尾号分开；取不到 uid 时写成「昵称(尾号未知)」，绝不退化成裸名字。
+每一行开头都带时间戳（[HH:MM] / 跨天 [MM-DD HH:MM]），说话人用「昵称(uid:123456789)」，
+同名的人靠**完整 QQ 号**分开；取不到可验证的 uid 时写成「昵称(uid未知)」，
+绝不退化成裸名字，也不拿昵称或尾号去合并两个身份。
 """
 
 from __future__ import annotations
 
 import math
 import time
+
+from . import identity
 
 BANDS = [
     # (权重下限, 单条截断长度)
@@ -61,23 +64,25 @@ def _fmt_time(ts: float, ref_ts: float) -> str:
 
 
 def speaker(row: dict) -> str:
-    """说话人标签：「昵称(尾号1234)」，自己是「我（大肥鱼）」，取不到 uid 是「昵称(尾号未知)」。
+    """说话人标签：「昵称(uid:123456789)」，自己是「我（大肥鱼）」，取不到 uid 是「昵称(uid未知)」。
 
-    同名的人靠尾号分开；没有 uid 就明说「尾号未知」，绝不退化成裸名字——
-    裸名字等于把两个同名的人当成同一个。
+    身份只认**完整、可验证的十进制 QQ 号**：昵称可以改、尾号会撞车，都不能当成
+    同一个人。uid 缺失、零、非纯数字（如 ``attacker123``）一律写「uid未知」，
+    绝不退化成裸名字，也绝不截成尾号。
     """
     if row.get("role") == "assistant":
         return SELF_LABEL
-    name = " ".join(str(row.get("who") or "").split()) or "群友"
-    uid = str(row.get("uid") or "").strip()
-    return f"{name}(尾号{uid[-4:]})" if uid else f"{name}(尾号未知)"
+    # identity.label 会清洗昵称、校验完整 uid；未知时明确写「uid未知」。
+    return identity.label(row)
 
 
 def present(rows: list[dict], limit: int = 12) -> str:
-    """最近几轮出现过的人，新的在前；同名不同号的会都列出来并提示各自尾号。"""
+    """最近几轮出现过的人，新的在前；同名不同完整 uid 的会都列出来并提示各自 uid。"""
     seen: dict[str, str] = {}
-    # name -> {key -> 尾号}，只为算出「同名但有不止一个尾号」的冲突
-    by_name: dict[str, dict[str, str]] = {}
+    # name -> [完整 uid]，只为算出「同名但有不止一个可验证 uid」的冲突
+    uids_by_name: dict[str, list[str]] = {}
+    shown_unknown: set[str] = set()
+    unknown_counts: dict[str, int] = {}
     for r in reversed(rows):
         if r.get("role") == "assistant":
             continue
@@ -85,34 +90,52 @@ def present(rows: list[dict], limit: int = 12) -> str:
         if label == SELF_LABEL:
             # 自己绝不算进在场名单，也不会被当成「同名的人」
             continue
-        name = " ".join(str(r.get("who") or "").split())
-        if not name:
+        name = identity.display_name(r)
+        uid = identity.uid_of(r.get("uid"))
+        if uid:
+            key = uid
+            known = uids_by_name.setdefault(name, [])
+            if uid not in known:
+                known.append(uid)
+        else:
+            # 没有可验证 uid：不按昵称合并成同一个人，也不推断是谁。
+            # 同名只展示一次，并明确标成 uid未知。
+            key = f"unknown:{name}"
+            shown_unknown.add(name)
+            unknown_counts[name] = unknown_counts.get(name, 0) + 1
+        if key in seen:
             continue
-        uid = str(r.get("uid") or "").strip()
-        key = uid or name
-        if key not in seen:
-            seen[key] = label
-            by_name.setdefault(name, {})[key] = uid[-4:] if uid else "未知"
+        seen[key] = label
         if len(seen) >= limit:
             break
     if not seen:
         return ""
     line = "## 这几轮在场的人\n" + "、".join(seen.values())
-    clash = [n for n, keys in by_name.items() if len(keys) > 1]
+    clash = [n for n, uids in uids_by_name.items() if len(uids) > 1]
     if clash:
-        tails = "、".join(
-            f"{n}（尾号：{'、'.join(by_name[n].values())}）" for n in clash)
+        details = "、".join(
+            f"{n}（uid：{'、'.join(uids_by_name[n])}）" for n in clash)
         line += ("\n注意：" + "、".join(clash)
-                 + " 有不止一个人叫这个名字，按尾号分清 —— " + tails + "。")
-    return line + "\n（「我（大肥鱼）」是你自己。）"
+                 + " 有不止一个完整 uid，是不同的人，按 uid 分清 —— "
+                 + details + "。")
+    line += "\n（「我（大肥鱼）」是你自己。）"
+    if shown_unknown:
+        line += "\n（写「uid未知」的人没拿到可验证 QQ 号，别并进任何同名的人。）"
+    ambiguous = [n for n, count in unknown_counts.items() if count > 1]
+    if ambiguous:
+        line += ("\n（" + "、".join(ambiguous)
+                 + " 有多条 uid未知 的记录，无法确认是不是同一个人，别并成一个。）")
+    return line
 
 
 # 聊天记录块的开头说明。mem/assemble.py（四层记忆 L0）也 import 这段，保证两边口径一致。
 L0_HEADER = (
     "## 这个群最近的聊天记录（从旧到新）\n"
     "每行开头的方括号是这条消息的时间，先看它排先后；跨了天才带月日。\n"
-    "名字后面括号里的尾号才是身份：同名但尾号不同，就是不同的人；"
-    "写「尾号未知」的说明没拿到 QQ 号，只能按昵称认，别硬猜是谁。\n"
+    "名字后面括号里的**完整 QQ 号（uid）**才是身份：同名但 uid 不同，就是不同的人；"
+    "只凭昵称、群名片或尾号相同，都不能证明是同一个人。"
+    "写「uid未知」的说明没拿到可验证的 QQ 号，只能按昵称认，别硬猜是谁，"
+    "也不要并进任何同名的人。\n"
     "开头写「我（大肥鱼）」的行全是你自己发出去的消息，不是任何群友说的；"
     "别人在话里叫你「大肥鱼」，不等于那句话是你说的，别把两边弄混。\n"
     "不要把两行不同人的话拼成一句来引用；引号里的内容只属于那一行的说话人。\n"
@@ -124,7 +147,8 @@ L0_HEADER = (
 L0_HEADER_PRIVATE = (
     "## 你们俩最近的私聊记录（从旧到新）\n"
     "每行开头的方括号是这条消息的时间，先看它排先后；跨了天才带月日。\n"
-    "这是**一对一私聊**，不是群聊：名字后面括号里是对方的 QQ 尾号。\n"
+    "这是**一对一私聊**，不是群聊：名字后面括号里是对方**完整的 QQ 号（uid）**；"
+    "写「uid未知」说明没拿到可验证的 QQ 号，不要按昵称硬猜。\n"
     "开头写「我（大肥鱼）」的行全是你自己发出去的消息；"
     "对方在话里叫你「大肥鱼」，不等于那句话是你说的，别把两边弄混。\n"
     "不要把两行不同人的话拼成一句来引用；引号里的内容只属于那一行的说话人。\n"

@@ -12,11 +12,14 @@ PawBot 启动器。
   1. 先解析数据根（PAWBOT_DATA_DIR > <BASE_DIR>/data），再拿单实例运行锁；
      两步都在 Bot 构造 / 日志文件 / 配置写入之前，第二个实例不会写任何业务数据。
   2. 运行锁由真实 Python 进程持有（Host 不持锁，避免 py.exe launcher 的 pid 差异）。
-  3. Windows 上优雅停机走 HTTP 控制面（POST /api/control/shutdown，Host 注入
+  3. 拿到锁之后先做数据布局迁移（pawbot.paths.migrate_legacy）：旧的
+     data/<x> 搬进 content/（用户内容）或 state/（机器状态）。迁移幂等、
+     冲突不覆盖、失败只告警——任何异常都不许挡住启动。
+  4. Windows 上优雅停机走 HTTP 控制面（POST /api/control/shutdown，Host 注入
      PAWBOT_CONTROL_TOKEN）；POSIX 额外支持 SIGTERM/SIGINT。
-  4. 退出码：0 正常 / 10 控制面 shutdown / 其它非 0 异常（2 数据根、3 锁被占用、
+  5. 退出码：0 正常 / 10 控制面 shutdown / 其它非 0 异常（2 数据根、3 锁被占用、
      4 锁状态未知、1 启动或运行异常）。
-  5. atexit 兜底 force flush Store + 释放锁。
+  6. atexit 兜底 force flush Store + 释放锁。
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from pawbot import paths as layout               # noqa: E402
 from pawbot.core import Bot                      # noqa: E402
 from pawbot.log import log                       # noqa: E402
 from pawbot.lifecycle import (                   # noqa: E402
@@ -110,8 +114,12 @@ def _install_signal_handlers(life: RuntimeLifecycle) -> None:
             pass
 
 
-async def _stop_services(bot, webui) -> bool:
-    """按「先停入口、再停业务」的顺序收尾；任何一步失败都不影响后面的 flush/解锁。"""
+async def _stop_services(bot, webui, life=None) -> bool:
+    """按「先停入口、再停业务」的顺序收尾；任何一步失败都不影响后面的 flush/解锁。
+
+    relay 模式下 ``request_shutdown`` 已按 core 既有顺序停过 Bot（传输释放 +
+    HA 运行时 + state 落盘），这里不再重复 stop，避免第二次 before_release/bye。
+    """
     ok = True
     if webui is not None:
         try:
@@ -119,7 +127,7 @@ async def _stop_services(bot, webui) -> bool:
         except Exception as exc:  # noqa: BLE001
             ok = False
             log.warn(f"停止 WebUI 失败：{type(exc).__name__} {exc}")
-    if bot is not None:
+    if bot is not None and not (life is not None and life.bot_stopped):
         try:
             await bot.stop()
         except Exception as exc:  # noqa: BLE001
@@ -162,6 +170,20 @@ async def main(args):
         host_pid=host_pid,
     )
 
+    # ── 3) 数据布局：content/（可整包搬走）+ state/（机器状态）──────────────
+    # 只在拿到运行锁之后做，第二个实例绝不会动数据。迁移失败不阻断启动：
+    # 异常与逐条失败都进日志，最坏情况是「这次没搬」，下次启动接着搬。
+    data_paths = layout.from_data_root(data_root, BASE_DIR)
+    migration: dict
+    try:
+        migration = layout.migrate_legacy(data_paths.root)
+    except Exception as exc:  # noqa: BLE001 —— 迁移永远不许挡住启动
+        migration = {
+            "root": data_paths.root, "moved": [], "skipped": [], "failed": [],
+            "linked": [], "created": [],
+            "warnings": [f"数据迁移异常：{type(exc).__name__}: {exc}"],
+        }
+
     # atexit 兜底：解释器正常退出（含 sys.exit / 未捕获异常）时再 force flush 一次 + 解锁。
     def _atexit_cleanup():
         try:
@@ -171,10 +193,18 @@ async def main(args):
 
     atexit.register(_atexit_cleanup)
 
-    # ── 3) 日志：落在数据根下，保持旧文件名 run.log ──────────────────────
-    log.to_file(os.path.join(data_root.root, "run.log"))
+    # ── 4) 日志：落在 state/run.log（迁移前它可能还在数据根）──────────────
+    log.to_file(data_paths.state("run.log"))
     log.info(f"数据根：{data_root.root}（来源：{data_root.source}"
              f"{'，外部目录' if data_root.external else ''}）")
+    log.info(f"数据布局：content={data_paths.content_root} state={data_paths.state_root}")
+    for line in layout.summarize(migration):
+        if "失败" in line or "跳过" in line:
+            log.warn(line)
+        else:
+            log.info(line)
+    for warning in migration.get("warnings") or []:
+        log.warn(f"数据迁移：{warning}")
     if control_token:
         log.info("控制面已启用（仅 loopback + 独立 Bearer token）")
     else:
@@ -249,7 +279,7 @@ async def main(args):
                 final_ok = False
                 log.warn(f"退出前排空失败：{type(exc).__name__}: {exc}")
         try:
-            services_ok = await _stop_services(bot, webui)
+            services_ok = await _stop_services(bot, webui, life)
         except Exception as exc:  # noqa: BLE001 —— _stop_services 已兜底，这里再加一层
             services_ok = False
             log.warn(f"停止服务异常：{type(exc).__name__} {exc}")

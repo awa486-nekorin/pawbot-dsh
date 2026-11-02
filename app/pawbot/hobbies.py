@@ -1,6 +1,6 @@
 """自己的爱好看板：几部在追的番、在玩的游戏，定期上网看看有没有新进展。
 
-``data/hobbies.json`` 长这样：
+``content/hobbies.json`` 长这样：
 
     {"items": [{"name": "葬送的芙莉莲", "kind": "anime",
                 "keywords": ["芙莉莲", "Frieren"],
@@ -19,6 +19,7 @@ import tempfile
 import time
 from difflib import SequenceMatcher
 
+from . import paths as layout
 from . import websearch
 from .log import log
 
@@ -49,11 +50,12 @@ def _clean(text, limit: int = 0) -> str:
 
 
 class Hobbies:
-    def __init__(self, base_dir: str, config):
+    def __init__(self, base_dir: str, config, *, paths=None):
         self.base_dir = base_dir
         self.config = config
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
         self.enabled = bool(config.get("hobbies.enabled", True))
-        self.path = os.path.join(base_dir, "data", "hobbies.json")
+        self.path = self.paths.content("hobbies.json")
         self.max_items = self._int("max_items", 6, 1)
         self.items: list[dict] = self.load()
         if not os.path.exists(self.path):

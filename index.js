@@ -135,6 +135,8 @@ export const Config = (() => {
       dataBackupKeep: z.natural().default(5),
       /** NapCat docker 鏡像（沒有 docker 時用不到） */
       napcatImage: z.string().default(NAPCAT_IMAGE).extra('volatile', true),
+      /** Windows 便携版 NapCat 目录（含 launcher-win10.bat）；空=只按 PATH/官方目录探测 */
+      napcatDir: z.string().default('').extra('volatile', true),
       /** NapCat WebUI 對外埠（docker 的 -p；預設 6099） */
       napcatWebuiPort: z.natural().default(NAPCAT_WEBUI_PORT).extra('volatile', true),
       /** OneBot 反向 WS 的存取 token（空＝不驗證）。填了會同時寫進 PawBot 的 server.access_token 與 NapCat 的 token。 */
@@ -175,6 +177,7 @@ export function apply(ctx, config) {
     dataGuardEnabled: true,
     dataBackupKeep: 5,
     napcatImage: NAPCAT_IMAGE,
+    napcatDir: '',
     napcatWebuiPort: NAPCAT_WEBUI_PORT,
     onebotToken: '',
   }
@@ -532,6 +535,39 @@ export function apply(ctx, config) {
     }
   })
 
+  /* ── Minecraft Guard 密鑰注入 ──
+   * 只在本機讀 Guard 設定檔，把 secret 放進 PawBot 子進程的環境變數；
+   * 不寫進 config.json、不進日誌、不進 argv。找不到就誠實留空（下游客戶端會拒絕啟動）。 */
+  const GUARD_SECRET_ENV = 'PAWBOT_MC_GUARD_SECRET'
+  const GUARD_CONFIG_ENV = 'PAWBOT_MC_GUARD_CONFIG'
+  const readGuardSecret = () => {
+    const candidates = []
+    if (process.env[GUARD_CONFIG_ENV]) candidates.push(process.env[GUARD_CONFIG_ENV])
+    try {
+      const root = dataRoot()
+      // 由 PawBot 自己登記的世界路徑推導：<gameDir>/saves/<world> → <gameDir>/config/pawbot-guard.json
+      for (const cfgPath of [join(root, 'state', 'config.json'), join(root, 'config.json')]) {
+        try {
+          const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+          const worldPath = String(((cfg || {}).minecraft || {}).world_path || '').trim()
+          if (worldPath) {
+            candidates.push(resolve(worldPath, '..', '..', 'config', 'pawbot-guard.json'))
+          }
+        } catch {}
+      }
+    } catch {}
+    if (process.env.APPDATA) {
+      candidates.push(join(process.env.APPDATA, '.minecraft', 'config', 'pawbot-guard.json'))
+    }
+    for (const file of candidates) {
+      try {
+        const secret = String((JSON.parse(readFileSync(file, 'utf8')) || {}).secret || '')
+        if (secret.length >= 32 && secret.length <= 256) return secret
+      } catch {}
+    }
+    return ''
+  }
+
   const startChild = () => {
     // 禁止雙 spawn：已經有一個活著的子進程就直接回它。
     if (isRunning(currentChild)) {
@@ -580,6 +616,10 @@ export function apply(ctx, config) {
       childEnv[HOST_PID_ENV] = String(process.pid)
       childEnv[RUNTIME_VERSION_ENV] = PKG_VERSION
       childEnv[CONTROL_TOKEN_ENV] = controlToken
+      // Guard 密鑰只進子進程環境；日誌只記有/無，永不記值。
+      const guardSecret = readGuardSecret()
+      if (guardSecret) childEnv[GUARD_SECRET_ENV] = guardSecret
+      log(`Minecraft guard secret ${guardSecret ? 'injected' : 'not found'}`)
       child = spawn(exe, ['run.py'], {
         cwd,
         env: childEnv,
@@ -930,7 +970,7 @@ export function apply(ctx, config) {
    * 全部冪等：venv 已存在就跳過、容器已存在就 docker start、PawBot 已在跑就不重 spawn。
    * 安裝/啟動的輸出全部進 setupRing（只留 400 行；setup/status 只回最後 60 行）。
    */
-  const napcatState = { mode: 'none', pid: null, onebot: null, started_at: 0, last_error: '' }
+  const napcatState = { mode: 'none', path: '', pid: null, onebot: null, started_at: 0, last_error: '' }
 
   const readPawbotServer = () => {
     const fallback = { host: '0.0.0.0', port: 6199, path: '/ws', access_token: '' }
@@ -977,8 +1017,8 @@ export function apply(ctx, config) {
     return ''
   }
 
-  const currentNapcatConfigDir = (mode) =>
-    napcatConfigDir({ appDir: appDirectory(), dataDir: dataDirectory(), mode, exists: existsSync })
+  const currentNapcatConfigDir = (mode, napcatPath = '') =>
+    napcatConfigDir({ appDir: appDirectory(), dataDir: dataDirectory(), mode, napcatPath, exists: existsSync })
 
   const setupJob = createSetupJob({
     runEnv: ({ force, onProgress } = {}) => {
@@ -1037,11 +1077,12 @@ export function apply(ctx, config) {
     refreshCfg()
     let det
     try {
-      det = await detectNapcat({ run: defaultRun })
+      det = await detectNapcat({ run: defaultRun, napcatDir: String(cfg.napcatDir || ''), appDir: appDirectory() })
     } catch (e) {
       det = { mode: 'none', checked: [], detail: `检测失败：${e?.message || e}` }
     }
     napcatState.mode = det.mode
+    napcatState.path = det.path || ''
 
     if (det.mode === 'none') {
       napcatState.last_error = det.detail || '没有 Docker / NapCat'
@@ -1072,7 +1113,7 @@ export function apply(ctx, config) {
 
     let written
     try {
-      const configDir = currentNapcatConfigDir(det.mode)
+      const configDir = currentNapcatConfigDir(det.mode, det.path || '')
       written = writeOnebotConfig({
         appDir: appDirectory(),
         dataDir: dataDirectory(),
@@ -1100,6 +1141,8 @@ export function apply(ctx, config) {
         mode: det.mode,
         run: defaultRun,
         dataDir: dataDirectory(),
+        napcatPath: det.path || '',
+        platform: process.platform,
         image: String(cfg.napcatImage || NAPCAT_IMAGE),
         webuiPort: Number(cfg.napcatWebuiPort) || NAPCAT_WEBUI_PORT,
         log: setupLog,
@@ -1251,13 +1294,14 @@ export function apply(ctx, config) {
     refreshCfg()
     let det
     try {
-      det = await detectNapcat({ run: defaultRun })
+      det = await detectNapcat({ run: defaultRun, napcatDir: String(cfg.napcatDir || ''), appDir: appDirectory() })
     } catch (e) {
       det = { mode: 'none', checked: [], detail: `检测失败：${e?.message || e}` }
     }
     const mode = det.mode
     if (napcatState.mode !== mode) napcatState.mode = mode
-    const configDir = currentNapcatConfigDir(mode)
+    if (det.path) napcatState.path = det.path
+    const configDir = currentNapcatConfigDir(mode, det.path || napcatState.path || '')
 
     const [running, logText] = await Promise.all([
       napcatRunning({ mode, run: defaultRun, pid: napcatState.pid }).catch(() => false),
@@ -1318,16 +1362,19 @@ export function apply(ctx, config) {
 
   const napcatQrPayload = async () => {
     refreshCfg()
+    let det = null
     let mode = napcatState.mode
     if (!mode || mode === 'none') {
       try {
-        mode = (await detectNapcat({ run: defaultRun })).mode
+        det = await detectNapcat({ run: defaultRun, napcatDir: String(cfg.napcatDir || ''), appDir: appDirectory() })
+        mode = det.mode
       } catch {
         mode = 'none'
       }
       napcatState.mode = mode
+      if (det?.path) napcatState.path = det.path
     }
-    const configDir = currentNapcatConfigDir(mode)
+    const configDir = currentNapcatConfigDir(mode, det?.path || napcatState.path || '')
     const logText = await collectNapcatLogs({ mode, run: defaultRun }).catch(() => '')
     const webui = readWebui({ mode, logText, configDir, exists: existsSync })
     const qr = qrFromLog(logText)
@@ -1648,11 +1695,80 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ── SCP 同步：面板按鈕直接跑 scripts/scp_sync.py（PawBot 停了也能用） ── */
+  const syncRoot = () => {
+    const base = runtimeBaseDir()
+    for (const root of [base, resolve(base, '..')]) {
+      if (existsSync(join(root, 'scripts', 'scp_sync.py'))) return root
+    }
+    return base
+  }
+  const syncMode = () => {
+    try {
+      const raw = readFileSync(join(syncRoot(), 'scripts', 'scp-sync.json'), 'utf8')
+      const cfg = JSON.parse(raw.replace(/^\uFEFF/, ''))
+      return String(cfg?.remote?.host || '').trim() ? 'remote' : 'local'
+    } catch {
+      return 'local'
+    }
+  }
+  const runSyncScript = (action) => new Promise((resolve, reject) => {
+    const root = syncRoot()
+    const script = join(root, 'scripts', 'scp_sync.py')
+    if (!existsSync(script)) {
+      reject(new Error(`找不到同步脚本：${script}`))
+      return
+    }
+    const mode = syncMode()
+    let child
+    try {
+      child = spawn(pythonForRun(), [script, '--mode', mode, '--action', action, '--root', root], {
+        cwd: root,
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (e) {
+      reject(e)
+      return
+    }
+    let out = ''
+    let err = ''
+    let settled = false
+    const finish = (code, extra) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ mode, action, code, output: (out + err + (extra || '')).trim() })
+    }
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      finish(-1, '\n[超时] 同步脚本超过 180 秒，已终止。')
+    }, 180000)
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (d) => { out += d })
+    child.stderr?.on('data', (d) => { err += d })
+    child.on('error', (e) => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } })
+    child.on('close', (code) => finish(code, ''))
+  })
+  const syncRunner = {
+    async status() {
+      const r = await runSyncScript('status')
+      return { mode: r.mode, code: r.code, text: r.output || '(无输出)' }
+    },
+    async run(action) {
+      const r = await runSyncScript(action)
+      return { mode: r.mode, action, code: r.code, output: r.output || '(无输出)' }
+    },
+  }
+
   /* ── 同源代理路由：/pawbot-ui/*（瀏覽器唯一入口，內部再打 PawBot WebUI） ── */
   const proxy = createPawbotProxy({
     pawbotFetch,
     processInfo,
     restart: restartChild,
+    stop: stopChild,
     // 一鍵安裝 / NapCat / boot 這三組路由的實作（路由本身與 CSRF 守衛都在 lib/webui-proxy.js）
     setup: {
       status: setupStatusPayload,
@@ -1667,6 +1783,7 @@ export function apply(ctx, config) {
       start: bootStartPayload,
       status: bootStatusPayload,
     },
+    sync: syncRunner,
     // 把 DSH WebServer 實際綁定的 origin 傳給代理：/pawbot-ui/* 用它做同源/CSRF 檢查。
     // 拿不到時代理會 fail-closed（拒絕所有非 GET）並記日誌。
     getOrigin: () => {
@@ -1702,7 +1819,7 @@ export function apply(ctx, config) {
     add({ kind: 'prefix', path: '/pawbot-ui/' })
     for (const p of [
       'status', 'config', 'persona', 'reload-plugins', 'plugins/reload',
-      'send', 'restart', 'context', 'memory',
+      'send', 'restart', 'stop', 'context', 'memory',
       'setup/status', 'setup/run',
       'napcat/status', 'napcat/setup', 'napcat/qr',
       'boot', 'boot/status',

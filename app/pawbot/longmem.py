@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 
 from . import judge
+from . import paths as layout
 from .log import log
 from .memory import _tokens
 
@@ -52,15 +53,16 @@ def _clean_keywords(values, text: str = "") -> list[str]:
 
 
 class LongMemory:
-    def __init__(self, base_dir: str, config, memory=None):
+    def __init__(self, base_dir: str, config, memory=None, *, paths=None):
         self.base_dir = base_dir
         self.config = config
         self.memory = memory
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
         self.enabled = bool(config.get("longmem.enabled", True))
         if memory is not None:
             memory.longmem = self
-        directory = config.get("longmem.dir", "data/longmem")
-        self.dir = directory if os.path.isabs(directory) else os.path.join(base_dir, directory)
+        self.dir = self.paths.setting(config.get("longmem.dir", ""),
+                                      kind="content", default="longmem")
         self.path = os.path.join(self.dir, "episodes.jsonl")
         self.episodes: list[dict] = []
         self._lock = asyncio.Lock()

@@ -1,7 +1,7 @@
 """
 人物档案：一个群友一份文件。
 
-    data/people/123456.md        ← QQ 号当文件名，改群名片也不丢
+    content/people/123456.md        ← QQ 号当文件名，改群名片也不丢
 
 每份档案长这样（纯文本，你能直接打开改）：
 
@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 
+from . import paths as layout
 from .log import log
 
 HEADER = "# {name}\n"
@@ -159,11 +160,12 @@ def _affinity_label(value: float) -> str:
 
 
 class PersonBook:
-    def __init__(self, base_dir: str, config):
+    def __init__(self, base_dir: str, config, *, paths=None):
         self.base_dir = base_dir
         self.config = config
-        d = config.get("people.dir", "data/people")
-        self.dir = d if os.path.isabs(d) else os.path.join(base_dir, d)
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
+        self.dir = self.paths.setting(self.config.get("people.dir", ""),
+                                      kind="content", default="people")
         self._cache: dict[str, tuple[float, str]] = {}
         # 谁攒了多少条还没提炼
         self._pending: dict[str, int] = {}

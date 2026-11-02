@@ -47,6 +47,12 @@ def _数字(bot, key, 默认):
 
 
 def _rows(bot, sid: str, limit: int = 300) -> list[dict]:
+    """跨会话只读**有界窗口**，不读活跃期。
+
+    活跃期（shortterm）是「本会话完整记录」，可能到 128k 字；跨会话桥必须保持
+    自己的小预算（memory.cross_*），所以这里永远走 window(limit)，不会把别的
+    会话的整段活跃记录搬进来。
+    """
     try:
         return bot.store.window(sid, limit) or []
     except Exception:

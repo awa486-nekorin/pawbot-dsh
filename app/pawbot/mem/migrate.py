@@ -22,11 +22,23 @@ import json
 import os
 import re
 
+from .. import paths as layout
 from .entities import EntityStore, _天, _短哈希
 
 去重阈值 = 0.60      # 新增片段占比低于这个，说明这条基本是重复
 片段长 = 6
 每天最多事件 = 8     # 一天塞太多事件没有意义，L2 的日摘要会接手
+
+
+def _目录(data_paths, config, key: str, default: str) -> str:
+    """配置里的目录（people.dir / longmem.dir / persona.memory_dir）→ 绝对路径。"""
+    raw = ""
+    if config is not None:
+        try:
+            raw = config.get(key, "") or ""
+        except Exception:  # noqa: BLE001 —— 假配置什么都可能抛，退回默认目录
+            raw = ""
+    return data_paths.setting(raw, kind="content", default=default)
 
 
 def _grams(text: str) -> set[str]:
@@ -99,9 +111,10 @@ def _读档案(path: str) -> dict:
     return 出
 
 
-def run(base_dir: str, config=None, *, dry_run: bool = False) -> dict:
+def run(base_dir: str, config=None, *, dry_run: bool = False, paths=None) -> dict:
     """执行迁移。返回报告（没写盘时 dry_run=True）。"""
-    库 = EntityStore(base_dir, config)
+    data_paths = paths if paths is not None else layout.resolve(base_dir, config)
+    库 = EntityStore(base_dir, config, paths=data_paths)
     报告 = {"episodes": 0, "episodes_去重丢掉": 0, "day": 0, "profile": 0,
             "relation": 0, "fact": 0, "跳过": [], "dry_run": dry_run}
 
@@ -113,7 +126,8 @@ def run(base_dir: str, config=None, *, dry_run: bool = False) -> dict:
     # ---------- ① episodes ----------
     # 按天分组、从新到旧处理：新的先占位，旧的只在「确实带来新内容」时才留。
     # 旧数据是累积摘要，正序去重会留下最早最不完整的那条，所以顺序不能反。
-    ep_path = os.path.join(base_dir, "data", "longmem", "episodes.jsonl")
+    ep_path = os.path.join(_目录(data_paths, config, "longmem.dir", "longmem"),
+                           "episodes.jsonl")
     by_day: dict[str, list[dict]] = {}
     for row in _读jsonl(ep_path):
         正文 = _脱壳(row.get("summary"))
@@ -152,7 +166,7 @@ def run(base_dir: str, config=None, *, dry_run: bool = False) -> dict:
             已见 |= 段
 
     # ---------- ② people/<uid>.md ----------
-    people_dir = os.path.join(base_dir, "data", "people")
+    people_dir = _目录(data_paths, config, "people.dir", "people")
     try:
         文件们 = [n for n in os.listdir(people_dir) if n.endswith(".md")]
     except OSError:
@@ -179,7 +193,8 @@ def run(base_dir: str, config=None, *, dry_run: bool = False) -> dict:
             报告["relation"] += 1
 
     # ---------- ③ memory/facts.md ----------
-    facts_path = os.path.join(base_dir, "data", "memory", "facts.md")
+    facts_path = os.path.join(_目录(data_paths, config, "persona.memory_dir", "memory"),
+                              "facts.md")
     try:
         with open(facts_path, "r", encoding="utf-8") as f:
             行们 = f.read().splitlines()

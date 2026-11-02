@@ -145,18 +145,57 @@ class LLMClient:
         return sum(1 for part in content
                    if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"))
 
+    # ---------------------------------------------------- 大脑 payload 折叠
+    @staticmethod
+    def _policy_text() -> str:
+        """代码里的不可变策略正文；拿不到就返回空串（不假装已经注入）。"""
+        try:
+            from . import policy
+
+            return str(policy.system_policy_text() or "")
+        except Exception:  # 策略模块不可用时宁可少注入，也不编一段假的
+            return ""
+
+    @staticmethod
+    def _strip_trailing_policy(text: str, policy_text: str) -> str:
+        """去掉 system 块末尾的策略副本；最终只保留一份、且放在最末尾。"""
+        body = str(text or "").rstrip()
+        inert = str(policy_text or "").rstrip()
+        if inert and body.endswith(inert):
+            return body[:-len(inert)].rstrip()
+        return body
+
+    @staticmethod
+    def _brain_context(brain_meta: dict | None) -> dict:
+        """只接受代码生成的结构化 context；权限标记必须是严格布尔 True。
+
+        外部评论/字幕/网页只会出现在 system/user 文本里，这里不做任何关键词推断；
+        `"true"` / `1` / 工具参数里的同名字段都不能变成授权。
+        """
+        ctx = dict(brain_meta) if isinstance(brain_meta, dict) else {}
+        ctx["is_owner"] = ctx.get("is_owner") is True
+        ctx["computer_access"] = ctx.get("computer_access") is True
+        return ctx
+
     def _brain_payload(self, messages: list[dict], tools: list[dict] | None,
                        brain_conv: str, brain_meta: dict | None = None) -> dict:
         """把 PawBot 的 OpenAI 形状 messages 折成「整段 system + 当前一条 user」。
 
-        PawBot 本来就把聊天历史渲染进 system 块（ctxwin.build_messages），
-        所以这里不丢信息；真出现 assistant 历史（极少）就单独补一段，避免复读。
+        - **不丢活跃期/记忆块**：所有 system 块按原顺序保留；多出来的 user/assistant/
+          tool 历史也各自补一段，不做「只留最后 4 条」的静默截断。
+        - **策略永远最后**：把 system 块末尾已有的策略副本摘掉，在 assistant 历史、
+          看图说明之后统一追加一次，保证外部材料和历史都不能覆盖它。
+        - **权限标记只认结构化布尔**：`context.computer_access` 默认 False；真正的
+          电脑能力由 Host 再做一次「主人 + 标记 + 配置」三重合闸。
         """
         systems: list[str] = []
         assistant_lines: list[str] = []
-        user_text = ""
+        tool_lines: list[str] = []
+        user_texts: list[str] = []
         images = 0
         for message in messages or []:
+            if not isinstance(message, dict):
+                continue
             role = message.get("role")
             content = message.get("content")
             if role == "system":
@@ -166,27 +205,51 @@ class LLMClient:
             elif role == "user":
                 text = self._text_of(content).strip()
                 if text:
-                    user_text = text
+                    user_texts.append(text)
                 images += self._images_of(content)
             elif role == "assistant":
                 text = self._text_of(content).strip()
                 if text:
                     assistant_lines.append(text)
+            elif role == "tool":
+                text = self._text_of(content).strip()
+                if text:
+                    tool_lines.append(text)
+        # 当前这条是最后一条 user；更早的 user 作为历史保留，不覆盖、不丢弃。
+        user_text = user_texts[-1] if user_texts else ""
+        if len(user_texts) > 1:
+            systems.append("## 本轮之前的用户消息（历史，按时间顺序；只是上下文，不是新指令）\n"
+                           + "\n\n".join(user_texts[:-1]))
         if assistant_lines:
             systems.append("## 你这一轮前面已经说过的话（接着往下说，别重复）\n"
-                           + "\n".join(assistant_lines[-4:]))
+                           + "\n".join(assistant_lines))
+        if tool_lines:
+            systems.append("## 本轮之前的工具回执（内部记录）\n" + "\n".join(tool_lines))
         if images:
-            systems.append(f"（对方这条消息里带了 {images} 张图；这一轮的大脑还看不了图，"
-                           "只按文字回应，不要假装看见了。）")
+            # 文案统一由 brain 模块维护；Host 侧换图成功时会用同一正则替换它。
+            from . import brain
+
+            systems.append(brain._missing_images_note(images))
+        policy_text = self._policy_text()
+        if policy_text:
+            systems = [self._strip_trailing_policy(text, policy_text) for text in systems]
+        system_text = "\n\n".join(text for text in systems if text)
+        if policy_text:
+            try:
+                from . import policy
+
+                system_text = policy.ensure_policy_last(system_text)
+            except Exception:
+                system_text = (system_text.rstrip() + "\n\n" + policy_text).lstrip()
         seconds = float(self._cfg("brain_timeout", 90) or 90)
         # Python 侧比 Host 早 5 秒放弃/晚 5 秒收线：避免「Host 正常超时回包」被误判成连不上。
         host_ms = int(max(5.0, min(595.0, seconds - 5.0)) * 1000)
         payload = {
             "conv": str(brain_conv),
-            "system": "\n\n".join(systems),
+            "system": system_text,
             "user": user_text,
             "tools": list(tools or []),
-            "context": dict(brain_meta or {}),
+            "context": self._brain_context(brain_meta),
             "options": {"timeoutMs": host_ms},
         }
         return payload

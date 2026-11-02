@@ -1,9 +1,9 @@
 """
 记忆区：可读、可写、可检索的纯文本记忆。
 
-    data/memory/facts.md        事实（"主人在准备数学考试"）
-    data/memory/slang.md        网络用词（"绝绝子 = 太……了"）
-    data/memory/impression.md   对群友的印象（"阿明：爱问技术问题"）
+    content/memory/facts.md        事实（"主人在准备数学考试"）
+    content/memory/slang.md        网络用词（"绝绝子 = 太……了"）
+    content/memory/impression.md   对群友的印象（"阿明：爱问技术问题"）
 
 检索方式很朴素：按字/词重叠打分。够用，而且你打开文件就能看懂它在记什么。
 """
@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 from types import SimpleNamespace
 
+from . import paths as layout
 from .persona import append_line
 
 FILES = {
@@ -27,12 +28,13 @@ FILES = {
 
 
 class Memory:
-    def __init__(self, base_dir: str, config):
+    def __init__(self, base_dir: str, config, *, paths=None):
         self.base_dir = base_dir
         self.config = config
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
         self.longmem = None
-        d = config.get("persona.memory_dir", "data/memory")
-        self.dir = d if os.path.isabs(d) else os.path.join(base_dir, d)
+        self.dir = self.paths.setting(self.config.get("persona.memory_dir", ""),
+                                      kind="content", default="memory")
 
     def path(self, kind: str) -> str:
         name, _ = FILES.get(kind, FILES["fact"])

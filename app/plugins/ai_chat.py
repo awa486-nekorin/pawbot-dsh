@@ -17,10 +17,12 @@ import random
 import re
 import time
 
+from pawbot import identity
 from pawbot import tasks
 from pawbot import tts
 from pawbot import message as msg
 from pawbot.tools import commit_bili_delivery, prepare_bili_delivery
+from pawbot.reply_policy import policy_for
 from pawbot.log import log
 from pawbot.plugin import on_command, on_message
 from pawbot.style import cap_sentences, drop_trailing_question, polish
@@ -129,11 +131,11 @@ async def ai_chat(ctx):
     ctx.state["group_observe"] = ev.is_group
 
     text = _clean(ctx.plain, cfg.get("bot.wake_words", []), cfg.get("bot.nickname", ""))
-    # 只发了一张图、没配字：把视觉描述当成它听到的话
+    # 只发了一张图、没配字：给一个「纯附件」占位，不把视觉转述当成他说的话。
+    # 图片内容由 perceive 的图片提示单独带归属注入；这里只说明没有文字。
     if not text:
-        desc = getattr(ev, "image_desc", "")
-        if desc:
-            text = "（不说话，只发了张图）" + desc
+        if getattr(ev, "image_desc", "") or getattr(ev, "image_data", None):
+            text = "（不说话，只发了张图）"
     if not text:
         return
 
@@ -275,13 +277,19 @@ async def _batch_then_talk(key: str, st: dict, cfg):
 async def _fire_batch(key: str, items: list, addressed: bool):
     ctx, text, _ = items[-1]
     names: list[str] = []
+    labels: list[str] = []
     for c, _t, _a in items:
         n = " ".join(str(getattr(c, "sender_name", "") or "").split())
         if n and n not in names:
             names.append(n)
+        label = identity.label({"role": "user", "who": n,
+                                "uid": getattr(c, "user_id", "")})
+        if label and label not in labels:
+            labels.append(label)
     hot = [it for it in items if it[2]]
     pick = hot[-1] if hot else random.choice(items[-3:])
-    ctx.state["batch"] = {"count": len(items), "names": names, "addressed": addressed,
+    ctx.state["batch"] = {"count": len(items), "names": names, "labels": labels,
+                          "addressed": addressed,
                           "target": pick[0], "target_text": pick[1]}
     log.info(f"攒话结束 {key}：{len(items)} 句 · {'、'.join(names[:5])}")
     await _converse(key, ctx, text)
@@ -458,8 +466,10 @@ async def _reply_turn(ctx, text):
     if ev.is_group and not ctx.bot._pass_rate(ev):
         log.debug(f"AI 已决定加入，但达到群发送限额：{key}")
         return
-    # 破折号、自我引號、「行，」開頭這類人機味在發送前直接清掉
-    polished = polish(answer)
+    # 破折号、自我引號、「行，」開頭這類人機味在發送前直接清掉。
+    # 传显式 policy（从 bot.config 收成冻结对象）：语义保护开关不再靠模块
+    # 去读固定路径的 config.json，真问句/立场/语气词/代码原话都不会被误删。
+    polished = polish(answer, policy=policy_for(ctx.bot))
     if polished != answer:
         log.debug(f"风格清理 {key}：{answer[:30]!r} → {polished[:30]!r}")
     answer = polished

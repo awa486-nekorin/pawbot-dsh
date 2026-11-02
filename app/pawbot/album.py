@@ -1,6 +1,6 @@
 """图库：带文字描述的图，专门给「不用再看一遍图」用。
 
-跟表情包（`data/stickers/`）分开，因为两者的用途不一样：
+跟表情包（`content/stickers/`）分开，因为两者的用途不一样：
     表情包  用来发，靠情绪标签挑，量大、不重要
     图库    用来「记得这张图是什么」，每条必须有描述，量小、要准
 
@@ -8,8 +8,8 @@
 所以 `desc()` 是纯本地读，一个 token 都不花 —— 这是它跟 `search_image` 最大的区别。
 
 存储：
-    data/album/<id>.<ext>      图片文件
-    data/album/index.json      [{id, desc, tags, path, bytes, added_at, source}]
+    content/album/<id>.<ext>      图片文件
+    content/album/index.json      [{id, desc, tags, path, bytes, added_at, source}]
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import os
 import shutil
 import time
 
+from . import paths as layout
 from .log import log
 from .memory import _tokens
 
@@ -33,12 +34,14 @@ def _短id(种子: str) -> str:
 
 
 class Album:
-    def __init__(self, base_dir: str, config=None):
+    def __init__(self, base_dir: str, config=None, *, paths=None):
         self.base_dir = base_dir
-        d = "data/album"
+        self.config = config
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
+        raw = ""
         if config is not None:
-            d = config.get("album.dir", d) or d
-        self.dir = d if os.path.isabs(d) else os.path.join(base_dir, d)
+            raw = config.get("album.dir", "") or ""
+        self.dir = self.paths.setting(raw, kind="content", default="album")
         self.index_path = os.path.join(self.dir, 索引名)
         self.items: list[dict] = []
         self._load()

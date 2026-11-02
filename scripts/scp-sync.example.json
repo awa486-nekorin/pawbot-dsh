@@ -1,0 +1,16 @@
+{
+  "bundle": "pawbot-content.tgz",
+  "remote": {
+    "os": "windows",
+    "host": "你的ECS公网IP或~/.ssh/config里的Host别名",
+    "port": 22,
+    "user": "Administrator",
+    "key": "",
+    "dir": "D:/PawBotSync"
+  },
+  "local": {
+    "data_dir": "",
+    "bundle_dir": "D:/PawBotSync"
+  },
+  "keep_backups": 5
+}

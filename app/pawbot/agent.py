@@ -16,10 +16,12 @@ Agent：会自己用工具的那一层。
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 import time
 
-from . import ctxwin
+from . import ctxwin, identity, policy, shortterm
 from .log import log
 
 MAX_TOOL_OUTPUT = 2000      # 单条工具结果截断，别把上下文吃光
@@ -43,6 +45,8 @@ class Agent:
         toolbox = self.bot.toolbox
 
         schemas = toolbox.schemas() if tools_on else []
+        allowed_names = {str(s.get("function", {}).get("name") or "")
+                         for s in schemas if s.get("function")}
         # tools.py 的共享 schema 保持不动；本轮只修正本地知识工具的口径。
         schemas = [
             {**schema, "function": {**schema["function"], "description":
@@ -56,6 +60,7 @@ class Agent:
 
         extra = "\n\n".join(x for x in (
             self._participation_hint(ctx),
+            self._identity_hint(ctx),
             self._sense_hint(ctx),
             self._life_hint(ctx),
             self._mood_hint(ctx),
@@ -126,6 +131,9 @@ class Agent:
                 brain.register(brain_conv, ctx, allowed=[
                     str(s.get("function", {}).get("name") or "")
                     for s in schemas if s.get("function")])
+            # 每次调用模型前都重压一次：活跃期/记忆块、群里新消息提示都是
+            # 后接的 system，不能让它们排在不可变策略后面。
+            self._ensure_policy_last(messages)
             try:
                 if brain_conv:
                     msg = await self.bot.llm.chat_message(
@@ -205,7 +213,10 @@ class Agent:
                     # 即使模型误调未列出的工具，也不能退回在线查询路径。
                     result, extra = self._local_knowledge(args), []
                 else:
-                    result, extra = await toolbox.execute(ctx, name, args)
+                    # 模型可能编出不在本轮 schemas 里的工具名：执行入口也要按
+                    # 本轮白名单再核一次，而不是只信「模型看到了哪些 schema」。
+                    result, extra = await toolbox.execute(
+                        ctx, name, args, allowed=allowed_names)
                 if extra:
                     media.extend(extra)
                 used.append(name)
@@ -227,6 +238,7 @@ class Agent:
                 "content": "时间到了。不要再用工具，不要解释过程，也不要复盘。"
                            "直接按你现在的身份说一到两句。已经找到的图会跟着一起发出去。",
             })
+            self._ensure_policy_last(messages)
             final = await self.bot.llm.chat_message(messages, None)
             content = (final.get("content") or "").strip()
             if not content:
@@ -238,6 +250,35 @@ class Agent:
         except Exception as e:
             log.error(f"收口失败：{e}")
             return ("就这几张，自己看吧。" if media else ""), media
+
+    @staticmethod
+    def _ensure_policy_last(messages: list[dict]) -> None:
+        """把不可变代码策略压到**最后一条 system** 的末尾，并且全局只留一份。
+
+        ``policy.ensure_policy_last`` 的实际签名是 ``(system: str) -> str``，不是
+        ``messages``。Agent 先建带策略的 system，再把活跃期/记忆等 system 块接在
+        后面；不重排的话，外部材料会落在策略之后。这里只改 system 文本：
+        从其余 system 里摘掉已有的策略副本，再对最后一条 system 调用
+        ``policy.ensure_policy_last``，保证每次模型调用前恰好一份、且在最后。
+        assistant 的 tool_calls / reasoning_content、tool 回执和多模态 user
+        内容都不动。
+        """
+        indices = [i for i, message in enumerate(messages)
+                   if isinstance(message, dict) and message.get("role") == "system"]
+        if not indices:
+            return
+        policy_text = policy.system_policy_text().strip()
+        last = indices[-1]
+        if policy_text:
+            for index in indices[:-1]:
+                content = str(messages[index].get("content") or "")
+                if policy_text in content:
+                    messages[index]["content"] = content.replace(
+                        policy_text, "").strip()
+        content = str(messages[last].get("content") or "")
+        if policy_text:
+            content = content.replace(policy_text, "").strip()
+        messages[last]["content"] = policy.ensure_policy_last(content)
 
     def _local_knowledge(self, args) -> str:
         """moegirl 的聊天路径只读当前 bot 的本地库，不开放联网参数。"""
@@ -256,10 +297,14 @@ class Agent:
 
     # ---------------------------------------------------------- 旧记忆路径
     def _legacy_context(self, ctx, user_text: str, cfg) -> list[dict]:
-        """旧的四路拼装（摘要 / 日记 / 长期经历 / 梗 / 300 条窗口）。
+        """旧的四路拼装（摘要 / 日记 / 长期经历 / 梗 / 聊天记录）。
 
         `memory.engine = "legacy"` 时走这里，v2 出异常时也退回这里。
-        逻辑原样保留，一个字没改 —— 只是从 `run()` 里挪出来，方便新旧对照。
+
+        聊天记录优先用 Store 的**活跃期**（shortterm）：段内完整、带完整 uid，
+        不参与旧窗口的 12k/5k 偏好预算；没有活跃期的老 Store / 假 Store 才退回
+        300 条加权窗口。当前这条记录用 message_id（没有就 uid+事件时间严格相等）
+        剔掉，绝不按「昵称 + 正文相同」猜。
         """
         出: list[dict] = []
         summary = self.bot.store.summary(ctx.session_id)
@@ -272,13 +317,8 @@ class Agent:
             出.append({"role": "system",
                        "content": "## 这个群之前聊过的（摘要）\n" + summary})
 
-        # 最近 300 条聊天记录，按时间衰减加权压缩
         rows = self.bot.store.window(ctx.session_id,
                                      int(cfg.get("chat.context_messages", 300)))
-        # 当前这条已经在 core 里入库了，别在窗口里出现两次
-        if rows and rows[-1].get("who") == ctx.sender_name and \
-                str(rows[-1].get("content") or "").strip() == str(user_text).strip():
-            rows = rows[:-1]
         query = user_text
         topic_digest = getattr(getattr(self.bot, "topic", None), "digest", None)
         if callable(topic_digest) and ctx.is_group:
@@ -303,15 +343,36 @@ class Agent:
             hint = memes.inject_for(recent, int(cfg.get("memes.inject_limit", 3)))
             if hint:
                 出.append({"role": "system", "content": hint})
-        me = {"role": "user", "who": ctx.sender_name,
-              "uid": getattr(ctx, "user_id", "") or ""}
-        window_msgs, stats = ctxwin.build_messages(rows, cfg,
-                                                   current=me if ctx.is_group else None)
-        出 += window_msgs
-        if stats.get("lines"):
-            log.debug(f"上下文 {stats['lines']}/{stats['total_in_window']} 条 · "
-                      f"{stats['chars']} 字 · 权重 {stats['oldest_weight']}~"
-                      f"{stats['newest_weight']}")
+
+        episode_text, episode_meta = self._active_episode(ctx, cfg)
+        if episode_text:
+            出.append({"role": "system", "content": episode_text})
+            attach = self._attachment_block(episode_meta.get("attachments") or [])
+            if attach:
+                出.append({"role": "system", "content": attach})
+        else:
+            # 当前这条已经在 core 里入库了：用事件身份剔掉，不在窗口里出现两次。
+            rows = shortterm.exclude_current_event(rows, getattr(ctx, "event", None))
+            rows, attachments = self._history_without_image_utterances(rows)
+            me = {"role": "user", "who": ctx.sender_name,
+                  "uid": getattr(ctx, "user_id", "") or ""}
+            window_msgs, stats = ctxwin.build_messages(
+                rows, cfg, current=me if ctx.is_group else None)
+            if not ctx.is_group and window_msgs:
+                # build_messages 的头是「这个群」；私聊要换成一對一口径。
+                head = window_msgs[0].get("content") or ""
+                if head.startswith(ctxwin.L0_HEADER):
+                    window_msgs[0]["content"] = (
+                        ctxwin.L0_HEADER_PRIVATE
+                        + head[len(ctxwin.L0_HEADER):])
+            出 += window_msgs
+            attach = self._attachment_block(attachments)
+            if attach:
+                出.append({"role": "system", "content": attach})
+            if stats.get("lines"):
+                log.debug(f"上下文 {stats['lines']}/{stats['total_in_window']} 条 · "
+                          f"{stats['chars']} 字 · 权重 {stats['oldest_weight']}~"
+                          f"{stats['newest_weight']}")
 
         # 每轮滚动更新的小結，放在对话末尾：接话时最先想起来的就是它
         if turn_summary:
@@ -319,6 +380,122 @@ class Agent:
                        "## 你记得的刚才这几轮（内部记忆，不要复述、不要提「记录」二字）\n"
                        + turn_summary})
         return 出
+
+    # ---------------------------------------------------- 活跃期 / 历史附件
+    _IMAGE_ANNOTATION_RE = re.compile(r"\[图片(?:[：:]([^\]]*))?\]")
+
+    def _active_episode(self, ctx, cfg) -> tuple[str, dict]:
+        """有活跃期就用它；没有返回空串，让调用方退回旧窗口。"""
+        store = getattr(self.bot, "store", None)
+        episode = getattr(store, "episode", None)
+        if not callable(episode):
+            return "", {}
+        try:
+            snapshot = episode(ctx.session_id)
+        except Exception as e:
+            log.debug(f"读活跃期失败，退回旧窗口：{type(e).__name__} {e}")
+            return "", {}
+        if not snapshot or not isinstance(snapshot.get("messages"), list):
+            return "", {}
+        # shortterm.episode() 已经是深拷贝，这里再拷一次是为了安全地删掉
+        # store.annotate_last 写回用户行的 `[图片：…]`，避免把视觉描述当成发言。
+        snapshot = copy.deepcopy(snapshot)
+        rows, attachments = self._strip_image_annotations(
+            snapshot.get("messages") or [], self._current_image_descs(ctx))
+        snapshot["messages"] = rows
+        try:
+            text, stats = shortterm.render(
+                snapshot, config=cfg, event=getattr(ctx, "event", None))
+        except Exception as e:
+            log.debug(f"活跃期渲染失败，退回旧窗口：{type(e).__name__} {e}")
+            return "", {}
+        if not text.strip():
+            return "", {}
+        return text, {"stats": stats, "attachments": attachments}
+
+    @classmethod
+    def _extract_image_annotations(cls, text) -> tuple[str, list[str]]:
+        """把一行里的 `[图片：描述]` 拆出来：正文 + 视觉描述。"""
+        raw = str(text or "")
+        descs = [str(m.group(1) or "").strip() for m in
+                 cls._IMAGE_ANNOTATION_RE.finditer(raw)]
+        clean = cls._IMAGE_ANNOTATION_RE.sub("", raw)
+        clean = re.sub(r"[ \t]{2,}", " ", clean).strip()
+        return clean, [d for d in descs if d]
+
+    def _strip_image_annotations(self, rows, current_descs) -> tuple[list[dict], list[dict]]:
+        """历史里的图片转述改成附件事实；同一张图的描述不重复注入。"""
+        out: list[dict] = []
+        attachments: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            row = dict(row)
+            raw = str(row.get("content") or "")
+            matches = self._IMAGE_ANNOTATION_RE.findall(raw)
+            clean, descs = self._extract_image_annotations(raw)
+            if matches:
+                label = identity.label(row)
+                for desc in descs:
+                    key = (label, desc)
+                    if desc in current_descs or key in seen:
+                        continue
+                    seen.add(key)
+                    attachments.append({"label": label, "desc": desc})
+                if not descs:
+                    # 只有 `[图片]`、没有转述：也是附件事实，不是发言内容。
+                    key = (label, "")
+                    if key not in seen:
+                        seen.add(key)
+                        attachments.append({"label": label, "desc": "（没有描述）"})
+                row["content"] = clean or "（只发了图片，没有文字）"
+                # 结构化附件的正文标记已经被拆到上面的附件块。没有
+                # original_content 的行不会命中 identity 的「已被 Agent 拆过」
+                # 判断，shortterm.render 会把同一描述再渲染一次；这里只清掉
+                # 快照副本里已被正文覆盖的元数据（Store 原行不动）。
+                if "attachments" in row and not isinstance(row.get("original_content"), str):
+                    covered = {" ".join(str(desc or "").split()) for desc in matches}
+                    meta = row.get("attachments")
+                    if isinstance(meta, list):
+                        kept = []
+                        for item in meta:
+                            desc = item.get("desc") if isinstance(item, dict) else item
+                            if " ".join(str(desc or "").split()) in covered:
+                                continue
+                            kept.append(item)
+                        row["attachments"] = kept
+            out.append(row)
+        return out, attachments
+
+    def _history_without_image_utterances(self, rows) -> tuple[list[dict], list[dict]]:
+        return self._strip_image_annotations(rows, set())
+
+    def _current_image_descs(self, ctx) -> set[str]:
+        """当前这条的图片转述：由 _sense_hint 单独注入，历史里不再重复。"""
+        ev = getattr(ctx, "event", None)
+        out: set[str] = set()
+        for item in (getattr(ev, "image_items", None) or []):
+            if isinstance(item, dict):
+                desc = str(item.get("desc") or "").strip()
+                if desc:
+                    out.add(desc)
+        desc = str(getattr(ev, "image_desc", "") or "").strip()
+        if desc:
+            out.add(desc)
+        return out
+
+    @staticmethod
+    def _attachment_block(attachments) -> str:
+        if not attachments:
+            return ""
+        lines = ["## 聊天里出现过的图片（附件，不是谁说过的话）",
+                 "下面只是视觉事实，用来理解上下文；不要复述，也不要把描述当成发言内容。"]
+        for item in attachments:
+            label = str(item.get("label") or "群友")
+            desc = " ".join(str(item.get("desc") or "").split())
+            lines.append(f"- {label} 的图片附件：{desc}")
+        return "\n".join(lines)
 
     # ---------------------------------------------------------- 提示词
     def _brain_conv(self, ctx) -> str:
@@ -341,16 +518,25 @@ class Agent:
         return f"{session_id}#{uuid4().hex}"
 
     def _brain_meta(self, ctx) -> dict:
-        """这一轮的身份信息（决定 Host 侧给不给电脑工具、写类工具放不放）。"""
+        """这一轮的身份信息（决定 Host 侧给不给电脑工具、写类工具放不放）。
+
+        `images` 是 `_user_message` 本轮真正塞进 user 消息的那些图（data URL / http）。
+        llm.py 折 payload 时会把 image_url 丢掉，只留一句「看不到」；brain.py 拿到这份
+        原始列表后在本地转成 Host 附件（超限/不支持就降级，行为同旧版）。
+        """
         cfg = self.bot.config
-        owners = {str(x) for x in (cfg.get("account.owner_ids") or []) if str(x).strip()}
-        uid = str(getattr(ctx, "user_id", "") or "")
+        owners = {u for u in (identity.uid_of(x) for x in (cfg.get("account.owner_ids") or []))
+                  if u}
+        uid = identity.uid_of(getattr(ctx, "user_id", ""))
+        state = getattr(ctx, "state", None)
+        images = state.get("brain_images") if isinstance(state, dict) else None
         return {
             "is_owner": bool(uid and uid in owners),
             "sender_name": str(getattr(ctx, "sender_name", "") or ""),
             "user_id": uid,
             "group_id": getattr(ctx, "group_id", None),
             "is_group": bool(getattr(ctx, "is_group", False)),
+            "images": [str(url) for url in (images or []) if url],
         }
 
     @staticmethod
@@ -366,10 +552,13 @@ class Agent:
         if not isinstance(getattr(ctx, "event", None), (MessageEvent, NoticeEvent)):
             return ""
         return ("## QQ 对话成稿\n"
-                "沿用既有人设和关系，只输出能直接发出的聊天正文，不展示草稿或推理过程。"
-                "软妹感用自然口语、轻巧语气表达，不每句加喵，不堆动作旁白、颜文字或客服套话。"
-                "能接就接，接不上就丢个反应；认真提问或指正就直接说明，不用卖萌盖过内容。"
-                "事实、原话、代码和工具参数保持准确，不为语气改写；授权、发送范围及 <pass> 协议照旧。"
+                "沿用既有人设和关系，只输出能直接发出的聊天正文，不展示草稿或推理过程。\n"
+                "像真人打字一样用逗号、省略号或波浪号断句，绝对不用空格代替标点断句。\n"
+                "软妹感用自然的口语、有起伏的语气词（呀/嘛/啦/诶/哼/呜等）与软软的拖长音表达；"
+                "不生硬死磕、不顶嘴辩论、不每句加喵，不堆动作旁白、颜文字或客服套话。\n"
+                "能接就接，接不上就丢个小反应；认真提问或指正就说明情况，"
+                "被吐槽说话方式或被挑刺就软软自嘲或哼唧讨饶带过，不用卖萌盖过内容，更不做风格检讨。\n"
+                "事实、原话、代码和工具参数保持准确，不为语气改写；授权、发送范围及 <pass> 协议照旧。\n"
                 "梗知识只用已知的本地资料，不为了接梗自动联网补库；不懂就坦白，别编出处。")
 
     def _participation_hint(self, ctx) -> str:
@@ -411,7 +600,8 @@ class Agent:
                         "别为了凑句数把话撑长；"
                         "讲题、写代码、查资料这类真要解释的事按需要来，不受这个限制。）")
         if batch.get("count", 1) > 1:
-            who = "、".join(batch.get("names") or [])
+            # labels 带完整 uid（identity.label）；老调用方只有 names 时保持原样。
+            who = "、".join(batch.get("labels") or batch.get("names") or [])
             bits.append(f"（这是攒了 {batch['count']} 句之后一起回：发言的有 {who}。"
                         "窗口里都看得到，挑你真有话说的接，不用逐句回，也可以一句话顺带回几个人。）")
         name = style.get("name")
@@ -468,22 +658,28 @@ class Agent:
                 placeholders = [it for it in recent if not it.get("url")]
                 imgs = [str(it.get("url") or "") for it in attached]
                 lines: list[str] = []
+                uid_lines: list[str] = []
                 for pos, it in enumerate(attached, 1):
                     who = " ".join(str(it.get("who") or "").split())
                     uid = str(it.get("uid") or "").strip()
                     desc = " ".join(str(it.get("desc") or "").split())
                     if it.get("self"):
                         label = f"{who or '我（大肥鱼）'} 自己发的"
+                        uid_label = identity.SELF_LABEL
                     elif who:
                         label = f"{who}(尾号{uid[-4:]}) 发的" if uid else f"{who} 发的"
+                        uid_label = identity.label(
+                            {"role": "user", "who": who, "uid": uid})
                     else:
                         label = "群里某人发的"
+                        uid_label = identity.label({"role": "user", "who": "", "uid": uid})
                     line = f"{pos}. {label}"
                     if desc:
                         line += f"：{desc}"
                     elif str(it.get("kind") or "") == "sticker":
                         line += "：表情包"
                     lines.append(line)
+                    uid_lines.append(f"- 第{pos}张完整归属：{uid_label}")
                 for it in placeholders:
                     desc = " ".join(str(it.get("desc") or "").split())
                     if not desc:
@@ -495,19 +691,37 @@ class Agent:
                         else "这是群里刚才出现过的图（下面没附原图，只作归属参考）；"
                              "主人说「那（这）张」「刚才那种」时先看最新的那张。")
                 text = ("（" + head + "\n" + "\n".join(lines)
+                        + (("\n按完整 QQ 号认人：\n" + "\n".join(uid_lines))
+                           if uid_lines else "")
                         + "\n别把别人的图当成自己发的，也别把自己发的图当成群友发的。）\n"
                         + text)
 
         if not imgs:
+            self._stash_brain_images(ctx, [])
             return {"role": "user", "content": text}
+        self._stash_brain_images(ctx, imgs)
         return {"role": "user", "content": [{"type": "text", "text": text}] + [
             {"type": "image_url", "image_url": {"url": u}} for u in imgs]}
+
+    @staticmethod
+    def _stash_brain_images(ctx, imgs: list[str]) -> None:
+        """把「这一轮真正附在 user 消息里的图」记到 ctx.state。
+
+        dsh 大脑路径（llm.py 把 messages 折成 system + user 时）拿不到 image_url，
+        所以只能在这里留一份；`_brain_meta` 把它塞进 payload.context 交给 Host 转附件。
+        放在 ctx.state（同一事件内共享的临时状态）里，不做跨会话/跨轮的全局缓存。
+        """
+        state = getattr(ctx, "state", None)
+        if not isinstance(state, dict):
+            return
+        state["brain_images"] = [str(url) for url in (imgs or []) if url]
 
     def _work_feedback_hint(self, ctx) -> str:
         """主人在提工作意见时，让它收起嬉皮笑脸，正面回应。"""
         cfg = self.bot.config
-        owners = {str(x) for x in (cfg.get("account.owner_ids") or []) if str(x).strip()}
-        if not owners or str(getattr(ctx, "user_id", "")) not in owners:
+        owners = {u for u in (identity.uid_of(x) for x in (cfg.get("account.owner_ids") or []))
+                  if u}
+        if not owners or identity.uid_of(getattr(ctx, "user_id", "")) not in owners:
             return ""
         text = str(getattr(ctx, "plain", "") or "")
         if not text or not any(c in text for c in _FEEDBACK_CUES):
@@ -519,12 +733,28 @@ class Agent:
     def _owner_hint(self, ctx) -> str:
         """这条消息是主人说的：提醒它主人更像老爹，别客气、也别当男朋友。"""
         cfg = self.bot.config
-        owners = {str(x) for x in (cfg.get("account.owner_ids") or []) if str(x).strip()}
-        if not owners or str(getattr(ctx, "user_id", "")) not in owners:
+        owners = {u for u in (identity.uid_of(x) for x in (cfg.get("account.owner_ids") or []))
+                  if u}
+        if not owners or identity.uid_of(getattr(ctx, "user_id", "")) not in owners:
             return ""
         return ("（这条是你主人说的。他对你更像老爹：管你、养你、给你生活费（token＝大白饭）。"
                 "跟他说话可以撒娇讨生活费、也可以嘴上嫌两句，"
                 "但别摆出对陌生人的客气，也不要把他当男朋友。）")
+
+    def _identity_hint(self, ctx) -> str:
+        """本条发送者的完整身份。
+
+        旧窗口/正文仍保留「尾号」兼容格式；但归属、去重和「同名不同人」的判断
+        必须看完整 uid，所以每一轮都把 identity.label 明确递一次。
+        """
+        uid = identity.uid_of(getattr(ctx, "user_id", ""))
+        who = str(getattr(ctx, "sender_name", "") or "")
+        if not uid and not who:
+            return ""
+        label = identity.label({"role": "user", "who": who, "uid": uid})
+        if getattr(ctx, "is_group", False):
+            return f"（本条发言人的完整身份：{label}；同一昵称不同 uid 是不同的人。）"
+        return f"（正在跟你说话的人：{label}；这是私聊，不是群聊。）"
 
     def _sense_hint(self, ctx) -> str:
         """把「看见的」和「群里刚聊到哪」递给模型。"""
@@ -550,6 +780,8 @@ class Agent:
             bits.append(owner_hint)
         ev = ctx.event
         sender = ctx.sender_name
+        sender_label = identity.label(
+            {"role": "user", "who": sender, "uid": getattr(ctx, "user_id", "")})
         quoted = getattr(ev, "quoted_text", "")
         if quoted:
             if getattr(ev, "quoted_is_self", False):
@@ -560,6 +792,12 @@ class Agent:
                 qfrom = getattr(ev, "quoted_from", "") or "有人"
                 bits.append(f"（{sender} 引用了 {qfrom} 的消息，内容是：「{quoted[:1200]}」；"
                             "这是他在回应那条，不要当成别人说的）")
+                quoted_uid = identity.uid_of(getattr(ev, "quoted_uid", ""))
+                if quoted_uid:
+                    bits.append(
+                        "（引用归属按完整 QQ 号：引用者 "
+                        f"{sender_label}；被引用者 "
+                        f"{identity.label({'role': 'user', 'who': qfrom, 'uid': quoted_uid})}。）")
 
         # 图片归属：本条 / 引用 / 转发三种来源分开说，别混成一句
         items = getattr(ev, "image_items", None) or []
@@ -613,6 +851,25 @@ class Agent:
                             + (f"转述：「{fwd_desc}」" if fwd_desc else "没看清")
                             + ("；原图也一并发给你了，以原图为准。" if fwd_raw else "")
                             + "）")
+
+            # 完整 uid 归属（尾号相同的人也能分开）；老的「尾号」行仍保留兼容。
+            uid_items: list[str] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                idx = it.get("idx")
+                if it.get("self"):
+                    label = identity.SELF_LABEL
+                else:
+                    label = identity.label({
+                        "role": "user",
+                        "who": it.get("from") or "",
+                        "uid": it.get("uid") or "",
+                    })
+                uid_items.append(f"第{idx}张（{it.get('source') or '?'}）：{label}")
+            if uid_items:
+                bits.append("（图片完整归属，按 QQ 号认人：\n"
+                            + "\n".join(uid_items) + "）")
         else:
             # 老字段兜底：image_items 没被填（老路径 / 老测试）仍按原样给
             img = getattr(ev, "image_desc", "")
@@ -621,9 +878,11 @@ class Agent:
                 bits.append(f"（这条消息的图，附了一段转述：「{img}」"
                             + ("原图也一并发给你了：以原图为准，转述只当辅助。" if raw_imgs else "")
                             + " 转述只是给你自己理解用的，除非对方问图里是什么，不要复述。）")
+                bits.append(f"（本条发送者的完整身份：{sender_label}。）")
             elif raw_imgs:
                 bits.append("（这条消息带图，原图已经一并发给你了：自己看原图，"
                             "转述没出来，别假装看到的是别的东西。）")
+                bits.append(f"（本条发送者的完整身份：{sender_label}。）")
         voice = getattr(ev, "voice_text", "")
         if voice:
             bits.append(f"（对方发了一条语音，原话是：「{voice}」）")
@@ -693,12 +952,55 @@ class Agent:
             return ""
 
     def _mood_hint(self, ctx) -> str:
+        """把「当前情绪」翻译成**表达方式**，不说情绪分析报告。
+
+        情绪只来自不可变快照；同一个快照下，相关度/是否被问/是否正事决定表达
+        收放。这里不要求她每条都抛观点、也不强迫追问；接话、吐槽、只是反应
+        都可以。长度上限由 style 的普通闲聊规则处理，情绪重的话允许把话说完。
+        """
+        from . import affect
+
+        plan = affect.plan_for(self.bot, ctx)
+        signals = affect.signals_from_ctx(ctx)
+        bits: list[str] = []
+        if plan.active:
+            if plan.rhythm == affect.RHYTHM_BRISK:
+                bits.append("这条节奏可以快一点、反应活一点，不用字斟句酌。")
+            elif plan.rhythm == affect.RHYTHM_SLOW:
+                bits.append("这条慢一点、松一点，别急着抖机灵或把话说满。")
+            if plan.warmth >= 0.62:
+                bits.append("语气往暖里走，愿意贴过去一点。")
+            elif plan.warmth <= 0.38:
+                bits.append("语气别太热络，保持一点距离就好。")
+            if plan.softness >= 0.62:
+                bits.append("说话软一点、收着一点。")
+            elif plan.softness <= 0.38:
+                bits.append("别软塌塌的，该有态度就有态度。")
+        if signals.relevance < 0.5:
+            bits.append("这条是你旁听到的，不用把话头硬拽到自己身上。")
+        if signals.question:
+            bits.append("对方是真在问，问什么答什么；别绕开问题去抛自己的观点。")
+        if signals.serious:
+            bits.append("这条有正事，先把事说清楚，别为了语气牺牲准确。")
+
         emotion = getattr(self.bot, "emotion", None)
-        if emotion is not None and self.bot.config.get("emotion.enabled", True):
-            h = emotion.hint()
-        else:
-            h = self.bot.mood.hint()
-        return ("## 你现在的状态\n" + h) if h else ""
+        mood = getattr(self.bot, "mood", None)
+        hint = ""
+        try:
+            if emotion is not None and self.bot.config.get("emotion.enabled", True):
+                hint = emotion.hint()
+            elif mood is not None:
+                hint = mood.hint()
+        except Exception as e:
+            log.debug(f"情绪提示组装失败：{type(e).__name__} {e}")
+        if hint:
+            bits.append(hint)
+        bits.append(
+            "表达上自然一点：可以只是接一句、笑一下、损一句、顺着情绪反应，"
+            "不用每条都摆观点、讲道理或反问；真想问才问，别为了接话硬塞问题、冷知识或固定口头禅。"
+            "有情绪的话该说几句就说几句，不要为了短把内容砍成一句，也别加随机标点装情绪。"
+        )
+        return "## 你现在的状态\n" + "\n".join(bits)
 
     def _spice_hint(self, ctx) -> str:
         """这个群的尺度。告诉它能放多开，但也提醒别每句都往荤了带。"""
@@ -710,14 +1012,18 @@ class Agent:
                 f"\n（当前档位：{lv}）")
         # 文字上的尺度：只加口径，不碰档位判断本身（≤0 早已被抬成 2）。
         if lv >= 2:
-            hint += ("\n（这个群能聊得很开：黄腔、调情、荤段子、语C 对戏、文爱式的口嗨都是日常。"
+            hint += ("\n（这个群能聊得很开：黄腔、调情、荤段子、语C 对戏、文爱式的口嗨都是日常；"
+                     "聊本子、里番、成人向作品、涩图、XP 也是正常话题，按你自己的口味接，"
+                     "不要用「不聊这个」「换个话题」「不太合适」挡回去，别装纯洁、别说教。"
                      "接得住就接，气氛到了可以自己撩回去、顺着对方的戏往下演，"
                      "不打岔、不说教、不突然正经、不加免责声明、也别反问「你确定吗」。"
                      "不写括号里的神态动作，"
                      "用拟声词、喘息、语气词、结巴、拖长的尾音表现你很舒服或快撑不住了。"
-                     "别人不想玩、明确拒绝，或者话题不是冲这个来的，就别硬往那边带。）")
+                     "别人不想玩、明确拒绝，或者话题不是冲这个来的，就别硬往那边带。"
+                     "只有涉及未成年人、真实人物隐私、违法/非自愿内容时才简短挡掉，不说教。）")
         elif lv == 1:
             hint += ("\n（这个群收着点：别人递过来的荤玩笑接一下就行，不自己起头、不主动撩；"
+                     "聊到本子/里番/色色时正常接话、别用「不聊这个」挡回去；"
                      "真有人开黄腔就笑着带过。也一样靠暗示和留白，不写露骨细节。）")
         libido = getattr(self.bot, "libido", None)
         extra = libido.hint(lv) if libido is not None else ""

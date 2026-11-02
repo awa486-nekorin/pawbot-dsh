@@ -1,6 +1,6 @@
 """关系网：谁跟谁互动多、每个群的群主和管理。
 
-    data/relations.json
+    content/relations.json
     {
       "pairs": {
         "10001|10002": {"a": "10001", "b": "10002", "score": 3.0,
@@ -38,6 +38,7 @@ import re
 import threading
 import time
 
+from . import paths as layout
 from .log import log
 from .people import _atomic_write, _lock_for
 
@@ -70,10 +71,12 @@ def _pair_key(a: str, b: str) -> str:
 
 
 class Relations:
-    def __init__(self, base_dir: str, config=None):
+    def __init__(self, base_dir: str, config=None, *, paths=None):
         self.base_dir = base_dir or "."
         self.config = config
-        self.path = os.path.join(self.base_dir, "data", "relations.json")
+        self.paths = (paths if paths is not None
+                      else layout.resolve(self.base_dir, config))
+        self.path = self.paths.content("relations.json")
         self._lock = threading.RLock()
         self.dirty = False
         self.data: dict = {"pairs": {}, "groups": {}, "group_pairs": {}, "names": {}}
@@ -399,7 +402,8 @@ def for_bot(bot) -> Relations:
     if isinstance(rel, Relations):
         return rel
     rel = Relations(getattr(bot, "base_dir", "") or ".",
-                    getattr(bot, "config", None))
+                    getattr(bot, "config", None),
+                    paths=getattr(bot, "paths", None))
     try:
         setattr(bot, "relations", rel)
     except Exception:

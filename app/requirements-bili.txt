@@ -1,12 +1,14 @@
-# bili_scroll（自己刷 B 站 + 读字幕）的可选依赖
-#
-# 只有要用「读字幕原文 / 发评论动态」时才需要装。不装也能刷，只是拿不到字幕，
-# 报告会降级成「只看标题和简介」——那是如实降级，不是坏掉。
+# PawBot 可选依赖：B 站扩展（bili_scroll 自己刷片 + bili_mcp 读字幕 / 发评论动态）
+# 不装也能跑 PawBot 主功能；只是 bili_scroll 拿不到字幕原文、bili_mcp 起不来，
+# 报告会如实降级成「只看标题和简介」——那是降级，不是坏掉。
+# 版本范围锁定于 2026-10-30：与 app/requirements.txt 同一套策略，限定在已知兼容的主版本内，
+# 避免破坏性升级，同时保留各主版本内的安全修复
 #
 # 装法（在插件自己的 venv 里）：
 #   Linux:   app/.venv/bin/pip install -r app/requirements-bili.txt
 #   Windows: app\.venv\Scripts\pip.exe install -r app\requirements-bili.txt
+# 也可以在 DSH 设置页打开 installBiliDeps，让「一键安装」顺带装这一份（失败只记警告）。
 #
 # ⚠️ mcp 必须锁 <2：2.x 起不来（上游 bilibili-mcp 的既有约束）
-mcp<2
-bilibili-api-python
+mcp>=1.2,<2                    # MCP Python SDK：bili_mcp 的 FastMCP 服务端（mcp.server.fastmcp）
+bilibili-api-python>=17.0,<19  # B 站 API 封装：搜索 / 评论 / 字幕 / 弹幕 / 投稿（bilibili_api）

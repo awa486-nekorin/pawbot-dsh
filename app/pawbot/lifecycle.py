@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import os
@@ -315,6 +316,9 @@ class RuntimeLifecycle:
         self._shutdown_result: dict | None = None
         self._exit_scheduled = False
         self._cleanup_done = False
+        # relay 模式：request_shutdown 已经按 core 既有顺序停过 Bot（含传输释放），
+        # run.py 的兜底收尾不得再 stop 一次（避免重复 before_release/bye）。
+        self._bot_stopped = False
 
     # -- 接线
     def bind_bot(self, bot: Any) -> "RuntimeLifecycle":
@@ -325,6 +329,11 @@ class RuntimeLifecycle:
         """登记 WebUI：停机开始时先让它拒绝新变更，并把在途请求交给取消/等待。"""
         self._webui = webui
         return self
+
+    @property
+    def bot_stopped(self) -> bool:
+        """relay 停机是否已由 request_shutdown 按 core 顺序停过 Bot。"""
+        return bool(self._bot_stopped)
 
     def install_event_gate(self, bot: Any | None = None) -> bool:
         """停机开始后不再处理新事件（OneBot worker 仍可正常结束旧事件）。"""
@@ -467,14 +476,8 @@ class RuntimeLifecycle:
         except Exception as exc:  # noqa: BLE001 —— 任何失败都必须如实返回
             return {"ok": False, "flushed": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    async def _quiesce_producers(self, timeout: float = 3.0) -> tuple[bool, list[str]]:
-        """停机 ack 之前先停掉会继续写 Store / 发外网的周期生产者。
-
-        - WebUI 立刻进入 draining（拒绝新的变更类请求）；
-        - OneBot 监听与连接关闭，不再接收新事件；
-        - 取消已知的周期任务（store flush / B 站调度），停 proactive / reminders。
-        任何一步失败都如实记录，ack 不能当成功。
-        """
+    async def _begin_webui_draining(self) -> tuple[bool, list[str]]:
+        """停机开始：让 WebUI 立刻拒绝新的变更类请求（控制面重复 ack 仍可用）。"""
         ok = True
         notes: list[str] = []
         webui = self._webui
@@ -486,6 +489,46 @@ class RuntimeLifecycle:
             except Exception as exc:  # noqa: BLE001
                 ok = False
                 notes.append(f"WebUI 停止接收新变更失败：{type(exc).__name__}: {exc}")
+        return ok, notes
+
+    async def _stop_background_threads(self, timeout: float = 3.0) -> tuple[bool, list[str]]:
+        """停掉仍会写 Store 的同步线程；线程没停就如实失败（不能发成功 ack）。"""
+        ok = True
+        notes: list[str] = []
+        bot = self._bot
+        if bot is None:
+            return ok, notes
+        syncer = getattr(bot, "realtime_sync", None)
+        if syncer is not None:
+            try:
+                await asyncio.to_thread(syncer.stop, timeout)
+                if syncer.is_alive():
+                    ok = False
+                    notes.append("实时同步线程未在时限内停止")
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                notes.append(f"实时同步停止失败：{type(exc).__name__}: {exc}")
+        auto_pull = getattr(bot, "_auto_pull_thread", None)
+        if auto_pull is not None:
+            try:
+                await asyncio.to_thread(auto_pull.join, timeout)
+                if auto_pull.is_alive():
+                    ok = False
+                    notes.append("启动同步线程未在时限内停止")
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                notes.append(f"启动同步等待失败：{type(exc).__name__}: {exc}")
+        return ok, notes
+
+    async def _quiesce_producers(self, timeout: float = 3.0) -> tuple[bool, list[str]]:
+        """legacy 停机：停机 ack 之前先停掉会继续写 Store / 发外网的周期生产者。
+
+        - WebUI 立刻进入 draining（拒绝新的变更类请求）；
+        - OneBot 监听与连接关闭，不再接收新事件；
+        - 取消已知的周期任务（store flush / B 站调度），停 proactive / reminders。
+        任何一步失败都如实记录，ack 不能当成功。
+        """
+        ok, notes = await self._begin_webui_draining()
         bot = self._bot
         if bot is None:
             return ok, notes
@@ -528,26 +571,88 @@ class RuntimeLifecycle:
             except Exception as exc:  # noqa: BLE001
                 ok = False
                 notes.append(f"{name} 停止失败：{type(exc).__name__}: {exc}")
-        syncer = getattr(bot, "realtime_sync", None)
-        if syncer is not None:
+        thread_ok, thread_notes = await self._stop_background_threads(timeout)
+        ok = ok and thread_ok
+        notes.extend(thread_notes)
+        return ok, notes
+
+    def _relay_transport(self) -> Any | None:
+        """识别 relay 模式传输；legacy（reverse/forward）一律返回 None，行为不变。
+
+        判定用 core 已有的公开契约 ``server.mode == "relay"`` 且挂了
+        ``bot.ha_runtime``，不依赖具体类，也不碰 core/relay_client。
+        """
+        bot = self._bot
+        if bot is None or getattr(bot, "ha_runtime", None) is None:
+            return None
+        server = getattr(bot, "server", None)
+        if server is None:
+            return None
+        if str(getattr(server, "mode", "") or "").lower() == "relay":
+            return server
+        return None
+
+    async def _release_relay_transport(self, server: Any) -> tuple[bool, list[str]]:
+        """relay 模式：在取消任何任务之前，按 core 既有顺序释放传输。
+
+        ``Bot.stop``（relay 分支）会先关业务入口、再 ``RelayClient.stop``：
+        ``before_release``（停生产者/排空/flush 内容/最后一次有权推送）→ bye →
+        ``HARuntime.stop`` → 本机 state 落盘。这里复用同一条顺序，并临时观察
+        ``before_release`` 的返回值，把「最终推送失败」如实带进 ack/退出码。
+        """
+        bot = self._bot
+        notes: list[str] = []
+        captured: dict[str, Any] = {}
+        original = getattr(server, "before_release", None)
+        wrapped = False
+        if callable(original):
+            async def _recording(*args, **kwargs):
+                try:
+                    result = original(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        result = await result
+                except BaseException as exc:  # noqa: BLE001 - 记录后照常抛出
+                    captured["error"] = exc
+                    raise
+                captured["result"] = result
+                return result
             try:
-                await asyncio.to_thread(syncer.stop, timeout)
-                if syncer.is_alive():
-                    ok = False
-                    notes.append("实时同步线程未在时限内停止")
-            except Exception as exc:  # noqa: BLE001
-                ok = False
-                notes.append(f"实时同步停止失败：{type(exc).__name__}: {exc}")
-        auto_pull = getattr(bot, "_auto_pull_thread", None)
-        if auto_pull is not None:
-            try:
-                await asyncio.to_thread(auto_pull.join, timeout)
-                if auto_pull.is_alive():
-                    ok = False
-                    notes.append("启动同步线程未在时限内停止")
-            except Exception as exc:  # noqa: BLE001
-                ok = False
-                notes.append(f"启动同步等待失败：{type(exc).__name__}: {exc}")
+                server.before_release = _recording
+                wrapped = True
+            except Exception as exc:  # noqa: BLE001 - 只读替身也允许，但不能假装看到了结果
+                notes.append(f"无法观察 relay 释放结果：{type(exc).__name__}: {exc}")
+        ok = True
+        try:
+            stopper = getattr(bot, "stop", None) if bot is not None else None
+            if callable(stopper):
+                await stopper()
+                self._bot_stopped = True
+            else:
+                stop_server = getattr(server, "stop", None)
+                if not callable(stop_server):
+                    return False, notes + ["relay 传输没有可用的 stop()"]
+                await stop_server()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 释放失败必须进 ack，而不是静默
+            ok = False
+            notes.append(f"停止 relay 传输失败：{type(exc).__name__}: {exc}")
+        finally:
+            if wrapped:
+                try:
+                    server.before_release = original
+                except Exception:  # noqa: BLE001
+                    pass
+        error = captured.get("error")
+        result = captured.get("result")
+        if error is not None:
+            ok = False
+            notes.append(
+                f"relay 释放前内容 flush 失败：{type(error).__name__}: {error}")
+        elif isinstance(result, dict) and not result.get("ok"):
+            detail = result.get("error") or result.get("code") or "未排空或推送未成功"
+            ok = False
+            notes.append(f"relay 释放前内容 flush/push 未成功：{detail}")
         return ok, notes
 
     def _collect_inflight(self) -> list[asyncio.Task]:
@@ -646,7 +751,19 @@ class RuntimeLifecycle:
             self.shutting_down = True
             # 先快照在途任务：停 OneBot/周期任务会清掉 connections，之后再收集就漏了。
             early = self._collect_inflight()
-            producer_ok, notes = await self._quiesce_producers()
+            relay = self._relay_transport()
+            if relay is not None:
+                # relay 模式：必须先按 core 既有顺序释放传输（Bot.stop → RelayClient.stop
+                # → before_release：停生产者/排空业务/flush 内容/最后一次有权推送 → bye），
+                # 之后才允许取消任何剩余任务。先取消 relay runner/heartbeat 会清 lease，
+                # 让最后一次授权推送被跳过；这里也不做全局 drain。
+                ok, notes = await self._begin_webui_draining()
+                thread_ok, thread_notes = await self._stop_background_threads()
+                release_ok, release_notes = await self._release_relay_transport(relay)
+                producer_ok = bool(ok and thread_ok and release_ok)
+                notes = [*notes, *thread_notes, *release_notes]
+            else:
+                producer_ok, notes = await self._quiesce_producers()
             pending = await self._cancel_inflight(extra=early)
             result = self.flush_store()
             ok = bool(result.get("ok")) and producer_ok and not pending

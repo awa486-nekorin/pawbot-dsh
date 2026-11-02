@@ -1,7 +1,7 @@
 """
 表情包库 / 图片。
 
-    data/stickers/
+    content/stickers/
         index.json     {"文件名.png": {"tags": ["开心","猫"], "desc": "猫娘叉腰得意，配字『就这』",
                                        "mood": "得意", "sha1": "...", "uses": 3,
                                        "desc_source": "vision"}}
@@ -33,6 +33,8 @@ import random
 import re
 import urllib.error
 import urllib.request
+
+from . import paths as layout
 
 EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_SAVE_BYTES = 5 * 1024 * 1024       # 表情包只收 5MB 以内的
@@ -386,11 +388,12 @@ def _score_meta(name: str, meta: dict, tokens: set[str]) -> int:
 
 
 class StickerBook:
-    def __init__(self, base_dir: str, config):
+    def __init__(self, base_dir: str, config, *, paths=None):
         self.base_dir = base_dir
         self.config = config
-        d = config.get("persona.stickers_dir", "data/stickers")
-        self.dir = d if os.path.isabs(d) else os.path.join(base_dir, d)
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
+        self.dir = self.paths.setting(self.config.get("persona.stickers_dir", ""),
+                                      kind="content", default="stickers")
         self.index_path = os.path.join(self.dir, "index.json")
         try:
             self.max_count = max(1, int(config.get("persona.stickers_max", 400) or 400))
@@ -697,7 +700,8 @@ class StickerBook:
             if digest in seen:          # 同一页里重复的图，只存一次
                 continue
             seen.add(digest)
-            if checked and animecheck.is_anime_cached(raw, self.config) is not True:
+            if checked and animecheck.is_anime_cached(
+                    raw, self.config, base_dir=self.base_dir) is not True:
                 log.info(f"自动抓图跳过（非二次元/无法判定）：{tag}")
                 continue
             try:

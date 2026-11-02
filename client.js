@@ -2159,6 +2159,7 @@ if (typeof window === 'undefined') {
         const [notice, setNotice] = useState(null)
         const [showRaw, setShowRaw] = useState(false)
         const [restartOpen, setRestartOpen] = useState(false)
+        const [stopOpen, setStopOpen] = useState(false)
         const [reloadOpen, setReloadOpen] = useState(false)
         const [sendOpen, setSendOpen] = useState(false)
         const [sendConfirm, setSendConfirm] = useState(false)
@@ -2231,6 +2232,14 @@ if (typeof window === 'undefined') {
             '；请给它几秒重新连上 NapCat。'
           ))
           setRestartOpen(false)
+          if (result) await refresh()
+        }
+
+        const doStop = async () => {
+          const result = await runAction('stop', '/stop', {}, (res) => (
+            res && res.stopped ? 'PawBot 已停止。现在可以安全地从云端拉取；完成后再到状态页启动。' : 'PawBot 当前未运行，可以从云端拉取。'
+          ))
+          setStopOpen(false)
           if (result) await refresh()
         }
 
@@ -2438,6 +2447,19 @@ if (typeof window === 'undefined') {
                   h(NoticeRegion, { notice }, h(NoticeBlock, { notice, onGoStatus: null })),
 
                   h('div', { 'data-pb-action': '' },
+                    h('div', { 'data-pb-action-title': '' }, '停止 PawBot'),
+                    h('div', { 'data-pb-help': '' },
+                      '先协调停机并等待进程退出；停止后才能安全地从云端拉取。NapCat 不会退出，但机器人暂时不再回复。'),
+                    h('div', { 'data-pb-action-row': '' },
+                      h('button', {
+                        'data-pb-btn': '',
+                        'data-danger': '',
+                        type: 'button',
+                        disabled: !running || Boolean(busy),
+                        onClick: () => setStopOpen(true),
+                      }, busy === 'stop' ? '停止中…' : '停止 PawBot'))),
+
+                  h('div', { 'data-pb-action': '' },
                     h('div', { 'data-pb-action-title': '' }, '重启 PawBot'),
                     h('div', { 'data-pb-help': '' },
                       '会先收掉整个 PawBot 进程树再重新启动：与 NapCat 的连接会断开，正在生成或正在回复的消息会丢失，服务会短暂离线。'),
@@ -2525,6 +2547,20 @@ if (typeof window === 'undefined') {
                 showRaw
                   ? h('pre', { 'data-pb-pre': '' }, JSON.stringify(st, null, 2))
                   : null)),
+
+          h(ConfirmDialog, {
+            open: stopOpen,
+            title: '确定要停止 PawBot？',
+            danger: true,
+            busy: busy === 'stop',
+            confirmLabel: '确定停止',
+            onCancel: () => setStopOpen(false),
+            onConfirm: doStop,
+          },
+          h('p', null, '停止会优先协调退出，必要时终止 PawBot 进程；不会自动重启。'),
+          h('ul', null,
+            h('li', null, 'QQ/NapCat 继续运行，但 PawBot 停止回复；正在处理的消息可能中断。'),
+            h('li', null, '确认已停止后，再到云端同步页拉取；完成后可用“重启 PawBot”恢复。'))),
 
           h(ConfirmDialog, {
             open: restartOpen,
@@ -3813,11 +3849,130 @@ if (typeof window === 'undefined') {
             h('li', null, '服务器上的人设文件不会被改动，也不会变成出厂值。'))))
       }
 
+      /* ── 同步页：SCP 手动同步（人设/记忆，不含 config） ─────────────── */
+      function SyncTab({ active }) {
+        const [st, setSt] = useState(null)
+        const [busy, setBusy] = useState('')
+        const [notice, setNotice] = useState(null)
+        const [err, setErr] = useState('')
+        const [stopConfirm, setStopConfirm] = useState(false)
+        const load = async () => {
+          try {
+            const data = await api('GET', '/sync/scp/status')
+            setSt(data)
+            setErr('')
+          } catch (error) {
+            if (!isAbortError(error)) setErr(friendlyError(error))
+          }
+        }
+        useEffect(() => {
+          if (!active) return undefined
+          load()
+          const timer = setInterval(load, 10000)
+          return () => clearInterval(timer)
+        }, [active])
+        const run = async (action) => {
+          setBusy(action)
+          setNotice(null)
+          try {
+            const result = await api('POST', '/sync/scp/' + action, {})
+            const ok = result && result.code === 0
+            setNotice({ tone: ok ? 'good' : 'err', text: (result && result.output) || (ok ? '同步完成' : '同步失败') })
+            await load()
+          } catch (error) {
+            if (!isAbortError(error)) setNotice({ tone: 'err', text: '同步失败：' + friendlyError(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+        const stopPawbot = async () => {
+          setBusy('stop')
+          setNotice(null)
+          try {
+            const result = await api('POST', '/stop', {})
+            setNotice({ tone: 'good', text: result && result.stopped
+              ? 'PawBot 已停止。现在可以拉取或推回云端内容；完成后到“状态”页重新启动。'
+              : 'PawBot 当前已停止，可以执行同步。' })
+            await load()
+          } catch (error) {
+            if (!isAbortError(error)) setNotice({ tone: 'err', text: '停止失败：' + friendlyError(error) })
+          } finally {
+            setBusy('')
+            setStopConfirm(false)
+          }
+        }
+        const mode = (st && st.mode) || ''
+        const isRemote = mode === 'remote'
+        return h(React.Fragment, null,
+          h('div', { 'data-pb-top': '' },
+            h('div', null,
+              h('h1', { 'data-pb-title': '' }, '同步'),
+              h('p', { 'data-pb-sub': '' }, '只同步人设/记忆（content/）；不同步 config、密钥、sessions、browser 缓存。')),
+            h('div', { 'data-pb-action-row': '' },
+              h('button', { 'data-pb-btn': '', type: 'button', onClick: load }, '刷新状态'))),
+          err ? h(Notice, { tone: 'err' }, '读不到同步状态：' + err) : null,
+          h('div', { 'data-pb-stack': '' },
+            h('section', { 'data-pb-card': '' },
+              h('div', { 'data-pb-card-head': '' },
+                h('h2', { 'data-pb-card-title': '' }, '当前模式'),
+                h('span', { 'data-pb-card-sub': '' }, isRemote ? '本机 → 云服务器（SCP）' : '云服务器本机目录')),
+              h('pre', { 'data-pb-pre': '' }, (st && st.text) || (st ? JSON.stringify(st, null, 2) : '读取中…'))),
+            h('section', { 'data-pb-card': '' },
+              h('div', { 'data-pb-card-head': '' },
+                h('h2', { 'data-pb-card-title': '' }, '操作'),
+                h('span', { 'data-pb-card-sub': '' }, 'PawBot 必须先停止；导入前会自动备份到 data/backups/')),
+              h(NoticeBlock, { notice }),
+              h('div', { 'data-pb-action-row': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  'data-danger': '',
+                  type: 'button',
+                  disabled: !!busy,
+                  onClick: () => setStopConfirm(true),
+                }, busy === 'stop' ? '停止中…' : '停止 PawBot'),
+                h('span', { 'data-pb-help': '' }, '先停机，再拉取；不自动重启。')),
+              h('div', { 'data-pb-action-row': '' },
+                h('button', {
+                  'data-pb-btn': '',
+                  'data-primary': '',
+                  type: 'button',
+                  disabled: !!busy,
+                  onClick: () => run('pull'),
+                }, busy === 'pull' ? (isRemote ? '拉取中…' : '导入中…') : (isRemote ? '拉取到本机' : '从同步包导入')),
+                h('button', {
+                  'data-pb-btn': '',
+                  type: 'button',
+                  disabled: !!busy,
+                  onClick: () => run('push'),
+                }, busy === 'push' ? (isRemote ? '推回中…' : '导出中…') : (isRemote ? '推回云端' : '导出到同步包'))),
+              h('div', { 'data-pb-help': '' }, isRemote
+                ? '本机按钮：pull 从云服务器拉包并导入；push 把本机内容打包推到云服务器。'
+                : '云端按钮：push 把当前 content 导出到同步包；pull 从同步包导入。')),
+            h('section', { 'data-pb-card': '' },
+              h('div', { 'data-pb-card-head': '' }, h('h2', { 'data-pb-card-title': '' }, '说明')),
+              h('ul', null,
+                h('li', null, '同一时间只让一边 PawBot 运行；运行中同步会被拒绝。'),
+                h('li', null, '只同步 content/；config、API key、sessions、browser 缓存不会传。'),
+                h('li', null, '导入前备份在 data/backups/pre-pull-*.tgz，保留 5 份。'))),
+          h(ConfirmDialog, {
+            open: stopConfirm,
+            title: '确定要停止 PawBot 再同步？',
+            danger: true,
+            busy: busy === 'stop',
+            confirmLabel: '确定停止',
+            onCancel: () => setStopConfirm(false),
+            onConfirm: stopPawbot,
+          },
+          h('p', null, '停机将使 PawBot 暂时不回复 QQ 消息，正在处理的回复可能中断。'),
+          h('p', null, '只执行停机，不会自动拉取或重启；确认进程已退出后再点“拉取到本机”。'))))
+      }
+
       /* ── 頂層面板：4 個分頁（启动 / 状态 / 设定 / 人设） ─────────────────── */
 
       const TABS = [
         ['setup', '启动'],
         ['status', '状态'],
+        ['sync', '同步'],
         ['api', 'API 密钥'],
         ['config', '设置'],
         ['persona', '人设'],
@@ -3828,7 +3983,7 @@ if (typeof window === 'undefined') {
         const startTab = initialTab || 'setup'
         const [tab, setTab] = useState(startTab)
         // 只掛載使用者拜訪過的分頁；之後用 CSS 隱藏而不是卸載，避免切走再回來掉草稿。
-        const [mounted, setMounted] = useState({ setup: true, status: false, api: false, config: false, persona: false, [startTab]: true })
+        const [mounted, setMounted] = useState({ setup: true, status: false, sync: false, api: false, config: false, persona: false, [startTab]: true })
         const [configDirty, setConfigDirty] = useState(0)
         const [apiDirty, setApiDirty] = useState(0)
         const [tabNotice, setTabNotice] = useState('')
@@ -3906,6 +4061,8 @@ if (typeof window === 'undefined') {
               : null),
           h('div', panelProps('status'),
             mounted.status ? h(StatusTab, { active: tab === 'status', onGoConfig: () => selectTab('config') }) : null),
+          h('div', panelProps('sync'),
+            mounted.sync ? h(SyncTab, { active: tab === 'sync' }) : null),
           h('div', panelProps('api'),
             mounted.api ? h(ApiTab, { onGoConfig: () => selectTab('config'), onGoStatus: () => selectTab('status'), onDirtyChange: setApiDirty }) : null),
           h('div', panelProps('config'),

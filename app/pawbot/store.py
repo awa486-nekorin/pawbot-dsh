@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
 import time
 
+from . import identity, shortterm
 from .log import log
 
 ARCHIVE_MAX = 40           # 攒到这么多条就触发一次压缩
@@ -24,11 +26,15 @@ ARCHIVE_LIMIT = ARCHIVE_MAX * 2
 
 
 class Store:
-    def __init__(self, path: str, max_turns: int = 8, max_messages: int = 300):
+    def __init__(self, path: str, max_turns: int = 8, max_messages: int = 300,
+                 config=None):
         self.path = path
         self.max_turns = max_turns
         # 上下文窗口按「条」算，不再按「轮」——群里 300 条才是一段真实的聊天
         self.max_messages = int(max_messages)
+        # 可选：给活跃期读 memory.active_* 的覆盖值；不传就用 shortterm 的模块常量。
+        # core.py 现在不传，行为完全不变。
+        self.config = config
         self.lock = threading.RLock()
         self.data: dict[str, dict] = {}
         self.dirty = False
@@ -100,8 +106,14 @@ class Store:
             self._mark_dirty()
 
     def append(self, session_id: str, role: str, content: str,
-               who: str = "", ts: float | None = None, uid: str | int | None = None):
-        """记一条。who 是说话人，ts 是时间；uid 可选保存 OneBot 说话人 QQ 号。"""
+               who: str = "", ts: float | None = None, uid: str | int | None = None,
+               message_id: str | int | None = None, inbound: bool | None = None):
+        """记一条。who 是说话人，ts 是时间；uid 可选保存 OneBot 说话人 QQ 号。
+
+        `message_id` / `inbound` 是活跃期用的可选字段：`message_id` 让「当前这
+        条」能精确地从历史里排掉，`inbound` 让调用方显式区分「真人/入站」和
+        「机器人定时器输出」（不传时按 role 推断）。
+        """
         with self.lock:
             node = self._node(session_id)
             row = {
@@ -109,10 +121,22 @@ class Store:
                 "content": content,
                 "who": who or ("我" if role == "assistant" else ""),
                 "ts": float(ts if ts is not None else time.time()),
+                # 新版行标记：空列表表示「正文里的字面量都是用户真打的，不要
+                # 再从里面抠 `[图片：…]`」。`annotate_last` 会往这里追加附件
+                # 元数据，并把补描述前的原文存进 `original_content`。
+                "attachments": [],
             }
             if uid is not None and str(uid).strip():
                 row["uid"] = str(uid)
+            if message_id is not None and str(message_id).strip():
+                row["message_id"] = str(message_id)
             node["messages"].append(row)
+            # 活跃期是**附加**记录：window/archive/summary 的旧行为一个字不改。
+            # 它只按入站空闲间隔切段，不参与下面的条数淘汰和压缩。
+            try:
+                shortterm.observe(self, session_id, row, inbound=inbound)
+            except Exception as e:
+                log.debug(f"活跃期记录失败：{type(e).__name__} {e}")
             keep = self.max_messages
             if len(node["messages"]) > keep:
                 # 溢出的不是扔掉，而是移进 archive 等压缩
@@ -173,19 +197,38 @@ class Store:
             if target is None:
                 return False
             content = str(target.get("content") or "")
-            filled = 0
+            # 先保存「补描述之前的原文」。之后渲染时 text 用 original_content，
+            # 即使用户真的手打过 `[图片：…]` 也原样保留，不会被当成视觉转述。
+            if not isinstance(target.get("original_content"), str):
+                target["original_content"] = content
+            meta = target.get("attachments")
+            if not isinstance(meta, list):
+                meta = []
+                target["attachments"] = meta
+            source_uid = identity.uid_of(uid_s) or uid_s
+            filled: list[str] = []
             for snippet in descs:
                 if "[图片]" not in content:
                     break
                 content = content.replace("[图片]", f"[图片：{snippet}]", 1)
-                filled += 1
+                filled.append(snippet)
             if not filled:
                 return False
-            extras = descs[filled:]
+            extras = descs[len(filled):]
             if extras:
                 # 格子不够：多出来的描述并到行尾，用「；」分隔，别默默丢掉。
                 content = content.rstrip() + "；" + "；".join(extras)
             target["content"] = content
+            # 附件元数据是**附加**的：正文仍保持旧格式供旧调用方/UI 读取，
+            # 新渲染契约从这里拿结构化附件，并带完整来源 uid。
+            for snippet in filled + extras:
+                meta.append(identity.image_attachment(
+                    target, snippet, source="annotation", uid=source_uid))
+            # 活跃期和 window 共用同一行对象；补了图片描述后重算它的记录成本与裁剪。
+            try:
+                shortterm.recount(self, session_id)
+            except Exception as e:
+                log.debug(f"活跃期重算失败：{type(e).__name__} {e}")
             self._mark_dirty()
             self.flush()
             return True
@@ -202,6 +245,34 @@ class Store:
         """已溢出窗口、还没被压缩的原始消息（只读，给 WebUI 看）。"""
         with self.lock:
             return list(self._node(session_id)["archive"])
+
+    # ------------------------------------------------------------ 活跃期
+    # 只增不改旧行为：window 会淘汰/压缩，活跃期不会；它唯一的边界是入站空闲
+    # 间隔（默认 1200 秒）和 hard-cap（shortterm.ACTIVE_CHARS_CAP）。
+    def episode(self, session_id: str) -> dict:
+        """当前活跃期的深拷贝快照；没有就是空 dict。"""
+        return shortterm.episode(self, session_id)
+
+    def episode_stats(self, session_id: str) -> dict:
+        """活跃期的元信息（不复制消息正文）。"""
+        with self.lock:
+            node = self.data.get(session_id) or {}
+            ep = node.get("episode") if isinstance(node, dict) else None
+            if not isinstance(ep, dict):
+                return {}
+            return {
+                "id": str(ep.get("id") or ""),
+                "rows": len(ep.get("messages") or []),
+                "chars": int(ep.get("chars") or 0),
+                "cap": int(ep.get("cap") or 0),
+                "started_at": float(ep.get("started_at") or 0.0),
+                "last_inbound_ts": float(ep.get("last_inbound_ts") or 0.0),
+                "omitted_rows": int(ep.get("omitted_rows") or 0),
+                "omitted_chars": int(ep.get("omitted_chars") or 0),
+                "truncated_chars": int(ep.get("truncated_chars") or 0),
+                "truncated_attachment_chars": int(
+                    ep.get("truncated_attachment_chars") or 0),
+            }
 
     # ------------------------------------------------------------ 滚动小結
     def turn_summary(self, session_id: str) -> str:
@@ -260,9 +331,16 @@ class Store:
 
     def sessions(self) -> list[dict]:
         with self.lock:
-            return [{"session_id": k,
-                     "messages": len(v.get("messages", [])),
-                     "archive": len(v.get("archive") or []),
-                     "has_summary": bool(v.get("summary")),
-                     "updated": v.get("updated", 0)}
-                    for k, v in self.data.items()]
+            out = []
+            for k, v in self.data.items():
+                node = v if isinstance(v, dict) else {}
+                ep = node.get("episode") if isinstance(node.get("episode"), dict) else {}
+                out.append({"session_id": k,
+                            "messages": len(v.get("messages", [])),
+                            "archive": len(v.get("archive") or []),
+                            "has_summary": bool(v.get("summary")),
+                            "updated": v.get("updated", 0),
+                            # 附加字段：老调用方不认也无所谓
+                            "episode_messages": len(ep.get("messages") or []),
+                            "episode_chars": int(ep.get("chars") or 0)})
+            return out

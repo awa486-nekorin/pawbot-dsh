@@ -32,8 +32,12 @@ _PROMPT = (
     "可以丢掉：寒暄、重复、表情包、纯语气词。\n"
     "要求：第三人称陈述，像日记，不要分点、不要标题、不要写「总结」二字；"
     "最多 {limit} 字；只输出 JSON。\n"
-    "认人：对话里「昵称(尾号1234)」的尾号才是身份，同名不同尾号是不同的人；"
-    "小结里提到人时写成「昵称(尾号1234)」，别把两个人的话、观点合到一个人头上。"
+    "认人：对话里「昵称(uid:123456789)」的**完整 QQ 号（uid）**才是身份。"
+    "昵称会改、尾号后四位会撞车：同名或同尾号但 uid 不同，就是不同的人，绝不能合并；"
+    "只凭昵称或尾号相同也不能当成同一个人。"
+    "写「昵称(uid未知)」的说明没拿到可验证的 QQ 号 —— 保持未知，别猜成某一个人，"
+    "也别并进同名的人。"
+    "小结里提到人时写成「昵称(uid:完整QQ号)」，别把两个人的话、观点合到一个人头上。"
     "「我（大肥鱼）」是这个 AI 群友自己，小结里称「大肥鱼」。\n"
     "注意：这份摘要不会展示给任何人，所以不要写「请告诉我」「如果需要」这类回应性的话。\n\n"
     "【已有小结】\n{prev}\n\n"
@@ -47,6 +51,10 @@ def _render(rows: list[dict], max_chars: int = 2500) -> str:
 
     截断按**整行**从尾部取（和 mem/write.py 的 `_渲染` 同一套），
     不按字元切——按字元切会把行首的 `[HH:MM] 谁：` 前缀削掉，判官就认不出谁说的。
+
+    说话人只认**完整、可验证的 QQ 号**（`昵称(uid:123456789)`）；取不到 uid 时
+    写「昵称(uid未知)」，不拿昵称或尾号猜身份。私聊里连昵称/uid 都没有的行仍写
+    「对方」——在场只有大肥鱼和对方，不凭空造一个「群友」。
     """
     rows = [r for r in rows if str(r.get("content") or "").strip()]
     # 基准日取最后一条，跟 ctxwin（模型看到的上下文）同一套口径，两边不会打架
@@ -56,7 +64,10 @@ def _render(rows: list[dict], max_chars: int = 2500) -> str:
         content = str(r.get("content") or "").strip()
         if not content:
             continue
-        who = ctxwin.speaker(r) if (r.get("role") == "assistant" or r.get("who")) else "对方"
+        has_identity = (r.get("role") == "assistant"
+                        or str(r.get("who") or "").strip()
+                        or str(r.get("uid") or "").strip())
+        who = ctxwin.speaker(r) if has_identity else "对方"
         stamp = ctxwin._fmt_time(float(r.get("ts") or ref), ref)
         lines.append(f"{stamp} {who}：{content[:200]}")
     if not lines:

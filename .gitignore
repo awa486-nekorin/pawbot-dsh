@@ -76,3 +76,14 @@ app/.data.pawbot-migration/
 
 # 上传包产物（2026-10-27）
 dist/
+
+# 上传 GitHub 前（2026-11-02）：以下都不是源码，且指向仓库外的真实数据/大目录/本机密钥
+# app/data 与 napcat 在启用「数据分离」后是目录联接（junction），walk 进去会读到真实人设/记忆/QQ 会话
+app/data/
+napcat/
+# 本地 MC sidecar（637MB，随包分发时由 scripts/pack-no-mc.py 排除）
+app/minecraft-sidecar/
+# 本机 SCP 同步配置：含真实 ECS 公网 IP / 用户名 / SSH 私钥路径
+scripts/scp-sync.json
+# 只有 BOM/编码备份意义的中间文件
+*.bak-utf8

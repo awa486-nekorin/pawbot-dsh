@@ -1,6 +1,6 @@
 """每日日記：把前一天的群聊經歷合成一篇第一人稱日記，隔天還能自然想起。
 
-日記檔在 ``data/diary/YYYY-MM-DD.md``，一天一篇，跨群合併成「我今天」的視角。
+日記檔在 ``content/diary/YYYY-MM-DD.md``，一天一篇，跨群合併成「我今天」的視角。
 判官掛了就用機械拼接兜底，並在檔尾標「（機械合併）」——至少不會缺一天。
 """
 
@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 
 from . import judge
+from . import paths as layout
 from .log import log
 
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -45,12 +46,13 @@ def _group_of(row: dict) -> str:
 
 
 class Diary:
-    def __init__(self, base_dir: str, config):
+    def __init__(self, base_dir: str, config, *, paths=None):
         self.base_dir = base_dir
         self.config = config
+        self.paths = paths if paths is not None else layout.resolve(base_dir, config)
         self.enabled = bool(config.get("diary.enabled", True))
-        directory = config.get("diary.dir", "data/diary")
-        self.dir = directory if os.path.isabs(directory) else os.path.join(base_dir, directory)
+        self.dir = self.paths.setting(config.get("diary.dir", ""),
+                                      kind="content", default="diary")
 
     # ------------------------------------------------------------ 路径与格式
     def path_for(self, day: str) -> str:

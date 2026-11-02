@@ -35,6 +35,7 @@ class MessageEvent(Event):
     reply_id: str | None = None
     quoted_text: str = ""              # 感知层补：被引用那条的正文
     quoted_from: str = ""              # 感知层补：被引用那条是谁发的
+    quoted_uid: str = ""               # 感知层补：被引用那条的 QQ 号（优先于按昵称反查）
     quoted_is_self: bool = False       # 感知层补：引用的那条是不是自己发的
     quoted_chain: list[dict] = field(default_factory=list)  # 感知层补：最多三层引用
     image_desc: str = ""               # 感知层补：本消息图片的视觉描述
@@ -63,6 +64,33 @@ class MessageEvent(Event):
     @property
     def role(self) -> str:
         return self.sender.get("role", "member")
+
+    def quoted_uid_at(self, depth: int = 0) -> str:
+        """第 depth 层被引用者的 QQ 号；0 层优先用感知层填好的 `quoted_uid`。
+
+        `quoted_chain` 的每一项是 `{depth, from, text, images, uid?}`。
+        感知层（perceive.py，另一个 owner）以后填 uid 时不用改这里；没填就返回
+        空串，让下游自己决定「没有 uid 就不要按昵称硬猜」。
+        """
+        if depth <= 0:
+            direct = str(getattr(self, "quoted_uid", "") or "").strip()
+            if direct:
+                return direct
+        chain = getattr(self, "quoted_chain", None) or []
+        if 0 <= depth < len(chain) and isinstance(chain[depth], dict):
+            return str(chain[depth].get("uid") or "").strip()
+        return ""
+
+    @property
+    def quoted_uids(self) -> list[str]:
+        """引用链上能拿到的 uid（0 层在前，去重、去空）。"""
+        out: list[str] = []
+        chain = getattr(self, "quoted_chain", None) or []
+        for depth in range(max(1, len(chain))):
+            uid = self.quoted_uid_at(depth)
+            if uid and uid not in out:
+                out.append(uid)
+        return out
 
 
 @dataclass

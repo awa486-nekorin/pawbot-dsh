@@ -6,10 +6,12 @@
   ``http``（自建端点，POST 上传 / GET 下载 + Bearer）。
 - Bundle 是 ``tar.gz``，内含 ``persona.md``、``memory/…``、``config.json``、
   ``manifest.json``（版本、时间、逐条 sha256、pawbot 版本）。
+  包里的 ``target`` 永远是「相对数据根」的旧写法（persona.md / memory/x / sessions.json…），
+  跨版本可读；落盘时再按 ``pawbot.paths`` 的布局表分到 content/ 还是 state/。
 - ``sync.passphrase`` 非空就加密（AES-256-GCM + PBKDF2-HMAC-SHA256）；
   未加密时**禁止**上传 config.json（fail-closed，防止把 API key 明文丢上云）。
-- pull 默认不覆盖 ``data/config.json``，只写 ``data/config.synced.json`` 并给 diff；
-  只有 ``overwrite_config=true`` 才覆盖，覆盖前先备份到 ``data/backup-sync-<时间>/``。
+- pull 默认不覆盖 ``config.json``，只写 ``config.synced.json`` 并给 diff；
+  只有 ``overwrite_config=true`` 才覆盖，覆盖前先备份到 ``<DataRoot>/backup-sync-<时间>/``。
 - 返回值和日志里不出现 password / token / passphrase 的值；异常消息会先做脱敏。
 """
 
@@ -33,6 +35,7 @@ import urllib.request
 from typing import Any
 
 from . import __version__ as PAWBOT_VERSION
+from . import paths as layout
 from .config import DEFAULT
 from .log import log
 
@@ -48,6 +51,8 @@ MANIFEST_NAME = "manifest.json"
 CONFIG_TARGET = "config.json"
 PERSONA_TARGET = "persona.md"
 CONFIG_SYNCED = "config.synced.json"
+CONTENT_PREFIX = "content/"
+STATE_PREFIX = "state/"
 
 ENCRYPTION_ALGO = "AES-256-GCM"
 ENCRYPTION_KDF = "PBKDF2-HMAC-SHA256"
@@ -58,13 +63,15 @@ _NONCE_LEN = 12
 _KDF_ITERATIONS = 200_000
 _HTTP_TIMEOUT = 30.0
 
-# 记忆相关的 data/ 相对目录（只同步这些，data/brain、data/browser 永不进包）
+# 记忆相关的目录 → bundle 前缀。默认目录名由 pawbot.paths 决定（content/<名字>），
+# 这里只留「配置键 / 默认名 / 包里前缀」三件事。
 _MEMORY_DIR_KEYS = (
-    ("persona.memory_dir", "data/memory", "memory"),
-    ("people.dir", "data/people", "people"),
-    ("longmem.dir", "data/longmem", "longmem"),
-    ("diary.dir", "data/diary", "diary"),
+    ("persona.memory_dir", "memory", "memory"),
+    ("people.dir", "people", "people"),
+    ("longmem.dir", "longmem", "longmem"),
+    ("diary.dir", "diary", "diary"),
 )
+# sessions/media_ledger 属 state（机器状态），relations/memes 属 content（可搬走）
 _MEMORY_FILES = ("sessions.json", "relations.json", "media_ledger.json", "memes.json")
 
 _EXCLUDED_DIRS = {"brain", "browser", "backup", "backup-sync", "napcat",
@@ -282,49 +289,108 @@ def _safe_relpath(name: str) -> str:
     return "/".join(parts)
 
 
-def _data_dir(base_dir: str) -> str:
-    return os.path.abspath(os.path.join(base_dir, "data"))
+def _layout(base_dir: str, config=None) -> layout.DataPaths:
+    """同步用的数据布局对象（数据根仍由 lifecycle 决定）。"""
+    return layout.resolve(base_dir, config)
 
 
-def _apply_path(base_dir: str, target: str) -> str:
-    """data 相对目标 → 绝对路径；再兜一层越界检查。"""
-    target = _safe_relpath(target)
-    data = _data_dir(base_dir)
-    dest = os.path.abspath(os.path.join(data, *target.split("/")))
-    if dest != data and not dest.startswith(data + os.sep):
+def _data_dir(base_dir: str, config=None) -> str:
+    """数据根。批次 2 之后 ``<app>/data`` 是指向它的目录联接，两者等价。"""
+    return _layout(base_dir, config).root
+
+
+def _strip_layer_prefix(target: str) -> str:
+    """把 content/ state/ data/ 前缀去掉，得到「相对数据根」的规范名字。"""
+    norm = str(target or "").replace("\\", "/")
+    for prefix in ("content/", "state/", "data/"):
+        if norm.startswith(prefix):
+            return norm[len(prefix):]
+    return norm
+
+
+def _apply_path(base_dir: str, target: str, config=None) -> str:
+    """包里的 ``target``（相对数据根）→ 本机绝对路径。
+
+    ``target`` 保持批次 2 的旧写法不变（persona.md / memory/x / sessions.json…），
+    这样老同步包和新同步包都能读；落盘位置按布局表分 content/ 还是 state/，
+    并再兜一层越界检查。显式带 ``content/`` / ``state/`` 前缀的目标按前缀落位。
+    """
+    raw = _safe_relpath(target)
+    paths = _layout(base_dir, config)
+    norm = raw.replace("\\", "/")
+    if norm.startswith((CONTENT_PREFIX, STATE_PREFIX)):
+        kind, name = norm.split("/", 1)
+        return paths.canonical(kind, name)
+    name = _strip_layer_prefix(norm)
+    if not name:
+        return paths.root
+    layer = layout.classify(name)
+    if layer == "content":
+        return paths.content(name)
+    if layer == "state":
+        return paths.state(name)
+    # 布局表里没有的名字：仍在数据根（与批次 2 一致），并做越界检查
+    root = os.path.abspath(paths.root)
+    dest = os.path.abspath(os.path.join(root, *name.split("/")))
+    if dest != root and not dest.startswith(root + os.sep):
         raise SyncError("PATH_TRAVERSAL", f"目标路径越界：{target}")
     return dest
 
 
-def _resolve_data_dir(config, base_dir: str, dotted: str, default: str) -> tuple[str, str]:
-    """配置里的目录 → (绝对路径, data 相对路径)。只允许落在 data/ 内。"""
-    raw = str(_info_get(config, dotted, default) or default)
-    path = os.path.expanduser(raw)
-    if not os.path.isabs(path):
-        path = os.path.join(base_dir, path)
-    path = os.path.abspath(path)
-    data = _data_dir(base_dir)
-    if path == data:
-        return path, ""
-    if path.startswith(data + os.sep):
-        return path, os.path.relpath(path, data).replace(os.sep, "/")
-    default_rel = default.replace("data" + os.sep, "").replace("data/", "").replace("\\", "/")
-    return os.path.join(data, *default_rel.split("/")), default_rel
+def _config_value(config, dotted: str, default=None):
+    """读一个配置值；None 一律当默认（假配置对象可能抛异常，也在 _info_get 里兜住）。"""
+    value = _info_get(config, dotted, default)
+    return default if value is None else value
+
+
+def _memory_dir(config, base_dir: str, dotted: str, default_name: str) -> tuple[str, str]:
+    """记忆目录 → (绝对路径, 包内前缀)。
+
+    默认（``content/people`` 或旧写法 ``data/people``）就用规范名「people」，
+    用户自己改到别的目录时沿用它的相对名，保持旧包结构（``memory/people/…``）。
+    """
+    paths = _layout(base_dir, config)
+    raw = _config_value(config, dotted, "")
+    abs_dir = os.path.abspath(paths.setting(raw, kind="content", default=default_name))
+    standard = {os.path.normcase(abs_dir) for abs_dir in (
+        os.path.abspath(paths.canonical("content", default_name)),
+        os.path.abspath(paths.legacy(default_name)),
+    )}
+    if os.path.normcase(abs_dir) in standard:
+        return abs_dir, default_name
+    try:
+        rel = os.path.relpath(abs_dir, paths.root)
+    except ValueError:
+        return abs_dir, default_name
+    prefix = rel.replace(os.sep, "/")
+    if prefix.startswith("..") or not prefix:
+        return abs_dir, default_name
+    return abs_dir, prefix
 
 
 def _persona_source(config, base_dir: str) -> tuple[str, str]:
-    """人设源文件 → (绝对路径, data 相对目标)。target 固定 persona.md，逻辑上只有一份。"""
-    raw = str(_info_get(config, "persona.file", "data/persona.md") or "data/persona.md")
-    path = os.path.expanduser(raw)
-    if not os.path.isabs(path):
-        path = os.path.join(base_dir, path)
-    path = os.path.abspath(path)
-    data = _data_dir(base_dir)
-    if path.startswith(data + os.sep):
-        rel = os.path.relpath(path, data).replace(os.sep, "/")
-    else:
-        rel = PERSONA_TARGET
-    return path, (PERSONA_TARGET if rel.startswith("..") else rel)
+    """人设源文件 → (绝对路径, 包内 target)。target 固定 persona.md，逻辑上只有一份。"""
+    paths = _layout(base_dir, config)
+    raw = _config_value(config, "persona.file", "")
+    abs_path = paths.setting(raw, kind="content", default="persona.md")
+    return abs_path, PERSONA_TARGET
+
+
+def _persona_apply_target(config, base_dir: str) -> str:
+    """pull 时本地人设的落点（相对数据根的写法，交给 ``_apply_path`` 解析）。"""
+    abs_path, _rel = _persona_source(config, base_dir)
+    paths = _layout(base_dir, config)
+    if os.path.normcase(os.path.abspath(abs_path)) == os.path.normcase(
+            os.path.abspath(paths.content("persona.md"))):
+        return PERSONA_TARGET
+    try:
+        rel = os.path.relpath(abs_path, paths.root)
+    except ValueError:
+        return PERSONA_TARGET
+    rel = rel.replace(os.sep, "/")
+    if rel.startswith(".."):
+        return PERSONA_TARGET
+    return rel
 
 
 def _junk_file(name: str) -> bool:
@@ -414,8 +480,12 @@ def _now_local() -> str:
 # ---------------------------------------------------------------- Manifest / Bundle
 
 def _collect_entries(section: dict, config, base_dir: str) -> dict[str, tuple[bytes, str]]:
-    """返回 bundle 路径 → (内容, data 相对目标)。"""
-    data_dir = _data_dir(base_dir)
+    """返回 bundle 路径 → (内容, 相对数据根的 target)。
+
+    内容树一律从 content/ 取（人设、记忆、人物档案、长期经历、日记、表情包、
+    梗库、关系网）；state/ 只带原来那几个默认文件（会话、去重账本、配置）。
+    """
+    paths = _layout(base_dir, config)
     used: set[str] = set()
     payloads: dict[str, tuple[bytes, str]] = {}
 
@@ -433,8 +503,8 @@ def _collect_entries(section: dict, config, base_dir: str) -> dict[str, tuple[by
         add(persona_path, "persona.md", PERSONA_TARGET)
 
     if section["include_memory"]:
-        for dotted, default, kind in _MEMORY_DIR_KEYS:
-            root, rel = _resolve_data_dir(config, base_dir, dotted, default)
+        for dotted, default_name, kind in _MEMORY_DIR_KEYS:
+            root, rel = _memory_dir(config, base_dir, dotted, default_name)
             if not rel:
                 continue
             for abs_path in _walk_files(root):
@@ -442,19 +512,22 @@ def _collect_entries(section: dict, config, base_dir: str) -> dict[str, tuple[by
                 target = f"{rel}/{child}"
                 add(abs_path, target)
         for name in _MEMORY_FILES:
-            abs_path = os.path.join(data_dir, name)
+            # sessions/media_ledger 在 state/，relations/memes 在 content/
+            layer = layout.classify(name)
+            abs_path = (paths.state(name) if layer == "state" else paths.content(name))
             if os.path.isfile(abs_path) and not os.path.islink(abs_path):
                 add(abs_path, name)
 
     if section["include_stickers"]:
-        root = os.path.join(data_dir, "stickers")
+        root = paths.setting(_config_value(config, "persona.stickers_dir", ""),
+                             kind="content", default="stickers")
         for abs_path in _walk_files(root):
             child = os.path.relpath(abs_path, root).replace(os.sep, "/")
             target = f"stickers/{child}"
             add(abs_path, target, f"stickers/{child}")
 
     if section["include_config"]:
-        config_path = os.path.join(data_dir, "config.json")
+        config_path = paths.state("config.json")
         if os.path.isfile(config_path):
             add(config_path, CONFIG_TARGET, CONFIG_TARGET)
 
@@ -916,9 +989,9 @@ def _config_diff(local: dict, remote: dict) -> dict:
     }
 
 
-def _backup_dir(base_dir: str) -> str:
+def _backup_dir(base_dir: str, config=None) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-    root = os.path.join(_data_dir(base_dir), f"backup-sync-{stamp}")
+    root = os.path.join(_data_dir(base_dir, config), f"backup-sync-{stamp}")
     candidate = root
     index = 2
     while os.path.exists(candidate):
@@ -927,17 +1000,18 @@ def _backup_dir(base_dir: str) -> str:
     return candidate
 
 
-def _backup_files(base_dir: str, targets: list[str]) -> tuple[str, list[str]]:
-    """覆盖前备份（保持 data 相对路径）；返回 (备份目录, 备份了哪些)。"""
-    existing = [target for target in targets if os.path.isfile(_apply_path(base_dir, target))]
+def _backup_files(base_dir: str, targets: list[str],
+                  config=None) -> tuple[str, list[str]]:
+    """覆盖前备份（按 target 的相对路径存放）；返回 (备份目录, 备份了哪些)。"""
+    existing = [target for target in targets
+                if os.path.isfile(_apply_path(base_dir, target, config))]
     if not existing:
         return "", []
-    backup = _backup_dir(base_dir)
+    backup = _backup_dir(base_dir, config)
     saved: list[str] = []
-    data = _data_dir(base_dir)
     for target in sorted(set(existing)):
-        source = _apply_path(base_dir, target)
-        relative = os.path.relpath(source, data).replace(os.sep, "/")
+        source = _apply_path(base_dir, target, config)
+        relative = _strip_layer_prefix(target)
         destination = os.path.join(backup, *relative.split("/"))
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         shutil.copy2(source, destination)
@@ -995,11 +1069,12 @@ def _read_last(config, key: str) -> str:
 
 def pull(config, base_dir: str, dry: bool = False,
          overwrite_config: bool | None = None) -> dict:
-    """下载并应用。默认不动 data/config.json，只写 config.synced.json。"""
+    """下载并应用。默认不动 config.json，只写 config.synced.json。"""
     started = time.perf_counter()
     section = sync_section(config)
     adapter = make_adapter(section, base_dir)
     passphrase = str(section.get("passphrase") or "")
+    paths = _layout(base_dir, config)
 
     raw, remote_name = _download(adapter, passphrase)
     manifest, entries = _read_bundle(raw, passphrase)
@@ -1009,7 +1084,7 @@ def pull(config, base_dir: str, dry: bool = False,
     include_config = section["include_config"]
     include_stickers = section["include_stickers"]
 
-    persona_target = _persona_source(config, base_dir)[1]
+    persona_target = _persona_apply_target(config, base_dir)
 
     writes: list[tuple[str, bytes]] = []
     applied: list[str] = []
@@ -1048,7 +1123,7 @@ def pull(config, base_dir: str, dry: bool = False,
     pending: list[tuple[str, bytes]] = []
     for target, blob in writes:
         try:
-            with open(_apply_path(base_dir, target), "rb") as handle:
+            with open(_apply_path(base_dir, target, config), "rb") as handle:
                 current = handle.read()
         except OSError:
             current = None
@@ -1066,7 +1141,8 @@ def pull(config, base_dir: str, dry: bool = False,
         "diff": {},
     }
 
-    local_config_path = os.path.join(_data_dir(base_dir), "config.json")
+    # 本机配置：state/config.json（未迁移时回落数据根那份）
+    local_config_path = paths.state("config.json")
     local_config = _read_json(local_config_path, {}) or {}
 
     if remote_config is not None:
@@ -1089,15 +1165,16 @@ def pull(config, base_dir: str, dry: bool = False,
     backup_path = ""
     backed_up: list[str] = []
     if not dry:
-        backup_path, backed_up = _backup_files(base_dir, target_paths)
+        backup_path, backed_up = _backup_files(base_dir, target_paths, config)
 
     if not dry:
         for target, blob in writes:
-            _atomic_write(_apply_path(base_dir, target), blob)
+            _atomic_write(_apply_path(base_dir, target, config), blob)
             applied.append(target)
 
         if remote_config is not None and include_config:
-            synced_path = os.path.join(_data_dir(base_dir), CONFIG_SYNCED)
+            # 拉下来的配置留一份旁证；它是本机状态，名字不在布局表里，仍放数据根
+            synced_path = os.path.join(paths.root, CONFIG_SYNCED)
             payload = json.dumps(remote_config, ensure_ascii=False, indent=2).encode("utf-8")
             _atomic_write(synced_path, payload)
             config_result["synced_path"] = f"data/{CONFIG_SYNCED}"
@@ -1106,7 +1183,7 @@ def pull(config, base_dir: str, dry: bool = False,
                 merged = config_result.pop("_merged", None)
                 if merged is None:
                     merged = copy.deepcopy(remote_config)
-                config_path = os.path.join(_data_dir(base_dir), "config.json")
+                config_path = paths.state("config.json")
                 _atomic_write(config_path,
                               json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8"))
                 config_result["overwritten"] = True
@@ -1183,6 +1260,12 @@ def _download(adapter: Adapter, passphrase: str) -> tuple[bytes, str]:
 
 
 def _target_category(target: str) -> str:
+    """包里 target 属于哪一类（决定 include_* 开关与落盘分类）。
+
+    ``target`` 用批次 2 的旧写法（persona.md / memory/x / sessions.json…），
+    老包和新包都能认；带 content/ 或 state/ 前缀的也接受。
+    """
+    target = _strip_layer_prefix(target)
     if target == CONFIG_TARGET:
         return "config"
     if target == PERSONA_TARGET or ("/" not in target and target.endswith(".md")):
@@ -1192,6 +1275,7 @@ def _target_category(target: str) -> str:
     for root in ("memory/", "people/", "longmem/", "diary/", "sessions/"):
         if target.startswith(root):
             return "memory"
+    # sessions/media_ledger → state；relations/memes → content；都归「记忆」这一开关
     if target in _MEMORY_FILES:
         return "memory"
     raise SyncError("BAD_BUNDLE", f"同步包里有未知路径：{target}")

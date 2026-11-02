@@ -13,6 +13,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 from mcp.server.fastmcp import FastMCP
 
 from bilibili_api import video, search, comment, Credential, dynamic, opus
@@ -25,22 +26,52 @@ from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 
 # ========== 初始化 ==========
 
-CRED_FILE = Path(__file__).parent / "bili_credential.json"
+# 凭证落点：默认读 bot 数据根 state/ 里那份（由 pawbot.bili_credentials 维护），
+# 不再往 vendor 包目录里写。老的 bili_credential.json 只在没有其它位置时只读兼容。
+try:  # 作为 pawbot.bili_mcp.mcp_server 导入时走这里
+    from .. import bili_credentials as _creds
+except Exception:  # pragma: no cover - 独立脚本方式运行时没有包
+    _creds = None
+
+
+def credential_path() -> Path:
+    if _creds is not None:
+        try:
+            return Path(_creds.vendor_path())
+        except Exception:
+            pass
+    env = os.environ.get("PAWBOT_BILI_CREDENTIAL_FILE", "").strip()
+    if env:
+        return Path(env)
+    root = os.environ.get("PAWBOT_DATA_DIR", "").strip()
+    if root:
+        return Path(root) / "state" / "bili_credential.json"
+    return Path(__file__).parent / "bili_credential.json"
+
 
 mcp = FastMCP("bilibili-mcp")
 
 
 def load_credential() -> Credential:
-    """从文件加载凭证"""
-    if not CRED_FILE.exists():
+    """从文件加载凭证（字段缺一个也能用：读只要 SESSDATA）。"""
+    path = credential_path()
+    if not path.exists():
         return None
-    with open(CRED_FILE) as f:
-        data = json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    sessdata = str(data.get("sessdata") or "").strip()
+    if not sessdata:
+        return None
     return Credential(
-        sessdata=data.get("sessdata", ""),
-        bili_jct=data.get("bili_jct", ""),
-        buvid3=data.get("buvid3") or "",
-        dedeuserid=data.get("dedeuserid", ""),
+        sessdata=sessdata,
+        bili_jct=str(data.get("bili_jct") or "").strip(),
+        buvid3=str(data.get("buvid3") or "").strip(),
+        dedeuserid=str(data.get("dedeuserid") or "").strip(),
     )
 
 
@@ -164,15 +195,24 @@ async def bili_login_check() -> str:
         }, ensure_ascii=False)
 
     elif state == QrCodeLoginEvents.DONE:
-        # 登录成功，保存凭证
+        # 登录成功，保存凭证（合并写：不覆盖已有的 bili_jct 等字段）
         cred = _login_session.get_credential()
-        with open(CRED_FILE, "w") as f:
-            json.dump({
-                "sessdata": cred.sessdata,
-                "bili_jct": cred.bili_jct,
-                "buvid3": cred.buvid3,
-                "dedeuserid": cred.dedeuserid,
-            }, f)
+        payload = {
+            "sessdata": cred.sessdata,
+            "bili_jct": cred.bili_jct,
+            "buvid3": cred.buvid3,
+            "dedeuserid": cred.dedeuserid,
+        }
+        if _creds is not None:
+            try:
+                _creds.merge(payload, path=str(credential_path()))
+            except Exception:
+                pass
+        if not credential_path().exists():
+            with open(credential_path(), "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
         _login_session = None
         # 清理二维码文件
         qr_file = Path(__file__).parent / "qrcode_login.png"
@@ -303,13 +343,14 @@ async def bili_search(
 # ========== Tool 2: 获取评论 ==========
 
 @mcp.tool()
-async def bili_comments(bvid: str, num: int = 30) -> str:
+async def bili_comments(bvid: str, num: int = 30, sort: str = "like") -> str:
     """
-    获取B站视频的热门评论
+    获取B站视频的评论
 
     Args:
         bvid: 视频BV号，如"BV1uNk1YxEJQ"
         num: 获取评论数量，默认30
+        sort: "like"=按点赞（默认，热门评论）；"time"=按时间（新→旧，能翻到底）
     
     Returns:
         JSON格式的评论列表，包含用户名、评论内容、点赞数、回复数
@@ -327,7 +368,7 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 oid=aid,
                 type_=comment.CommentResourceType.VIDEO,
                 page_index=page,
-                order=comment.OrderType.LIKE,
+                order=comment.OrderType.LIKE if sort != "time" else comment.OrderType.TIME,
                 credential=cred,
             )
             replies = resp.get("replies") or []
@@ -367,60 +408,200 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
 
 # ========== Tool 3: 获取字幕 ==========
 
+# 字幕地址是**外部数据**（接口返回什么就是什么）：只允许官方 B 站 CDN 的 https。
+# 不接受 file/data/javascript、IP 字面量、localhost、自定义端口、带用户信息的 URL，
+# 也不允许重定向把请求带到别的主机（逐跳校验，最多 3 跳）。
+_ALLOWED_SUBTITLE_DOMAINS = ("hdslb.com", "bilibili.com", "bilivideo.com")
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+class SubtitleUrlRejected(Exception):
+    """字幕地址不是官方 B 站 CDN 的 https 地址（不接受就绝不发请求）。"""
+
+
+def _safe_subtitle_url(raw) -> str:
+    """校验并规整字幕地址；不合法就抛 SubtitleUrlRejected（不会去连）。"""
+    text = str(raw or "").strip()
+    if not text:
+        raise SubtitleUrlRejected("空地址")
+    if text.startswith("//"):
+        text = "https:" + text
+    try:
+        parts = urlsplit(text)
+    except ValueError as e:
+        raise SubtitleUrlRejected(f"地址解析失败（{type(e).__name__}）") from e
+    scheme = (parts.scheme or "").lower()
+    if scheme != "https":
+        raise SubtitleUrlRejected(f"只允许 https（不是 {scheme or '空'}）")
+    if parts.username or parts.password:
+        raise SubtitleUrlRejected("地址里不能带用户信息")
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise SubtitleUrlRejected("没有主机名")
+    if host == "localhost" or ":" in host or host.replace(".", "").isdigit():
+        raise SubtitleUrlRejected("不接受 IP / localhost 主机")
+    try:
+        port = parts.port
+    except ValueError as e:
+        raise SubtitleUrlRejected("端口不合法") from e
+    if port not in (None, 443):
+        raise SubtitleUrlRejected(f"不接受端口 {port}")
+    if not any(host == base or host.endswith("." + base)
+               for base in _ALLOWED_SUBTITLE_DOMAINS):
+        raise SubtitleUrlRejected(f"不是官方域名（{host}）")
+    return text
+
+
+async def _download_subtitle_json(raw_url: str, *, max_hops: int = 3):
+    """下载字幕 JSON：只连官方 https，重定向逐跳校验（不自动跟）。"""
+    import aiohttp
+
+    url = _safe_subtitle_url(raw_url)
+    async with aiohttp.ClientSession() as session:
+        for hop in range(max_hops + 1):
+            async with session.get(url, allow_redirects=False) as resp:
+                status = int(getattr(resp, "status", 0) or 0)
+                if status in _REDIRECT_STATUSES:
+                    if hop >= max_hops:
+                        raise SubtitleUrlRejected("重定向次数过多")
+                    headers = getattr(resp, "headers", None) or {}
+                    location = headers.get("Location", "")
+                    url = _safe_subtitle_url(location)
+                    continue
+                if status != 200:
+                    raise RuntimeError(f"HTTP {status}")
+                return await resp.json()
+    raise SubtitleUrlRejected("重定向次数过多")
+
+
+def _pick_subtitle(subtitles: list) -> dict | None:
+    """挑要读的字幕：**优先 AI 中文字幕**（ai-zh），再人工中文，再任意中文，最后第一条。
+
+    以前只按固定顺序找 ["ai-zh", "zh-CN", "zh"]，B 站换了 lan 标签（ai-zh-CN、
+    zh-Hans 之类）就会漏掉 AI 中文字幕、退到外语字幕上去。
+    """
+    可用 = [s for s in subtitles if isinstance(s, dict) and s.get("subtitle_url")]
+
+    def lan(s) -> str:
+        return str(s.get("lan") or "").strip().lower()
+
+    def 中文(s) -> bool:
+        return "zh" in lan(s) or "中" in str(s.get("lan_doc") or "")
+
+    梯队 = [
+        [s for s in 可用 if lan(s) == "ai-zh"],
+        [s for s in 可用 if lan(s).startswith("ai-") and 中文(s)],
+        [s for s in 可用 if lan(s) in ("zh-cn", "zh", "zh-hans", "zh-hant")],
+        [s for s in 可用 if 中文(s)],
+        [s for s in 可用 if lan(s).startswith("ai-")],
+        可用,
+    ]
+    已选: set[int] = set()
+    for 组 in 梯队:
+        for s in 组:
+            if id(s) in 已选:
+                continue
+            已选.add(id(s))
+            return s
+    return None
+
+
 @mcp.tool()
 async def bili_subtitle(bvid: str) -> str:
     """
-    获取B站视频的AI字幕（语音转文字）
+    获取B站视频的字幕（优先 AI 生成的中文字幕）
 
     Args:
         bvid: 视频BV号，如"BV1uNk1YxEJQ"
     
     Returns:
-        视频的完整字幕文本
+        视频的完整字幕文本；没字幕/没登录时回显式的 error + code，不假装成功
     """
-    cred = get_cred()
-    v = video.Video(bvid=bvid, credential=cred)
+    try:
+        cred = get_cred()
+    except Exception as e:
+        return json.dumps({
+            "bvid": bvid, "code": "no_credential",
+            "error": f"没有 B 站登录凭证（{e}）",
+        }, ensure_ascii=False)
 
-    info = await v.get_info()
+    v = video.Video(bvid=bvid, credential=cred)
+    try:
+        info = await v.get_info()
+    except Exception as e:
+        return json.dumps({
+            "bvid": bvid, "code": "info_failed",
+            "error": f"拿视频信息失败：{e}",
+        }, ensure_ascii=False)
+
     cid = info.get("cid", 0)
     if not cid and info.get("pages"):
         cid = info["pages"][0].get("cid", 0)
 
     if not cid:
-        return json.dumps({"error": "无法获取cid"}, ensure_ascii=False)
+        return json.dumps({
+            "bvid": bvid, "code": "no_cid", "error": "无法获取cid",
+        }, ensure_ascii=False)
 
-    subtitle_list = await v.get_subtitle(cid=cid)
-    subtitles = subtitle_list.get("subtitles", [])
+    try:
+        subtitle_list = await v.get_subtitle(cid=cid)
+    except Exception as e:
+        return json.dumps({
+            "bvid": bvid, "code": "subtitle_list_failed",
+            "error": f"字幕列表拿不到：{e}",
+        }, ensure_ascii=False)
+    subtitles = subtitle_list.get("subtitles", []) if isinstance(subtitle_list, dict) else []
 
     if not subtitles:
-        return json.dumps({"message": "该视频没有字幕"}, ensure_ascii=False)
+        return json.dumps({
+            "bvid": bvid, "code": "no_subtitle",
+            "message": "该视频没有字幕", "error": "该视频没有字幕",
+        }, ensure_ascii=False)
 
-    # 优先AI中文字幕
-    target = None
-    for s in subtitles:
-        if s.get("lan") in ["ai-zh", "zh-CN", "zh"]:
-            target = s
-            break
+    target = _pick_subtitle(subtitles)
     if not target:
-        target = subtitles[0]
+        return json.dumps({
+            "bvid": bvid, "code": "no_subtitle_url",
+            "error": "有字幕条目但都没有可下载地址",
+        }, ensure_ascii=False)
 
-    # 下载字幕
-    import aiohttp
-    sub_url = target.get("subtitle_url", "")
-    if sub_url.startswith("//"):
-        sub_url = "https:" + sub_url
+    # 下载字幕：地址来自外部接口，先校验 scheme/域名，再逐跳校验重定向
+    try:
+        sub_url = _safe_subtitle_url(target.get("subtitle_url", ""))
+    except SubtitleUrlRejected as e:
+        return json.dumps({
+            "bvid": bvid, "code": "subtitle_url_rejected",
+            "error": f"字幕地址不可信，拒绝下载：{e}",
+        }, ensure_ascii=False)
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(sub_url) as resp:
-            sub_data = await resp.json()
+    try:
+        sub_data = await _download_subtitle_json(sub_url)
+    except SubtitleUrlRejected as e:
+        return json.dumps({
+            "bvid": bvid, "code": "subtitle_url_rejected",
+            "error": f"字幕地址不可信，拒绝下载：{e}",
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "bvid": bvid, "code": "download_failed",
+            "error": f"字幕下载失败：{e}",
+        }, ensure_ascii=False)
 
-    texts = [item.get("content", "") for item in sub_data.get("body", [])]
-    full_text = "\n".join(texts)
+    if not isinstance(sub_data, dict):
+        return json.dumps({
+            "bvid": bvid, "code": "bad_subtitle_body", "error": "字幕内容不是 JSON 对象",
+        }, ensure_ascii=False)
+
+    texts = [str(item.get("content", "")) for item in (sub_data.get("body") or [])
+             if isinstance(item, dict)]
+    full_text = "\n".join(t for t in texts if t)
 
     return json.dumps({
         "bvid": bvid,
         "title": info.get("title", ""),
+        "lan": str(target.get("lan") or ""),
         "language": target.get("lan_doc", ""),
+        "generated": str(target.get("lan") or "").lower().startswith("ai-"),
         "segments": len(texts),
         "text": full_text,
     }, ensure_ascii=False)
@@ -1319,9 +1500,9 @@ async def bili_favorite_lists(uid: int = 0) -> str:
     if uid == 0:
         # 从凭证获取自己的UID
         import json as _json
-        with open(CRED_FILE) as f:
+        with open(credential_path(), encoding="utf-8") as f:
             data = _json.load(f)
-        uid = int(data.get("dedeuserid", 0))
+        uid = int(data.get("dedeuserid", 0) or 0)
 
     result = await favorite_list.get_video_favorite_list(uid=uid, credential=cred)
     fav_lists = []

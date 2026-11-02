@@ -11,6 +11,7 @@
 """
 
 from pawbot import groupinfo
+from pawbot import identity as identity_mod
 from pawbot import relations as relations_mod
 from pawbot.log import log
 from pawbot.plugin import on_message, on_notice
@@ -34,12 +35,31 @@ def _first_id(*values) -> str:
     return ""
 
 
-def _quoted_uid(bot, session_id: str, quoted_from: str, user_id) -> str:
-    """把「被引用者的昵称」映射回 QQ 号。
+def _quoted_uid(bot, session_id: str, quoted_from: str, user_id, event=None) -> str:
+    """把「被引用的人」映射回 QQ 号。
 
-    只看 store 最近窗口里带 uid 的真人消息；同名时取最近一条，
-    跳过说话人自己（自己引用自己不算互动）。
+    顺序：感知层的 `quoted_uid` → 引用链第一层的 uid → 窗口里**唯一**同名 uid。
+    最后一步只在「这个名字在窗口里只对应一个 uid」时才认；同名多号时返回空，
+    绝不取最近一条硬猜。自己引用自己不算互动。
     """
+    me = _digits(user_id)
+
+    direct = ""
+    if event is not None:
+        try:
+            direct = _digits(getattr(event, "quoted_uid", ""))
+        except Exception:
+            direct = ""
+        if not direct:
+            try:
+                chain = getattr(event, "quoted_chain", None) or []
+                if chain and isinstance(chain[0], dict):
+                    direct = _digits(chain[0].get("uid"))
+            except Exception:
+                direct = ""
+    if direct:
+        return "" if direct == me else direct
+
     target = " ".join(str(quoted_from or "").split())
     if not target:
         return ""
@@ -47,16 +67,9 @@ def _quoted_uid(bot, session_id: str, quoted_from: str, user_id) -> str:
         rows = bot.store.window(session_id, WINDOW)
     except Exception:
         return ""
-    me = _digits(user_id)
-    for row in reversed(list(rows or [])):
-        if not isinstance(row, dict) or row.get("role") == "assistant":
-            continue
-        if " ".join(str(row.get("who") or "").split()) != target:
-            continue
-        uid = _digits(row.get("uid"))
-        if uid and uid != me:
-            return uid
-    return ""
+    # 昵称反查只在没有歧义时成立：同名但不同号 → 放弃，不猜。
+    uids = identity_mod.uids_for_name(rows, target, exclude=[me])
+    return uids[0] if len(uids) == 1 else ""
 
 
 def _group_meta(rel, bot, gid) -> None:
@@ -93,10 +106,13 @@ async def note_message(ctx):
         except Exception as e:
             log.debug(f"关系网记名字失败：{type(e).__name__}")
 
-        # 1) 引用：谁回应了谁
-        if getattr(ev, "reply_id", None) and getattr(ev, "quoted_from", ""):
+        # 1) 引用：谁回应了谁。优先用感知层/引用链里的 uid，名字反查只在唯一时成立。
+        has_target = bool(getattr(ev, "quoted_from", "")
+                          or getattr(ev, "quoted_uid", "")
+                          or getattr(ev, "quoted_chain", None))
+        if getattr(ev, "reply_id", None) and has_target:
             other = _quoted_uid(bot, getattr(ev, "session_id", ""),
-                                getattr(ev, "quoted_from", ""), uid)
+                                getattr(ev, "quoted_from", ""), uid, event=ev)
             if other:
                 rel.note_interaction(uid, other, "reply", group_id=gid)
 

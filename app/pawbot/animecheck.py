@@ -32,6 +32,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import paths as layout
+
 MODEL = "gemini-3.8-flash"
 USER_AGENT = "PawBot/1.0"
 MAX_SIDE = 640
@@ -96,20 +98,23 @@ def _model_name(config) -> str:
     return name or MODEL
 
 
-def _stickers_dir(config) -> str:
+def _stickers_dir(config, base_dir: str | None = None) -> str:
+    """表情包目录：有 base_dir 时走统一布局，否则按老办法（相对 app 根）。"""
     try:
-        d = str(config.get("persona.stickers_dir", "") or "").strip()
+        raw = str(config.get("persona.stickers_dir", "") or "").strip()
     except Exception:
-        d = ""
-    if not d:
-        d = "data/stickers"
-    if not os.path.isabs(d):
-        d = os.path.join(_ROOT, d)
-    return d
+        raw = ""
+    base = str(base_dir or "").strip()
+    if base:
+        return layout.resolve(base, config).setting(raw, kind="content", default="stickers")
+    value = os.path.expanduser(raw) if raw else os.path.join("content", "stickers")
+    if os.path.isabs(value):
+        return value
+    return os.path.join(_ROOT, value)
 
 
-def cache_path(config) -> str:
-    return os.path.join(_stickers_dir(config), CACHE_NAME)
+def cache_path(config, base_dir: str | None = None) -> str:
+    return os.path.join(_stickers_dir(config, base_dir), CACHE_NAME)
 
 
 # ---------------------------------------------------------------- 看图
@@ -331,13 +336,14 @@ def _read_raw(raw_or_path) -> bytes | None:
         return None
 
 
-def is_anime_cached(raw_or_path, config, timeout: int = 30) -> bool | None:
+def is_anime_cached(raw_or_path, config, timeout: int = 30,
+                    base_dir: str | None = None) -> bool | None:
     """先查 sha1 缓存，miss 才打看图模型。只有 True/False 会落缓存。"""
     raw = _read_raw(raw_or_path)
     if not raw:
         return None
     digest = hashlib.sha1(raw).hexdigest()
-    path = cache_path(config)
+    path = cache_path(config, base_dir)
 
     with _CACHE_LOCK:
         _load_cache(path)

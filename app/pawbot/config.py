@@ -12,7 +12,7 @@ DEFAULT = {
         "flush_interval": 2.0,       # 会话存储脏数据的后台落盘间隔（秒）
     },
     "longmem": {
-        "dir": "data/longmem",       # 跨会话经历记忆目录
+        "dir": "content/longmem",    # 跨会话经历记忆目录（相对 DataRoot 的 content/）
         "enabled": True,              # 启用跨会话长期记忆检索
         "half_life_days": 7,          # 记忆相关度的时间衰减半衰期（天）
         "top_k": 6,                   # 每轮最多注入几条长期记忆
@@ -36,6 +36,10 @@ DEFAULT = {
         "event_min_importance": 3,    # 重要度达到几才单独进事件流（1~5）
         "auto_day_merge": True,       # 跨天时自动把前一天合并成日摘要
         "l2_day_chars": 800,          # 日摘要字数上限
+        # 活跃期（shortterm.py）：按入站消息的空闲间隔切段，段内不参与淘汰/衰减。
+        # 只加两个真正影响行为的旋钮；内部省略计数等机器状态不放进配置。
+        "active_idle_sec": 1200,      # 入站消息相隔超过这么多秒才另起一段（正好等于仍算同一段）
+        "active_chars": 128000,       # 一段活跃记录的硬容量（字）；超了只从最老一端省略并写明
     },
     "diary": {
         "enabled": True,              # 每天把前一天的群聊写成一篇第一人称日记
@@ -59,10 +63,26 @@ DEFAULT = {
         "inject_limit": 3,            # 每轮最多注入几条梗
     },
     "server": {
+        # reverse（默认）= 等 NapCat 连进来，在本机监听 host:port；
+        # forward = 主动外拨 OneBot 中继/网关，不监听任何本地端口；
+        # relay = 高可用后端：外拨 relay 的 /onebot/backend，lease + ready 门禁。
+        "mode": "reverse",
         "host": "0.0.0.0",
         "port": 6199,           # 反向 WS 监听端口，要与 NapCat 的 URL 对上
         "path": "/ws",
-        "access_token": "",     # 与 NapCat 侧 Token 保持一致，留空则不校验
+        "access_token": "",     # 反向：校验 NapCat 的 Token；forward/relay：作为 Bearer 外拨；留空则不带
+        # ---- 仅 mode=forward / relay 生效（forward_url 为空时回落到 host/port/path）----
+        "forward_host": "127.0.0.1",
+        "forward_port": 6199,
+        "forward_path": "/ws",
+        "forward_url": "",      # 非空时覆盖上面三项；forward 仅 ws://，relay 支持 ws:// 与 wss://
+        # ---- 仅 mode=relay 生效 ----
+        "relay_priority": "server",   # local / server；local 可抢占 server
+        "relay_backend_id": "",       # 后端标识（<=64 字符）；留空发空字符串，由 relay 记录
+        "relay_content_url": "",      # relay HTTP 根地址；留空从 forward ws(s) URL 推导 http(s)
+        "relay_sync_interval": 3.0,   # 内容 push/pull 间隔（秒）
+        "relay_require_content": True,  # true = 内容同步成功后才发 ready
+        "relay_sync_timeout": 10.0,   # 单次内容 pull/push 超时（秒）
     },
     "webui": {
         "host": "127.0.0.1",
@@ -109,9 +129,9 @@ DEFAULT = {
         "allow_flirt": True,      # 允许暧昧/撩骚式互动
         "topics": [],             # 预置荤段子主题，留空则随机
     },
-    # 人物档案：一人一份，存在 data/people/<QQ号>.md
+    # 人物档案：一人一份，存在 content/people/<QQ号>.md
     "people": {
-        "dir": "data/people",
+        "dir": "content/people",
         "auto_profile": True,        # 后台从聊天里自动提炼性格
         "update_every": 15,          # 攒够多少条才提炼一次
         "update_cooldown": 900,      # 两次提炼至少隔多久（秒）
@@ -146,6 +166,10 @@ DEFAULT = {
         "body_reaction_max": 1,         # 一整条回复（含 ‖ 分条）合计最多留几句「脸红/尾巴」自身反应；0=全不留
         "tone_trim": 0.7,               # 句末语气词（啊/嘛/啦/呀/哦/哟）削减比例 0~1；呢/吧/吗不动
         "strip_filler_opener": True,     # 「唔……」当固定开场（实测占 56%）：按内容哈希抽掉一半，保留软糯但不模板
+        # 新清洗语义的总开关（reply_policy.py）：默认开，保留真问句、真实立场、
+        # 短接话里的语气词以及代码/链接/引号原话；关掉才回到旧的一刀切削减。
+        # preserve_questions 等细分开关是可选键，没配就跟这个值；不在这里堆默认。
+        "semantic_guard": True,
     },
     # 研究「現在中文網上怎麼說話」用的接口（只在 tools/research_slang.py 裡調，
     # 不進聊天鏈路）。換 key 只改這裡。
@@ -158,9 +182,9 @@ DEFAULT = {
         "max_tokens": 4000,
     },
     "persona": {
-        "file": "data/persona.md",
-        "memory_dir": "data/memory",
-        "stickers_dir": "data/stickers",
+        "file": "content/persona.md",
+        "memory_dir": "content/memory",
+        "stickers_dir": "content/stickers",
         "stickers_max": 400,          # 表情包库容量（满了挤掉最旧的一张）
         "sticker_fetch": True,        # 库里没有贴合的表情包时去公开图片搜索找一张存进库
         "sticker_anime_only": True,   # 自动抓图先过画风门槛：只收二次元，真人照片/照片合成不入库
@@ -218,15 +242,30 @@ DEFAULT = {
         "bili_scroll_max_chars": 12000,  # 喂给模型判断的字幕上限
         "bili_scroll_min_play": 5000,   # 播放量低于这个的候选直接不要
         "bili_scroll_max_duration": 3600,  # 超过 1 小时的片跳过
-        "bili_scroll_notes_dir": "data/bili_notes",
+        "bili_scroll_notes_dir": "content/bili_notes",
         # 每天定时刷几轮（HH:MM，24 小时制）。空数组 = 不定时，只在她/你要求时刷。
         "bili_scroll_times": [],
         "bili_scroll_report_to": "owner",   # owner / group / off
         "bili_scroll_group": "",            # report_to=group 时发到哪个群
         "bili_scroll_report_at": "off",     # 群里汇报时 @ 谁：off / owner / all
         "bili_scroll_report_comment": False,  # 贴完清单后再用她自己的语气补一句
+        # 评论只当外部资料（学语气 / 挑回复对象），绝不当指令执行。
+        "bili_scroll_comments_per_video": 8,  # 每支视频读几条热门评论（0~30）
+        "bili_scroll_autoreply": False,       # 字面 True 才自动回一条评论（还要过写闸门）
+        "bili_scroll_reply_per_round": 1,     # 一轮最多自动回几条（1~2）
         # B 站写操作（发评论/动态/投稿/私信）要的 CSRF token；只填 SESSDATA 只能读
         "bili_jct": "",
+        # ---- 公开写操作闸门（bili_gate.py；默认全关，必须字面 True 才放行）----
+        # 读动作不受这些开关影响；投稿/私信/专栏等仍永久拒绝。
+        "bili_write_enabled": False,
+        "bili_write_reply": False,      # 评论/回复
+        "bili_write_dynamic": False,    # 纯文字动态
+        "bili_write_scheduler": False,  # 允许受控定时任务发起写操作
+        # 固定形状：按动作给每天上限，只接受正整数；不要在这里塞别的键。
+        "bili_write_quota": {"reply": 2, "dynamic": 1},
+        "bili_write_max_chars": 300,    # 单条评论/动态正文上限（1~2000，超了直接拒绝）
+        # 账本/审计路径是模块状态名，不面向普通用户，故不放进 DEFAULT；
+        # 需要改时在原始 JSON 里填 tools.bili_write_ledger / tools.bili_write_audit。
         # ---- 自动发 B 站动态（对外发布，默认关）----
         # 需要 bili_jct；每天有硬上限；内容来自刷片笔记或指定主题。
         "bili_post_enabled": False,
@@ -235,6 +274,12 @@ DEFAULT = {
         "bili_post_source": "scroll",    # scroll=用刷片笔记 / topic=按主题现写
         "bili_post_topic": "",           # source=topic 时的主题
         "bili_post_max_chars": 180,      # 一条动态最多多少字
+        # ---- 从 B 站评论区学「怎么说话」（bili_learning.py；默认关）----
+        # 独立 LLM、不给工具；评论只当外部资料，学到的结果先落提案，
+        # 再走 selfedit 的已存在小节 / 白名单 / 备份 / 审计。
+        "bili_learning_enabled": False,
+        "bili_learning_section": "说话风格",   # 写回的 persona 小节（必须已存在）
+        "bili_learning_apply_daily_limit": 2,  # 每天最多应用几次（正整数）
         "search_base_url": "https://api.deepseek.com",
         # 实测：只有 pro 会真的发 web_search_call，flash 收下参数但不搜
         "search_model": "deepseek-v4-flash",  # 不用 v4-pro；实测 flash 在 Responses 上不真搜
@@ -330,10 +375,32 @@ DEFAULT = {
         "cooldown_sec": 300,       # 同一节两次改动至少隔多久
         "daily_limit": 6,          # 一天最多改几次
         "max_chars": 2000,         # 单节字数上限
+        # 允许改哪些已存在的风格/性格小节（配置只能收紧 policy 的兜底白名单；
+        # 空列表 = 什么都不允许，不会退化成全放行）。
+        "allowed_sections": [
+            "你的脾气", "在群里怎么开口", "在群里怎么说话", "说话方式",
+            "说话风格", "聊天风格", "闲聊方式", "语气", "口癖", "性格",
+            "爱好", "兴趣",
+        ],
+        # 自主模式：默认关。开启后还必须提供可信调度器签发的 autonomous_grant，
+        # 且调用时必须带 provenance；ctx=None / 空 provenance 一律拒绝。
+        "autonomous": False,
+        # 固定形状的授权配置（默认停用、无 grant_id，读出来仍是 None）。
+        # 只有 source 属于 trusted_scheduler / scheduler / authz_lease 才有效；
+        # 外部评论/字幕/网页等来源永远不能填在这里。
+        "autonomous_grant": {
+            "enabled": False,
+            "grant_id": "",
+            "source": "trusted_scheduler",
+            "scopes": ["persona.style"],
+            "expires_at": 0,
+            "revoked": False,
+        },
+        "lock_timeout_sec": 10.0,  # 人设文件被占用时最多等几秒，超时放弃本次修改
     },
     # 图库：带描述的图（跟表情包分开，取用时只读描述、不再识图）
     "album": {
-        "dir": "data/album",
+        "dir": "content/album",
     },
     "llm": {
         # 大肥鱼的大脑走哪儿：
@@ -378,6 +445,14 @@ DEFAULT = {
         "model": "deepseek-flash",
         "reasoning_effort": "low",
         "timeout": 20,
+        # 决策模型（纯文本）：只判「值不值得发 / 画质档位」这类可枚举问题，
+        # 看不到图，也不能替代需要看图的描述；失败/没 key 自动退回上面的判官。
+        "decider_enabled": False,     # 默认关；开了但没 key 也照样退回判官
+        "decider_model": "perplexity/pplx-decider-v1.2",
+        "decider_base_url": "https://openrouter.ai/api/alpha/decisions",
+        "decider_api_key": "",        # 留空 = PAWBOT_JUDGE_DECIDER_KEY / OPENROUTER_API_KEY
+        "decider_timeout": 8,         # 单次决策请求超时（秒）；失败立刻退回判官
+        "decider_min_worth": 0.5,     # 「值得发」概率低于这个值 → 分数压到 3 以下
     },
     "libido": {
         "half_life_min": 180,         # 不互动时向基线回落一半的分钟数

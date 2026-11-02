@@ -22,6 +22,9 @@ import math
 import os
 import threading
 import time
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 from . import judge
 from .llm import LLMClient
@@ -104,6 +107,86 @@ def _is_num(v) -> bool:
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else (hi if v > hi else v)
+
+
+@dataclass(frozen=True)
+class EmotionSnapshot:
+    """不可变的情绪快照：给表达层/测试读，不给任何人改。
+
+    ``values`` 是只读映射（八个维度齐全、0~100），``dominant``/``secondary``/
+    ``intensity`` 与 ``blend()`` 同义。表达层只拿它算节奏与语气，不把它当成
+    「要念出来的心情」。需要当前值时每次都重新 ``Emotion.snapshot()``，不要缓存。
+    """
+
+    values: Mapping[str, float]
+    dominant: str | None
+    secondary: str | None
+    weights: tuple[float, ...]
+    intensity: str | None
+    updated: float = 0.0
+
+    def __post_init__(self):
+        # 直接构造也冻结：复制一份只读映射，调用方之后改原 dict 影响不到快照。
+        values = dict(self.values) if isinstance(self.values, Mapping) else {}
+        object.__setattr__(self, "values", MappingProxyType(values))
+        object.__setattr__(self, "weights", tuple(self.weights or ()))
+
+    def value(self, dim: str) -> float:
+        """单维取值；未知维度回落到该维基准（不会抛异常）。"""
+        return float(self.values.get(dim, BASE_BY_DIM.get(dim, BASE)))
+
+
+def blend_values(vals: Mapping) -> dict:
+    """把一组八维数值压成「主导 + 次要 + 强度」。
+
+    从 ``Emotion._blend`` 抽出来，供快照与纯函数复用；输入不全会按基准补齐。
+    """
+    safe = {}
+    for dim in DIMS:
+        raw = vals.get(dim) if isinstance(vals, Mapping) else None
+        safe[dim] = float(raw) if _is_num(raw) else BASE_BY_DIM[dim]
+    ranked = sorted(DIMS, key=lambda d: safe[d], reverse=True)
+    dom = ranked[0]
+    dd = safe[dom] - BASE
+    if dd < 8:
+        return {"dominant": None, "secondary": None,
+                "weights": (), "intensity": None}
+    intensity = "轻微" if dd < 15 else ("明显" if dd < 30 else "强烈")
+    sec = ranked[1]
+    sd = safe[sec] - BASE
+    if sd >= 8:
+        w_dom, w_sec = dd ** 1.5, sd ** 1.5
+        total = w_dom + w_sec
+        weights = (round(w_dom / total, 2), round(w_sec / total, 2))
+        if weights[1] >= 0.25:
+            return {"dominant": dom, "secondary": sec,
+                    "weights": weights, "intensity": intensity}
+    return {"dominant": dom, "secondary": None,
+            "weights": (1.0,), "intensity": intensity}
+
+
+def make_snapshot(values: Mapping | None = None,
+                  updated: float = 0.0) -> EmotionSnapshot:
+    """从任意数值表造一份冻结快照；缺维按基准补齐，全部夹在 0~100。"""
+    vals = {}
+    for dim in DIMS:
+        raw = values.get(dim) if isinstance(values, Mapping) else None
+        if _is_num(raw):
+            vals[dim] = round(_clamp(float(raw), 0.0, 100.0), 2)
+        else:
+            vals[dim] = BASE_BY_DIM[dim]
+    blend = blend_values(vals)
+    return EmotionSnapshot(values=MappingProxyType(vals),
+                           dominant=blend["dominant"],
+                           secondary=blend["secondary"],
+                           weights=tuple(blend["weights"]),
+                           intensity=blend["intensity"],
+                           updated=float(updated))
+
+
+def neutral_snapshot() -> EmotionSnapshot:
+    """没有任何情绪对象时的中性快照（表达层降级用）。"""
+    return make_snapshot(None)
 
 
 class Emotion:
@@ -219,6 +302,14 @@ class Emotion:
         with self.lock:
             return {d: self._values[d] for d in DIMS}
 
+    def snapshot(self) -> EmotionSnapshot:
+        """当前情绪的冻结快照：只读、带 blend、可直接给表达层/测试。"""
+        self.decay()
+        with self.lock:
+            vals = {d: self._values[d] for d in DIMS}
+            updated = self._updated
+        return make_snapshot(vals, updated=updated)
+
     def reset(self):
         with self.lock:
             self._values = {d: BASE_BY_DIM[d] for d in DIMS}
@@ -237,24 +328,7 @@ class Emotion:
         return self._blend(vals)
 
     def _blend(self, vals: dict) -> dict:
-        ranked = sorted(DIMS, key=lambda d: vals[d], reverse=True)
-        dom = ranked[0]
-        dd = vals[dom] - BASE
-        if dd < 8:
-            return {"dominant": None, "secondary": None,
-                    "weights": (), "intensity": None}
-        intensity = "轻微" if dd < 15 else ("明显" if dd < 30 else "强烈")
-        sec = ranked[1]
-        sd = vals[sec] - BASE
-        if sd >= 8:
-            w_dom, w_sec = dd ** 1.5, sd ** 1.5
-            total = w_dom + w_sec
-            weights = (round(w_dom / total, 2), round(w_sec / total, 2))
-            if weights[1] >= 0.25:
-                return {"dominant": dom, "secondary": sec,
-                        "weights": weights, "intensity": intensity}
-        return {"dominant": dom, "secondary": None,
-                "weights": (1.0,), "intensity": intensity}
+        return blend_values(vals)
 
     def hint(self) -> str:
         """给系统提示的语气指引：不超过三句，不含数字和分数。"""
@@ -274,10 +348,21 @@ class Emotion:
         return first + body + (_RAGE if dom == "烦躁" else _SOOTHE)
 
     # ------------------------------------------------------------ 兜底
-    def heuristic_deltas(self, text: str, *, addressed: bool) -> dict:
-        """关键词兜底：只抓几个最常见的刺激，别做成大词表。"""
+    def heuristic_deltas(self, text: str, *, addressed: bool,
+                         relevance: float | None = None) -> dict:
+        """关键词兜底：只抓几个最常见的刺激，别做成大词表。
+
+        只认「语义词」（夸奖、辱骂、撒娇、撩拨、深夜），**不认光秃秃的
+        标点**：一个「？」或「！！」既是别人的语气词也可能是转述/引用，
+        拿它当刺激会让情绪被第三方消息带跑。``addressed``/``relevance``
+        留给调用方说明这条消息是不是冲她来的；真正的刺激词不依赖它。
+        """
         low = str(text or "").lower()
         out: dict = {}
+        try:
+            rel = 1.0 if relevance is None else _clamp(float(relevance), 0.0, 1.0)
+        except (TypeError, ValueError):
+            rel = 1.0
 
         def bump(dim: str, delta: int):
             out[dim] = out.get(dim, 0) + delta
@@ -296,14 +381,11 @@ class Emotion:
                                   "亲一下", "咬一口", "腿", "胸")):
             bump("害羞", 5)
             bump("兴奋", 4)
-        if any(k in low for k in ("?", "？", "为什么", "怎么")):
-            bump("惊讶", 5)
-        if any(k in low for k in ("!!", "！！", "卧槽", "牛")):
+        if any(k in low for k in ("卧槽", "牛")):
             bump("兴奋", 6)
         if 1 <= _hour() <= 6:
-            bump("低落", 4)
-        if addressed:
-            bump("惊讶", 2)
+            # 深夜的困是环境，不是这条消息；旁听别人的对话时只落一点点。
+            bump("低落", 4 if rel >= 0.5 else 2)
         return {k: v for k, v in out.items() if v}
 
     # ------------------------------------------------------------ 更新
@@ -379,28 +461,47 @@ class Emotion:
             return None
 
     async def update(self, text: str, *, config, context: str = "",
-                     addressed: bool = False, use_judge: bool = True) -> dict:
-        """收一条消息，更新情绪并落盘，返回实际生效的增减。永不抛异常。"""
+                     addressed: bool = False, use_judge: bool = True,
+                     relevance: float | None = None) -> dict:
+        """收一条消息，更新情绪并落盘，返回实际生效的增减。永不抛异常。
+
+        ``addressed`` 表示这条消息是不是冲她来的；``relevance`` 是 0~1 的
+        相关度（旁听别人的对话时可低于 1）。判官/决策模型**明确给出中性**
+        （合法空对象）时保持中性，不被关键词兜底翻掉；只有判官不可用/失败
+        （None）才退回关键词。关键词兜底本身也只认语义词，不认标点。
+        """
         try:
             if config is not None:
                 self.config = config
             self.decay()
 
+            if relevance is None:
+                relevance = 1.0 if addressed else 0.35
+            else:
+                try:
+                    relevance = _clamp(float(relevance), 0.0, 1.0)
+                except (TypeError, ValueError):
+                    relevance = 1.0 if addressed else 0.35
+
+            judged = False
             deltas = None
             if use_judge and config is not None:
                 # ① 决策模型（类 JEV，概率化）：开着就优先用它判「变不变/变什么/多强」
+                decided = None
                 try:
                     from . import decider
                     if decider.enabled(config):
                         decided = await decider.decide_mood(
                             config, text, context, addressed, self.values())
-                        if decided is not None:
-                            deltas = decided
-                            log.debug(f"决策模型情绪：{deltas}")
                 except Exception as e:
                     log.debug(f"决策模型异常：{type(e).__name__}")
+                if decided is not None:
+                    # 合法空对象 = 判官认为情绪没变，保留这个中性结论。
+                    deltas = self._clean_deltas(decided) or {}
+                    judged = True
+                    log.debug(f"决策模型情绪：{deltas}")
                 # ② 没开/失败：退回原来的判官（judge_model 或 judge.* 通道）
-                if deltas is None:
+                if not judged:
                     timeout = self._num_cfg("emotion.judge_timeout", 10.0)
                     data = None
                     try:
@@ -416,17 +517,15 @@ class Emotion:
                     except Exception as e:
                         log.debug(f"判官异常：{type(e).__name__}")
                         data = None
-                    deltas = self._clean_deltas(data)
-            heuristic = self.heuristic_deltas(text, addressed=addressed)
-            if deltas is None or not deltas:
-                deltas = heuristic
-            elif heuristic:
-                strong = max(abs(v) for v in heuristic.values())
-                weak = max((abs(v) for v in deltas.values()), default=0)
-                if strong >= 6 and weak < 3:
-                    # 判官给得太保守，但关键词信号很明显：以关键词为准
-                    deltas = dict(deltas)
-                    deltas.update(heuristic)
+                    cleaned = self._clean_deltas(data)
+                    if cleaned is not None:
+                        deltas = cleaned
+                        judged = True
+
+            if not judged:
+                # 只有判官给不出结论时才用关键词；明确的中性不被它翻掉。
+                deltas = self.heuristic_deltas(
+                    text, addressed=addressed, relevance=relevance)
 
             applied = self.apply(deltas)
             self.save()

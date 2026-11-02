@@ -7,7 +7,7 @@ WebUI：一个跑在 6185 端口的小后台。
     GET  /                 后台页面（web/index.html）
     GET  /api/status       运行状态
     GET  /api/config       读配置
-    POST /api/config       改配置（写回 data/config.json）
+    POST /api/config       改配置（写回 state/config.json）
     GET  /api/plugins      插件列表
     POST /api/plugins/reload   热重载全部插件
     POST /api/plugins/toggle   启用/禁用单个插件
@@ -18,12 +18,17 @@ WebUI：一个跑在 6185 端口的小后台。
     POST /api/memory/forget  清空某一类记忆
     GET  /api/context      上下文可视化：她这一眼能看到的原文 + 各项上限
     POST /api/context/window  调上下文窗口（保留条数 / 给模型看的条数 / 字数预算）
+    GET  /api/sync/status  云同步状态（是否启用 / provider / 上次 push 与 pull / 冲突目录）
+    POST /api/sync/push    立即打包上传（人设 / 记忆 / 配置 → 云端，线程里跑）
+    POST /api/sync/pull    立即下载应用（默认不动 config.json，线程里跑）
     GET  /api/stream       SSE：日志 + 状态实时推送
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import hmac
 import inspect
 import json
@@ -32,6 +37,8 @@ import re
 import time
 from urllib.parse import parse_qs, quote, urlparse
 
+from . import paths as layout
+from . import tasks
 from .log import log
 from .lifecycle import peer_is_loopback
 
@@ -45,6 +52,21 @@ SENSITIVE_BRAIN_TOOLS = frozenset({
     "qzone_reply", "qzone_edit",
 })
 
+# HA（relay 模式）面板闸门：只有 bot.ha_runtime 存在时生效。
+# standby / 接管中 / 降级排空 / fail-closed 时，业务与内容写入口一律 409；
+# 机器本地配置（config、模型预设、插件开关、上下文窗口）仍然允许。
+HA_SYNC_POSTS = frozenset({"/api/sync/push", "/api/sync/pull"})
+HA_STANDBY_BLOCKED_POSTS = frozenset({
+    "/api/send", "/api/session/clear", "/api/memory/forget", "/api/file",
+    "/api/brain/tool",
+}) | HA_SYNC_POSTS
+# 这些 POST 会写 content / state 或产生外部副作用：降级时要等它们结束
+# （内容写入本身是同步的短操作，长操作来自大脑工具等）。
+HA_MUTATING_POSTS = frozenset({
+    "/api/send", "/api/session/clear", "/api/memory/forget", "/api/file",
+    "/api/brain/tool", "/api/sync/push", "/api/sync/pull",
+})
+
 # 单个 HTTP 请求体上限（本 WebUI 只服务本机面板与大脑回调；4MB 足够人设/配置）
 MAX_HTTP_BODY = 4 * 1024 * 1024
 # 控制面只接受极小的 reason 体；鉴权通过前不读 body，读的时候也必须有界。
@@ -53,9 +75,35 @@ CONTROL_BODY_TIMEOUT = 3.0
 # 其它路由的 body 读取也要有超时，不能让一个慢连接永久占住 worker。
 BODY_READ_TIMEOUT = 20.0
 
+# 云同步（cloudsync.py）的错误码 → 面板该看到的 HTTP 状态。
+# 刻意不把远端的 401/403 原样透出，免得前端把它误读成面板 token 鉴权失败：
+# AUTH_FAILED 与网络类错误一律 502，配置类错误才 4xx。
+SYNC_ERROR_STATUS = {
+    "CONFIG_INVALID": 400,
+    "UNKNOWN_PROVIDER": 400,
+    "CONFIG_REQUIRES_ENCRYPTION": 400,
+    "PASSPHRASE_REQUIRED": 400,
+    "ENCRYPTION_MISMATCH": 400,
+    "BAD_PASSPHRASE": 400,
+    "CRYPTO_UNAVAILABLE": 503,
+    "NOT_FOUND": 404,
+    "TIMEOUT": 504,
+    "NETWORK": 502,
+    "AUTH_FAILED": 502,
+    "HTTP_4XX": 502,
+    "HTTP_5XX": 502,
+    "HTTP_ERROR": 502,
+    "BAD_BUNDLE": 502,
+    "MANIFEST_INVALID": 502,
+    "MANIFEST_MISMATCH": 502,
+    "PATH_TRAVERSAL": 502,
+    "BUNDLE_CONFLICT": 500,
+    "IO_ERROR": 500,
+}
+
 
 class WebUI:
-    # 模型预设存在 data/models.json；键值不回显，只给首尾各 4 位
+    # 模型预设存在数据根下的 models.json；键值不回显，只给首尾各 4 位
     MODELS_FILE = "models.json"
 
     def __init__(self, bot, host: str = "127.0.0.1", port: int = 6185,
@@ -73,10 +121,16 @@ class WebUI:
         # 停机时先置 draining：拒绝新的变更类请求；在途请求由 lifecycle 取消/等待。
         self.draining = False
         self._active_requests: set[asyncio.Task] = set()
+        # HA：在途的业务/内容写入请求（降级时由 HARuntime 等待/取消）。
+        self._mutation_requests: set[asyncio.Task] = set()
+        # 云同步 push/pull 互斥（第一次用到时再建，避免把 Lock 绑到错误的 loop）。
+        self._sync_lock: asyncio.Lock | None = None
         self._server: asyncio.AbstractServer | None = None
         self._started = time.time()
+        self._bind_ha_runtime()
 
     async def start(self):
+        self._bind_ha_runtime()
         self._server = await asyncio.start_server(self._handle, self.host, self.port)
         log.info(f"WebUI 已启动 http://{self.host}:{self.port}")
 
@@ -84,6 +138,70 @@ class WebUI:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+
+    # ---------------------------------------------------------- HA 闸门
+    def _bind_ha_runtime(self) -> None:
+        """把 WebUI 登记给 HARuntime（relay 模式才存在），供降级时排空。"""
+        runtime = getattr(self.bot, "ha_runtime", None)
+        bind = getattr(runtime, "bind_webui", None)
+        if callable(bind):
+            try:
+                bind(self)
+            except Exception:  # noqa: BLE001 - 登记失败不影响面板
+                pass
+
+    def _ha_runtime(self):
+        """只有实现了 can_mutate() 的 HA 运行时才算数；reverse/forward 没有。"""
+        runtime = getattr(self.bot, "ha_runtime", None)
+        if runtime is None or not callable(getattr(runtime, "can_mutate", None)):
+            return None
+        return runtime
+
+    @staticmethod
+    def _ha_active(runtime) -> bool:
+        try:
+            return bool(runtime.can_mutate())
+        except Exception:  # noqa: BLE001 - 判断失败按非 active 处理（fail closed）
+            return False
+
+    def _ha_post_gate(self, path: str) -> tuple[int, dict] | None:
+        """POST 闸门。返回 None 表示放行。
+
+        * 任何 HA 模式下 ``/api/sync/push|pull`` 都拒绝：内容同步已由运行时
+          接管，不能让面板云同步成为第二个写内容的引擎；
+        * 非 active（standby / 接管中 / 降级 / fail-closed）时拒绝业务/内容/
+          大脑工具写入；机器本地配置与模型设置不受影响。
+        GET / 状态 / 控制面停机不经过这里。
+        """
+        runtime = self._ha_runtime()
+        if runtime is None:
+            return None
+        if path in HA_SYNC_POSTS:
+            return 409, {
+                "ok": False,
+                "code": "HA_SYNC_OWNED_BY_RUNTIME",
+                "error": "HA 模式下内容同步由运行时接管，面板云同步 push/pull 已停用",
+            }
+        if not self._ha_active(runtime) and path in HA_STANDBY_BLOCKED_POSTS:
+            payload = {
+                "ok": False,
+                "code": "HA_STANDBY_READONLY",
+                "error": "当前节点不是 HA 活动 owner，拒绝业务/内容写入",
+            }
+            describe = getattr(runtime, "mutation_denied_reason", None)
+            if callable(describe):
+                try:
+                    reason = str(describe("webui") or "")
+                except Exception:  # noqa: BLE001
+                    reason = ""
+                if reason:
+                    payload["reason"] = reason
+            return 409, payload
+        return None
+
+    def active_mutations(self) -> list[asyncio.Task]:
+        """在途的业务/内容写入请求快照（降级时 HARuntime 会等它们或取消）。"""
+        return [task for task in list(self._mutation_requests) if not task.done()]
 
     # ---------------------------------------------------------- HTTP 基础
     def begin_draining(self) -> None:
@@ -193,16 +311,42 @@ class WebUI:
                 await writer.wait_closed()
                 return
 
-        try:
-            if path == "/api/stream" and method == "GET":
-                await self._sse(reader, writer)
+        # HA 面板闸门（relay 模式且挂了 ha_runtime 才生效）：鉴权之后、分发之前。
+        # standby / 接管中 / 降级排空时拒绝业务与内容写入，机器本地配置不受影响。
+        if method == "POST":
+            gate = self._ha_post_gate(path)
+            if gate is not None:
+                await self._json(writer, gate[0], gate[1])
+                writer.close()
                 return
-            if method == "GET":
-                await self._route_get(writer, path, query)
-            elif method == "POST":
-                await self._route_post(writer, path, body, headers)
-            else:
-                await self._json(writer, 405, {"ok": False, "error": "method not allowed"})
+
+        runtime = self._ha_runtime()
+        task = asyncio.current_task()
+        tracked = bool(method == "POST" and runtime is not None
+                       and path in HA_MUTATING_POSTS and task is not None)
+        scope = contextlib.nullcontext()
+        if tracked:
+            # 降级时 HARuntime 要能看到（必要时取消）这些在途内容/业务写入。
+            self._mutation_requests.add(task)
+            if self._ha_active(runtime):
+                business_scope = getattr(runtime, "business_scope", None)
+                if callable(business_scope):
+                    try:
+                        scope = business_scope()
+                    except Exception:  # noqa: BLE001
+                        scope = contextlib.nullcontext()
+
+        try:
+            with scope:
+                if path == "/api/stream" and method == "GET":
+                    await self._sse(reader, writer)
+                    return
+                if method == "GET":
+                    await self._route_get(writer, path, query)
+                elif method == "POST":
+                    await self._route_post(writer, path, body, headers)
+                else:
+                    await self._json(writer, 405, {"ok": False, "error": "method not allowed"})
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -211,6 +355,8 @@ class WebUI:
             except Exception:
                 pass
         finally:
+            if tracked:
+                self._mutation_requests.discard(task)
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -310,17 +456,56 @@ class WebUI:
         await writer.drain()
 
     # ---------------------------------------------------------- 文件白名单
+    def _data_paths(self) -> layout.DataPaths:
+        """bot 的布局对象；测试里的假 bot 只有 base_dir，就地解析。"""
+        return layout.for_bot(self.bot)
+
     def _safe_path(self, rel: str) -> str | None:
-        """只返回 data/ 内的真实路径；拒绝绝对路径、../ 与符号链接逃逸。"""
+        """只返回数据根内的真实路径；拒绝绝对路径、../ 与符号链接逃逸。
+
+        ``rel`` 可以是布局写法（``content/persona.md`` / ``state/config.json``），
+        也可以是批次 2 的旧写法（``persona.md``）。旧写法按布局表解析，
+        所以面板不用记「这个文件现在在哪一层」。
+        """
         if not rel or os.path.isabs(rel):
             return None
-        base = os.path.realpath(os.path.join(self.bot.base_dir, "data"))
-        full = os.path.realpath(os.path.join(base, rel))
-        try:
-            inside = os.path.commonpath((base, full)) == base
-        except ValueError:
+        paths = self._data_paths()
+        norm = str(rel).replace("\\", "/").strip()
+        if not norm or norm == ".." or norm.startswith("../"):
             return None
-        return full if inside and full != base else None
+        candidates: list[str] = []
+        head, _, rest = norm.partition("/")
+        try:
+            if head in ("content", "state"):
+                if not rest or rest.endswith("/"):
+                    return None
+                base = paths.content_root if head == "content" else paths.state_root
+                candidates.append(os.path.join(base, *rest.split("/")))
+            else:
+                layer = layout.classify(norm)
+                if layer == "content":
+                    candidates.append(paths.content(norm))
+                elif layer == "state":
+                    candidates.append(paths.state(norm))
+                else:
+                    candidates.append(os.path.join(paths.root, *norm.split("/")))
+                    candidates.append(paths.content(norm))
+        except layout.PathError:   # 绝对路径 / ~ / 越界：按「不允许」处理
+            return None
+
+        for candidate in candidates:
+            try:
+                full = os.path.realpath(candidate)
+            except (OSError, ValueError):
+                continue
+            try:
+                inside = os.path.commonpath((os.path.realpath(paths.root), full)) == \
+                    os.path.realpath(paths.root)
+            except ValueError:
+                inside = False
+            if inside and full != os.path.realpath(paths.root) and not os.path.isdir(full):
+                return full
+        return None
 
     async def _html(self, writer, path: str):
         rel = path.lstrip("/") or "index.html"
@@ -390,6 +575,10 @@ class WebUI:
             sid = (query.get("session_id") or [""])[0]
             await self._json(writer, 200, {"ok": True, "data": self._context_data(sid)})
             return
+        if path == "/api/sync/status":
+            # 只读、不含密钥；磁盘枚举放线程里，别让一次目录遍历卡住事件循环。
+            await self._json(writer, 200, await asyncio.to_thread(self._sync_status))
+            return
         if path == "/api/models":
             await self._json(writer, 200, {"ok": True, "data": self._models_data()})
             return
@@ -423,20 +612,40 @@ class WebUI:
         await self._json(writer, 404, {"ok": False, "error": "not found"})
 
     def _list_files(self) -> list[dict]:
-        """列出 data/ 下所有可编辑的文本文件（人设、记忆）。"""
-        base = os.path.join(self.bot.base_dir, "data")
+        """列出 content/ 与 state/ 下可编辑的文本文件（人设、记忆、日志）。
+
+        迁移前（两层都还没建）退化成遍历整个数据根，行为与批次 2 一致。
+        """
+        paths = self._data_paths()
+        bases: list[tuple[str, str]] = []
+        for kind, base in (("content", paths.content_root), ("state", paths.state_root)):
+            if os.path.isdir(base):
+                bases.append((kind, base))
+        if not bases:
+            bases = [("", paths.root)]
         items = []
-        for root, _dirs, files in os.walk(base):
-            for name in files:
-                if os.path.splitext(name)[1].lower() not in (".md", ".txt"):
-                    continue
-                full = os.path.join(root, name)
-                items.append({
-                    "path": os.path.relpath(full, base).replace("\\", "/"),
-                    "name": name,
-                    "size": os.path.getsize(full),
-                    "mtime": int(os.path.getmtime(full)),
-                })
+        for kind, base in bases:
+            for root, dirs, files in os.walk(base):
+                dirs[:] = sorted(d for d in dirs
+                                 if d not in ("__pycache__", ".git", "node_modules"))
+                for name in files:
+                    if os.path.splitext(name)[1].lower() not in (".md", ".txt"):
+                        continue
+                    full = os.path.join(root, name)
+                    try:
+                        if not os.path.isfile(full):
+                            continue
+                        size = os.path.getsize(full)
+                        mtime = int(os.path.getmtime(full))
+                    except OSError:
+                        continue
+                    rel = os.path.relpath(full, base).replace("\\", "/")
+                    items.append({
+                        "path": f"{kind}/{rel}" if kind else rel,
+                        "name": name,
+                        "size": size,
+                        "mtime": mtime,
+                    })
         return sorted(items, key=lambda x: x["path"])
 
     # ---------------------------------------------------------- 记忆可检视
@@ -458,10 +667,10 @@ class WebUI:
         configured = str(getattr(diary, "dir", "") or "") if diary is not None else ""
         if configured:
             return os.path.realpath(configured)
-        base = str(getattr(self.bot, "base_dir", "") or "")
-        if not base:
+        try:
+            return os.path.realpath(self._data_paths().content("diary"))
+        except Exception:  # noqa: BLE001 —— 数据根异常时别让面板整个挂掉
             return ""
-        return os.path.realpath(os.path.join(base, "data", "diary"))
 
     def _diary_rows(self) -> list[dict]:
         """最近 3 天的日记；今天的以文件为准（最近生成的可能还没进索引）。"""
@@ -551,8 +760,8 @@ class WebUI:
 
     # ------------------------------------------------------------ 模型预设
     def _models_path(self) -> str:
-        base = getattr(self.bot, "base_dir", None) or os.getcwd()
-        return os.path.join(str(base), "data", self.MODELS_FILE)
+        # models.json 不在布局表里（模型预设是本机开发用），仍放数据根
+        return os.path.join(self._data_paths().root, self.MODELS_FILE)
 
     @staticmethod
     def _mask_key(key) -> str:
@@ -780,7 +989,7 @@ class WebUI:
             folder = self._diary_dir()
             if not folder:
                 return 400, {"ok": False, "error": "日记目录不可用"}
-            # 只允许 data/diary/<day>.md，防目录穿越
+            # 只允许 content/diary/<day>.md，防目录穿越
             full = os.path.realpath(os.path.join(folder, day + ".md"))
             try:
                 inside = os.path.commonpath([full, folder]) == folder
@@ -904,6 +1113,105 @@ class WebUI:
         with open(full, "rb") as f:
             await self._bytes(writer, 200, f.read(), ctype)
 
+    # ---------------------------------------------------------- 云同步
+    # 后端在 cloudsync.py（见 docs/CLOUD-SYNC.md）；这里只做 HTTP 外壳：
+    #   - 走和别的 /api/* 一模一样的面板 token 鉴权，不是 /api/control/* 控制面；
+    #   - push/pull 是重活（打包 + 网络），放线程里跑，事件循环继续处理别的请求；
+    #   - 异常只回 {ok: False, code, message}，不回 traceback，也不回任何密钥。
+    def _sync_conflict(self) -> dict:
+        """最近一次实时同步留下的冲突目录（state/sync-conflict-*）：只回答有没有。"""
+        paths = self._data_paths()
+        bases = [("state/", paths.state_root), ("", paths.root)]
+        found: dict[str, str] = {}
+        for prefix, base in bases:
+            try:
+                names = [
+                    name for name in os.listdir(base)
+                    if name.startswith("sync-conflict-")
+                    and os.path.isdir(os.path.join(base, name))
+                ]
+            except OSError:
+                names = []
+            for name in names:
+                found.setdefault(name, prefix + name)
+        if not found:
+            return {"exists": False, "dir": "", "count": 0}
+        latest = sorted(found)[-1]
+        return {"exists": True, "dir": found[latest], "count": len(found)}
+
+    def _sync_status(self) -> dict:
+        """只读状态；cloudsync.status 已保证不含 password/token/passphrase 的值。"""
+        from . import cloudsync
+        bot = self.bot
+        try:
+            info = cloudsync.status(bot.config, bot.base_dir)
+        except Exception as exc:  # noqa: BLE001 - 面板只要错误码，不要 traceback
+            return {"ok": False, "code": "STATUS_FAILED",
+                    "message": cloudsync.scrub(exc, bot.config)}
+        payload = {"ok": True, "conflict": self._sync_conflict()}
+        if isinstance(info, dict):
+            payload.update(info)
+        return payload
+
+    def _sync_run(self, action: str, payload: dict) -> dict:
+        """worker 线程里跑一次 push/pull；任何异常都收敛成带 code 的 dict。"""
+        from . import cloudsync
+        bot = self.bot
+        try:
+            if action == "push":
+                # push 只读配置、最后回写 last_push：用运行中的 Config，时间戳才会落盘。
+                return cloudsync.push(bot.config, bot.base_dir)
+            # pull 可能覆写 config.json：传给 cloudsync 一份配置快照，
+            # 免得它内部回写 last_pull 时用运行中的旧内存把刚覆写的 config.json 又盖回去。
+            # 时间戳与「读回新配置」由 _sync_settle 在成功后补。
+            snapshot = copy.deepcopy(bot.config.data)
+            overwrite = payload.get("overwrite_config") if isinstance(payload, dict) else None
+            if overwrite is None:
+                return cloudsync.pull(snapshot, bot.base_dir)
+            return cloudsync.pull(snapshot, bot.base_dir, overwrite_config=bool(overwrite))
+        except cloudsync.SyncError as exc:
+            message = cloudsync.scrub(exc.message, bot.config)
+            log.warn(f"云同步 {action} 失败：{exc.code} {message}")
+            return {"ok": False, "code": exc.code, "message": message}
+        except Exception as exc:  # noqa: BLE001 - 不把 traceback 吐给前端
+            message = cloudsync.scrub(f"{type(exc).__name__}: {exc}", bot.config)
+            log.warn(f"云同步 {action} 异常：{message}")
+            return {"ok": False, "code": "INTERNAL", "message": message}
+
+    def _sync_settle(self, result: dict) -> None:
+        """pull 成功后把 last_pull 落回运行中的 config；覆写过就先读回新配置。"""
+        bot = self.bot
+        try:
+            config = result.get("config") if isinstance(result, dict) else None
+            if isinstance(config, dict) and config.get("overwritten"):
+                bot.config.load()
+            stamp = str(result.get("last_pull") or "") if isinstance(result, dict) else ""
+            if stamp:
+                bot.config.set("sync.last_pull", stamp)
+        except Exception as exc:  # noqa: BLE001 - 时间戳写不进去不影响同步结果
+            log.warn(f"云同步：记录 last_pull 失败（{type(exc).__name__}）")
+
+    async def _sync_action(self, action: str, payload: dict) -> tuple[int, dict]:
+        """push/pull 统一入口：线程里跑、单飞、失败回带 code 的 JSON。"""
+        if self._sync_lock is None:
+            self._sync_lock = asyncio.Lock()
+        if self._sync_lock.locked():
+            return 409, {"ok": False, "code": "SYNC_BUSY",
+                         "message": "已有一次同步正在进行，等它结束再来"}
+        async with self._sync_lock:
+            result = await asyncio.to_thread(self._sync_run, action, payload or {})
+        if not isinstance(result, dict):
+            return 500, {"ok": False, "code": "INTERNAL", "message": "同步没有返回结果"}
+        if not result.get("ok"):
+            code = str(result.get("code") or "SYNC_FAILED")
+            return SYNC_ERROR_STATUS.get(code, 500), result
+        if action == "pull":
+            await asyncio.to_thread(self._sync_settle, result)
+        verb = {"push": "上传", "pull": "拉取"}.get(action, action)
+        log.info(f"云同步{verb}完成：文件={result.get('files')} "
+                 f"大小={result.get('bytes')}B 耗时={result.get('duration_ms')}ms")
+        return 200, result
+
     async def _route_post(self, writer, path: str, body: bytes, headers: dict | None = None):
         bot = self.bot
         try:
@@ -954,6 +1262,16 @@ class WebUI:
         if path == "/api/context/window":
             ok, result = self._set_context_window(payload)
             await self._json(writer, 200 if ok else 400, result)
+            return
+
+        if path == "/api/sync/push":
+            status, result = await self._sync_action("push", payload)
+            await self._json(writer, status, result)
+            return
+
+        if path == "/api/sync/pull":
+            status, result = await self._sync_action("pull", payload)
+            await self._json(writer, status, result)
             return
 
         if path == "/api/send":
@@ -1046,5 +1364,7 @@ class WebUI:
 def _reason(code: int) -> str:
     return {200: "OK", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+            408: "Request Timeout", 409: "Conflict",
             413: "Payload Too Large", 500: "Internal Server Error",
-            501: "Not Implemented", 503: "Service Unavailable"}.get(code, "OK")
+            501: "Not Implemented", 502: "Bad Gateway",
+            503: "Service Unavailable", 504: "Gateway Timeout"}.get(code, "OK")

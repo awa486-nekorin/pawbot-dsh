@@ -11,6 +11,7 @@ import json
 import os
 import re
 import zlib
+from collections.abc import Mapping
 
 _PROTECTED_RE = re.compile(
     r"\[CQ:[^\]\r\n]*\]"
@@ -86,6 +87,16 @@ _TAG_QUESTION_RE = re.compile(
     r"[ \t]*[？?]+[ \t]*$"
     r"|(?:^|(?<=[。！？!?…~～，,\s]))[ \t]*(?:对吧|是吧|是不是|对不对)[ \t]*[？?]+[ \t]*$"
 )
+# 语义保护模式下只剪「纯公式」的收尾：单独一个「你呢？」或求认同的
+# 「对吧/是吧？」。像「你觉得呢？」「为什么呀？」这种真问题原样保留。
+_TAG_QUESTION_GUARDED_RE = re.compile(
+    r"(?:^|(?<=[。！？!?…~～，,\s]))[ \t]*(?:你呢|对吧|是吧)[ \t]*[？?]+[ \t]*$"
+)
+# 引号里的字是「她在引用/转述」，语气词削减不能伸手进去。
+_QUOTED_SPAN_RE = re.compile(
+    r"「[^」\r\n]{1,120}」|『[^』\r\n]{1,120}』|“[^”\r\n]{1,120}”|\"[^\"\r\n]{1,120}\""
+)
+_TONE_QUESTION_TAIL_RE = re.compile(r"[？?][」』”\"）)]*$")
 
 
 def _is_roleplay(text: str) -> bool:
@@ -206,6 +217,26 @@ def _configured_tone_trim() -> float:
         return 0.7
 
 
+def _configured_space_to_comma() -> bool:
+    """把「中文 中文」之间的空格换成逗号（默认关，显式配 true 才开）。"""
+    v = _configured_reply().get("space_to_comma")
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(v)
+
+
+def _configured_period_soften() -> bool:
+    """句尾/短句里的句号软化（默认关，显式配 true 才开）。"""
+    v = _configured_reply().get("period_soften")
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(v)
+
+
 def _split_parts(text: str) -> list[str]:
     parts: list[str] = []
     start = 0
@@ -280,12 +311,65 @@ def _clean_punctuation(text: str) -> str:
     return text
 
 
-def _drop_tag_question(parts: list[str]) -> list[str]:
-    """去掉「说一句 + 你呢？」式的公式收尾；整条回复只有这一问时保留。"""
+# ---------------------------------------------------------------- 空格当标点
+# 真人聊天不会拿空格切句子，「诶 我又怎么惹你了」这种写法读起来像机器分词。
+# 只替换**两侧都是汉字**的空格；「GPU 显存」「看了 3 集」「1 2 3」里的空格
+# 是内容的一部分，必须原样保留，所以不碰非汉字边界。
+_SPACE_AS_COMMA_RE = re.compile(
+    r"(?<=[\u4e00-\u9fff\u3400-\u4dbf])[ \t\u3000]+"
+    r"(?=[\u4e00-\u9fff\u3400-\u4dbf])"
+)
+
+
+def _space_to_comma(text: str) -> str:
+    """汉字之间的空格 → 逗号；返回替换后的文本（其余空格不动）。"""
+    if not text:
+        return text
+    return _SPACE_AS_COMMA_RE.sub("，", text)
+
+
+# 短句闲聊不用句号收尾：超过这个长度就当成「讲题/解释」，保留句号不糊成一片。
+_PERIOD_SOFT_MAX_CHARS = 60
+
+
+def _soften_periods(part: str) -> str:
+    """QQ 闲聊一般不拿句号收尾。
+
+    - 整条末尾的句号直接去掉（「……别挑我啦。」→「……别挑我啦」）；
+    - 短句里的句号换成逗号，一口气说连续了才像聊天；
+    - 长段（超过 ``_PERIOD_SOFT_MAX_CHARS`` 字）保留句号：解释、讲题、
+      写代码时句号是读得懂的前提，不为了语气把可读性削掉；
+    - 引号里的原话、代码、链接里的句号一律不动。
+    """
+    part = (part or "").strip()
+    stripped = part
+    while stripped.endswith("。"):
+        stripped = stripped[:-1].rstrip()
+    if not stripped:
+        return part
+    if len(re.sub(r"[‖\s]", "", stripped)) > _PERIOD_SOFT_MAX_CHARS:
+        return stripped
+    shielded, protected = _shield_markup(stripped)
+    shielded, quoted = _shield_quoted(shielded)
+    softened = shielded.replace("。", "，")
+    for marker, original in quoted.items():
+        softened = softened.replace(marker, original)
+    for marker, original in protected.items():
+        softened = softened.replace(marker, original)
+    return softened
+
+
+def _drop_tag_question(parts: list[str], guarded: bool = False) -> list[str]:
+    """去掉「说一句 + 你呢？」式的公式收尾；整条回复只有这一问时保留。
+
+    ``guarded=True``（语义保护模式）只剪纯公式的「你呢/对吧/是吧」，
+    「你觉得呢？」这类真问题原样留着。
+    """
     if not parts:
         return parts
+    pattern = _TAG_QUESTION_GUARDED_RE if guarded else _TAG_QUESTION_RE
     last = parts[-1]
-    match = _TAG_QUESTION_RE.search(last)
+    match = pattern.search(last)
     if not match:
         return parts
     head = last[:match.start()].rstrip(" \t，,、")
@@ -306,7 +390,7 @@ def _drop_markdown_emphasis(part: str) -> str:
     return _BOLD_RE.sub(r"\1", part)
 
 
-def _polish_part(part: str) -> str:
+def _polish_part(part: str, space_to_comma: bool = False) -> str:
     part = _unwrap_outer_quotes(part)
     visible, protected = _shield_markup(part)
 
@@ -318,6 +402,10 @@ def _polish_part(part: str) -> str:
     visible = _neutralize_dialect(visible)
     visible = re.sub(r"(?:——|—)+", "，", visible)
     visible = re.sub(r"(?<=\S)[ \t]+/[ \t]+(?=\S)", "，", visible)
+    if space_to_comma:
+        # 放在 _clean_punctuation 之前：空格换成逗号后可能和已有逗号相邻，
+        # 由下面的「连续逗号合并」统一收成一颗。
+        visible = _space_to_comma(visible)
     visible = _clean_punctuation(visible).strip(" \t\r\n,，、")
 
     visible = strip_emoji(visible)
@@ -329,6 +417,21 @@ def _polish_part(part: str) -> str:
 _SENT_TOKEN_RE = re.compile(
     r"[^。！？!?‖\n]*[。！？!?]+[…」』”\"）)]*|[^。！？!?‖\n]+|‖|\n")
 
+# 情绪倾诉不是「闲聊太长」：她在说难受/失眠/委屈时，别按闲聊句数截断。
+_EMOTION_WORDS = (
+    "难受", "难过", "伤心", "想哭", "哭了", "哭肿", "委屈", "崩溃", "痛苦",
+    "不开心", "心情不好", "睡不着", "失眠", "焦虑", "害怕", "压抑", "孤独",
+    "寂寞", "心疼", "堵得慌", "好累", "累死", "撑不住", "压力大", "烦死",
+)
+
+
+def _is_emotional_disclosure(text: str) -> bool:
+    """是不是在讲自己的情绪/身体状态（第一人称 + 情绪词）。"""
+    shielded, _ = _shield_markup(text)
+    if not any(word in shielded for word in _EMOTION_WORDS):
+        return False
+    return any(pronoun in shielded for pronoun in ("我", "咱", "人家"))
+
 
 def cap_sentences(text: str, n: int, max_chars: int = 200) -> str:
     """闲聊回复最多留前 n 句。代码、链接、CQ 码、过长的解释原样放过，只截聊天。"""
@@ -339,6 +442,9 @@ def cap_sentences(text: str, n: int, max_chars: int = 200) -> str:
         if len(text) <= ROLEPLAY_MAX_CHARS:
             return text
         return text[:ROLEPLAY_MAX_CHARS].rstrip(" \t\r\n，,、") + "……"
+    if _is_emotional_disclosure(text):
+        # 情绪一整段说完才落地，截成一句只剩个开头，反而像敷衍。
+        return text
     if len(text) > max_chars:
         return text
     if _PROTECTED_RE.search(text):
@@ -376,6 +482,32 @@ def _is_followup(sentence: str) -> bool:
     return len(s) <= 8 and s[-1] in "嘛呢吧呀啊"
 
 
+# 公式化的反问/求认同：这类收尾删掉不会丢信息。
+_META_QUESTION_RE = re.compile(
+    r"^(?:那|那么)?(?:你|你们)(?:呢|觉得呢|觉得怎么样|怎么看|怎么想|说呢|觉得咋样|觉得如何)"
+    r"[ \t]*[？?]+$"
+    r"|^(?:对吧|是吧|是不是|对不对)[ \t]*[？?]+$"
+)
+# 真问题：在问一件具体的事/要不要一起，不是在把话头抛回来。
+_GENUINE_QUESTION_RE = re.compile(
+    r"(?:要不要|用不用|需不需要|能不能|可不可以|会不会|有没有|去不去|来不来|走不走|"
+    r"一起|还是|哪[个里儿天次条台样]|几点|什么时候|多少|在哪|哪里|谁|"
+    r"帮我|要我|想不想|好不好|行不行)"
+)
+
+
+def _is_genuine_question(sentence: str) -> bool:
+    """问号结尾、并且在问具体的事（而不是「你呢/你觉得呢/快跟我说说」）。"""
+    s = sentence.strip()
+    if not s.endswith(("？", "?")):
+        return False
+    if _META_QUESTION_RE.match(s):
+        return False
+    if len(s) <= 14 and _FOLLOWUP_RE.search(s):
+        return False
+    return bool(_GENUINE_QUESTION_RE.search(s))
+
+
 def _tail_is_prompt(tail: str) -> bool:
     """逗号后面这一小截是不是在催人交代/追问，而不是真在问一件正事。"""
     t = tail.strip()
@@ -402,7 +534,13 @@ def drop_trailing_question(text: str, max_chars: int = 200) -> str:
         return text
     chunk = parts[idx]
     sentences = [t for t in _SENT_TOKEN_RE.findall(chunk) if t.strip()]
-    if not sentences or not _is_followup(sentences[-1]):
+    if not sentences:
+        return text
+    last = sentences[-1]
+    if len(sentences) >= 2 and _is_genuine_question(last):
+        # 独立成句的真问题（「你要不要一起？」）是信息，不是把话头抛回来的套话。
+        return text
+    if not _is_followup(last):
         return text
     if len(sentences) >= 2:
         kept_sentences = sentences[:-1]
@@ -507,13 +645,36 @@ _TONE_PROTECT_PREV = {"嘛": "干做为怎啥", "呀": "哎唉", "啊": "哎唉"
 _TONE_KEEP_TAGS = ("<pass>",)
 
 
-def _trim_tone_particles(text: str, rate: float) -> str:
+def _shield_quoted(text: str) -> tuple[str, dict[str, str]]:
+    """把引号里的内容先摘出来；语气词削减不碰「引用/转述」的原话。"""
+    nonce = "\x00PAWQ"
+    while nonce in text:
+        nonce += "_"
+    protected: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        marker = f"{nonce}{len(protected)}\x00"
+        protected[marker] = match.group(0)
+        return marker
+
+    return _QUOTED_SPAN_RE.sub(replace, text), protected
+
+
+def _trim_tone_particles(text: str, rate: float, *, guard: bool = False,
+                         protect_questions: bool = False,
+                         protect_literals: bool = False) -> str:
     """按比例削句末语气词；确定性哈希，同一条回复重跑结果一致。
 
     只动「啊嘛啦呀哦哟」的句末/停顿前位置；呢/吧/吗一律不碰；
     「干嘛」「哎呀」这类词保留；整句只剩语气词时不动；
     「你呢？」这种极短问句保留，否则会变成「你？」。
-    哈希种子用「去掉所有语气词后的正文 + 这个语气词」，保证多轮 polish 幂等。
+
+    ``guard`` 是语义保护模式（由 ``ReplyPolicy`` 打开）：
+      - 真问句里的语气词不削（问号前/整句是问句时原样保留）；
+      - 每条最多削到只剩一个语气词，不整条扫光；
+      - 八个字以内的小声接话不削；
+      - ``protect_literals`` 时引号里的原话不碰。
+    这些开关关闭时保持旧输出（默认调用路径不变）。
     """
     if not text or rate <= 0:
         return text
@@ -524,21 +685,48 @@ def _trim_tone_particles(text: str, rate: float) -> str:
         return text
     if body_len <= 4 and re.search(r"[？?]$", text.strip()):
         return text
-    base = re.sub(r"[啊嘛呢啦呀哦哟]", "", text)
+    if guard and protect_questions and _TONE_QUESTION_TAIL_RE.search(text.strip()):
+        # 整条就是个问题：语气词是问法的一部分，别削。
+        return text
+    if guard and body_len < 8:
+        # 「在呀」「好嘛」这种短接话，削了就只剩硬邦邦两个字。
+        return text
+
+    shielded, protected = _shield_markup(text)
+    quoted: dict[str, str] = {}
+    if guard and protect_literals:
+        shielded, quoted = _shield_quoted(shielded)
+    base = re.sub(r"[啊嘛呢啦呀哦哟]", "", shielded)
+    matches = list(_TONE_TRIM_RE.finditer(shielded))
+    allowance = len(matches) - 1 if guard else len(matches)
+    if allowance <= 0:
+        return text
+    removed = 0
 
     def repl(match: re.Match) -> str:
+        nonlocal removed
         ch = match.group("ch")
         pos = match.start()
-        prev = text[pos - 1] if pos > 0 else ""
+        prev = shielded[pos - 1] if pos > 0 else ""
         if prev and prev in _TONE_PROTECT_PREV.get(ch, ""):
             return ch
-        if rate >= 1.0:
-            return ""
-        if zlib.crc32((base + ch).encode("utf-8")) % 100 < int(rate * 100):
+        end = match.end()
+        if (guard and protect_questions and end < len(shielded)
+                and shielded[end] in "？?"):
+            return ch
+        if removed >= allowance:
+            return ch
+        if rate >= 1.0 or zlib.crc32((base + ch).encode("utf-8")) % 100 < int(rate * 100):
+            removed += 1
             return ""
         return ch
 
-    return _TONE_TRIM_RE.sub(repl, text)
+    out = _TONE_TRIM_RE.sub(repl, shielded)
+    for marker, original in quoted.items():
+        out = out.replace(marker, original)
+    for marker, original in protected.items():
+        out = out.replace(marker, original)
+    return out
 # 只处理这三种明确形式：不是A，而是B / 不是A，是B / 并不是A，而是B。
 # A、B 里不许再出现逗号/顿号，抽不干净就整句不动，宁可不改也不改错意思。
 _NOT_BUT_RE = re.compile(
@@ -594,8 +782,12 @@ def _rewrite_not_but(bare: str) -> str | None:
     return "只是" + b
 
 
-def _clean_ai_sentence(raw: str) -> str | None:
-    """对单句做 A 类清理：返回 None=整句删除；返回字符串=替换后的句子。"""
+def _clean_ai_sentence(raw: str, preserve_stance: bool = False) -> str | None:
+    """对单句做 A 类清理：返回 None=整句删除；返回字符串=替换后的句子。
+
+    ``preserve_stance=True`` 时不动「不是A，而是B」：那是说话人的立场/纠正，
+    不是语气填充。旧调用（不传）仍走原来的状态词重写。
+    """
     s = raw.strip()
     if not s:
         return raw
@@ -614,13 +806,14 @@ def _clean_ai_sentence(raw: str) -> str | None:
     # 自我旁白式宣稱（整句恰是那句，或句末只多了个语气词）
     if _TRAIL_TONE_RE.sub("", bare).strip() in _SELF_NARRATION:
         return None
-    rewritten = _rewrite_not_but(bare)
-    if rewritten is not None:
-        return rewritten + (tail or "")
+    if not preserve_stance:
+        rewritten = _rewrite_not_but(bare)
+        if rewritten is not None:
+            return rewritten + (tail or "")
     return raw
 
 
-def _strip_ai_phrases(part: str) -> str:
+def _strip_ai_phrases(part: str, preserve_stance: bool = False) -> str:
     """A 类：删掉自我旁白固定句。删空了就退回原句，别让消息变空。"""
     chunks = _SENTENCE_SPLIT_RE.split(part)
     out: list[str] = []
@@ -631,7 +824,7 @@ def _strip_ai_phrases(part: str) -> str:
             skip_next = False
             continue
         if index % 2 == 0:
-            new = _clean_ai_sentence(chunk)
+            new = _clean_ai_sentence(chunk, preserve_stance)
             if new is None:
                 skip_next = True
                 changed = True
@@ -788,16 +981,65 @@ def _cap_body_reaction(part: str, max_n: int) -> str:
     return result or part
 
 
-def polish(text: str, max_parts: int | None = None) -> str:
+def _policy_knob(policy, name: str, default):
+    """从注入的 policy（对象或 mapping）读一个开关；没有就用 default。"""
+    if policy is None:
+        return default
+    if isinstance(policy, Mapping):
+        return policy.get(name, default)
+    return getattr(policy, name, default)
+
+
+def polish(text: str, max_parts: int | None = None, *, policy=None) -> str:
     """Tidy common voice artifacts without interpreting the reply's meaning.
 
     max_parts 不给时读配置 reply.max_parts（默认 3）。超出的部分并到最后一条，
     绝不为了凑条数把几条消息用换行重新粘成一条。
+
+    ``policy`` 可选（``reply_policy.ReplyPolicy`` 或同名字段的 mapping）：
+    传了就用它，**完全不读固定路径的 data/config.json**；不传时保持旧行为
+    （按文件 mtime 热读，输出语义不变）。后续 ai_chat/proactive 接线用
+    ``reply_policy.policy_for(bot)`` 构造后传进来。
     """
     if not text or "<pass>" in text:
         return text
 
-    limit = _configured_max_parts() if max_parts is None else max(1, int(max_parts))
+    if policy is None:
+        limit = (_configured_max_parts() if max_parts is None
+                 else max(1, int(max_parts)))
+        strip_ai = _configured_strip_ai()
+        body_max = _configured_body_reaction_max()
+        filler_opener = _configured_strip_filler_opener()
+        tone_trim = _configured_tone_trim()
+        space_to_comma = _configured_space_to_comma()
+        period_soften = _configured_period_soften()
+        guard = False
+        preserve_questions = preserve_stance = preserve_particles = False
+        protect_literals = False
+    else:
+        raw_limit = _policy_knob(policy, "max_parts", 3)
+        limit = (max(1, int(max_parts)) if max_parts is not None
+                 else max(1, int(raw_limit)))
+        strip_ai = bool(_policy_knob(policy, "strip_ai_phrases", True))
+        body_max = max(0, int(_policy_knob(policy, "body_reaction_max", 1)))
+        filler_opener = bool(_policy_knob(policy, "strip_filler_opener", True))
+        space_to_comma = bool(_policy_knob(policy, "space_to_comma", False))
+        period_soften = bool(_policy_knob(policy, "period_soften", False))
+        try:
+            tone_trim = max(0.0, min(1.0, float(
+                _policy_knob(policy, "tone_trim", 0.7))))
+        except (TypeError, ValueError):
+            tone_trim = 0.7
+        guard = bool(_policy_knob(policy, "semantic_guard", True))
+        preserve_questions = guard and bool(
+            _policy_knob(policy, "preserve_questions", True))
+        preserve_stance = guard and bool(
+            _policy_knob(policy, "preserve_stance", True))
+        preserve_particles = guard and bool(
+            _policy_knob(policy, "preserve_particles", True))
+        protect_literals = guard and bool(
+            _policy_knob(policy, "protect_literals", True))
+
     if _is_roleplay(text):
         # 语C：不拆换行、不去引号、不删结巴、不剪追问，整段留在一条里
         parts = [piece for piece in (_polish_roleplay_part(raw)
@@ -808,22 +1050,30 @@ def polish(text: str, max_parts: int | None = None) -> str:
     parts: list[str] = []
     for raw in _split_parts(text):
         # 先整段清理（引号/开场白要对整段判断），再按换行分条
-        for piece in _split_newlines(_polish_part(raw)):
+        for piece in _split_newlines(_polish_part(raw, space_to_comma)):
             if piece:
                 parts.append(piece)
-    if _configured_strip_ai():
-        parts = [_strip_ai_phrases(p) for p in parts]
-    parts = _cap_body_reaction_reply(parts, _configured_body_reaction_max())
-    if _configured_strip_filler_opener() and parts:
+    if strip_ai:
+        parts = [_strip_ai_phrases(p, preserve_stance) for p in parts]
+    parts = _cap_body_reaction_reply(parts, body_max)
+    if filler_opener and parts:
         # 只整条回覆的第一条，削不空（_strip_filler_opener 自己有长度保护）
         parts[0] = _strip_filler_opener(parts[0])
     parts = [p for p in parts if p]
-    parts = _drop_tag_question(parts)
+    parts = _drop_tag_question(parts, guarded=preserve_questions)
     # 语气词削减放在「呢/吧 问句」处理之后：先判断这是不是「你呢？」这种标签问句，
     # 否则把「呢」削掉会让问句识别失效，反而多留一句。
-    tone_trim = _configured_tone_trim()
     if tone_trim > 0:
-        parts = [_trim_tone_particles(p, tone_trim) for p in parts]
+        parts = [_trim_tone_particles(
+            p, tone_trim,
+            guard=preserve_particles,
+            protect_questions=preserve_questions,
+            protect_literals=protect_literals)
+            for p in parts]
+    if period_soften:
+        # 放在最后、且按条处理：句尾句号去掉、短句句号换逗号。语C 那条早退
+        # 分支不走这里——对戏靠省略号/波浪号收尾，句号本来就不是重点。
+        parts = [_soften_periods(p) for p in parts if p]
     parts = _merge_parts(parts, limit)
     return _non_empty("‖".join(part for part in parts if part), text)
 

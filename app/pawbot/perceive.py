@@ -17,14 +17,59 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import os
 import re
 import time
 
+from . import identity
 from . import message as msg
+from . import paths as layout
+from . import perception
 from . import speech
 from . import video
 from . import vision
 from .log import log
+
+#: 惰性挂在 bot 上的 FactStore（每个 bot 一个，见 ``fact_store_for_bot``）。
+_FACT_STORE_ATTR = "perception_fact_store"
+
+
+def fact_store_for_bot(bot):
+    """每个 bot 惰性拿一个落盘的 FactStore（``state/perception/vision``）。
+
+    只在**已经启用 state/ 布局**的 bot 上启用磁盘缓存：``paths.for_bot`` 给出
+    DataPaths 且 ``state/`` 存在时，目录取 ``state_dir("perception")``；
+    老测试用的裸 bot / 没迁移的数据根返回 ``None``，由 ``vision`` 使用它自己的
+    纯内存默认缓存（行为与旧测试一致，也不会在仓库里造目录）。
+
+    传进来的 ``bot.fact_store``（测试注入）优先；找不到时不在 bot 上塞任何
+    与图片身份有关的数据，缓存键/值仍完全由 ``perception`` 管。
+    """
+    if bot is None:
+        return None
+    injected = getattr(bot, "fact_store", None)
+    if injected is not None and callable(getattr(injected, "run", None)):
+        return injected
+    cached = getattr(bot, _FACT_STORE_ATTR, None)
+    if cached is not None and callable(getattr(cached, "run", None)):
+        return cached
+    if not isinstance(getattr(bot, "paths", None), layout.DataPaths):
+        return None
+    try:
+        data_paths = layout.for_bot(bot)
+        if not os.path.isdir(data_paths.state_root):
+            # state/ 还没启用：不猜旧位置，也不在这里代做迁移。
+            return None
+        store = perception.FactStore(
+            directory=data_paths.state_dir("perception"), namespace="vision")
+    except Exception as e:      # 落盘不可用只降级为纯内存，不影响看图
+        log.warn(f"感知事实缓存初始化失败（本次用纯内存）：{type(e).__name__} {e}")
+        return None
+    try:
+        setattr(bot, _FACT_STORE_ATTR, store)
+    except Exception:
+        pass
+    return store
 
 
 def _message_id_variants(message_id) -> list:
@@ -96,7 +141,21 @@ async def _fetch_quoted(conn, message_id) -> tuple[list[dict] | None, dict]:
         keys = list(data)[:6] if isinstance(data, dict) else type(data).__name__
         log.info(f"引用消息没有正文 {message_id!r}：回包字段 {keys}")
         return None, sender
-    return msg.normalize(segs), sender
+    normalized = _TransportSegments(msg.normalize(segs))
+    # 数组格式＝协议端按消息元素生成；CQ 字符串是重新解析的，不可信。
+    normalized.transport_trusted = isinstance(segs, list)
+    return normalized, sender
+
+
+class _TransportSegments(list):
+    """协议端回包里的段列表；``transport_trusted`` 记「是不是数组格式」。
+
+    只有数组格式才认为本地媒体路径由协议端生成（可信）；CQ 字符串会走
+    ``message.cq_to_array`` 重新解析，用户文本里的 ``[CQ:image,file=...]``
+    也可能变成图片段，所以本地路径必须 fail-closed（除非配置了允许目录）。
+    """
+
+    transport_trusted = False
 
 
 # ---------------------------------------------------------------- 合并转发
@@ -180,6 +239,8 @@ async def _fetch_forward(conn, forward_id, _depth: int = 0) -> tuple[str, list[d
         sender = node.get("sender") if isinstance(node.get("sender"), dict) else {}
         name = str(sender.get("card") or sender.get("nickname")
                    or sender.get("user_id") or "有人")
+        # 归属只认真实 sender.user_id；昵称只用于展示，不能拿来反查是谁。
+        sender_uid = identity.uid_of(sender.get("user_id"))
         body, imgs = await _node_body(conn, node, _depth)
         if imgs and len(images) < 9:
             for img in imgs[:9 - len(images)]:
@@ -188,6 +249,7 @@ async def _fetch_forward(conn, forward_id, _depth: int = 0) -> tuple[str, list[d
                 copy = dict(img)
                 # 记下这张转发图是谁发的；内层转发已经带上的就不覆盖
                 copy.setdefault("_from", name)
+                copy.setdefault("_uid", sender_uid)
                 images.append(copy)
         if body:
             lines.append(f"{name}：{body}")
@@ -293,6 +355,57 @@ def _nicknames(bot) -> list[str]:
     return [str(n) for n in names if str(n or "").strip()]
 
 
+def _configured_local_roots(config) -> tuple[str, ...]:
+    """配置/代码批准的本地图片目录（``vision.local_roots``）。
+
+    默认空：图片段里的本地路径一律拒绝。只填「协议端/运维明确批准」的媒体
+    缓存目录；不要填数据根、人设、state 或凭证所在目录 —— 那等于把任意文件
+    读取又放回来了。
+    """
+    try:
+        raw = config.get("vision.local_roots", ())
+    except Exception:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return ()
+    roots = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            roots.append(os.path.expanduser(text))
+    return tuple(roots)
+
+
+def _event_transport_trusts_local(ev) -> bool:
+    """这条事件的本地媒体路径是否由 OneBot 协议端生成（可信）。
+
+    只看 ``ev.raw``：``message`` 是**数组**（OneBot 数组格式，NapCat 由消息元素
+    生成）才可信；``message`` 是 CQ 字符串时 ``message.cq_to_array`` 会把用户
+    文本里的 ``[CQ:image,file=...]`` 解析成图片段 —— 那是不可信输入。拿不到原始
+    事件（``ev.raw`` 缺失/形状不对）同样按不可信处理（fail-closed）。
+
+    注意：这只决定「本地路径能不能读」，**不**放松远程 URL 的校验 —— 即使事件
+    来自协议端，段里伪造的 ``url`` 仍然只允许公网 http(s)。
+    """
+    raw = getattr(ev, "raw", None)
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("post_type") not in ("message", "message_sent"):
+        return False
+    return isinstance(raw.get("message"), list)
+
+
+def _forward_local_trusted(forward_segments: list[dict]) -> bool:
+    """合并转发的图只能来自节点里的数组消息（``_node_body`` 只收这种）。
+
+    ``_node_body`` 遇到字符串正文直接返回、不收集图片段，所以拿到图就说明
+    协议端给的是数组消息。
+    """
+    return bool(forward_segments)
+
+
 async def _record_bytes(conn, seg: dict, config) -> bytes | None:
     """拿一段语音的音频字节。优先让 NapCat 转成 mp3，其次直接下载。"""
     data = seg.get("data") or {}
@@ -383,56 +496,95 @@ def _is_sticker(seg: dict) -> bool:
     return False
 
 
+class _ImageSegments(list):
+    """图片段列表 + 本地来源许可。
+
+    ``vision._load_bytes`` 的 ``local_roots`` / ``trusted_local`` 跟着列表走，
+    这样 ``_image_bytes_tagged`` 的签名保持「只吃一个段列表」不变（老测试/桩
+    不用改），来源许可也不会因为漏传参数而静默放开。
+    """
+
+    local_roots: tuple = ()
+    trusted_local = False
+
+
+def _with_source_policy(segments, local_roots, trusted_local) -> _ImageSegments:
+    marked = _ImageSegments(segments or [])
+    marked.local_roots = tuple(local_roots or ())
+    marked.trusted_local = bool(trusted_local)
+    return marked
+
+
 def _image_bytes(segments: list[dict]) -> list[bytes]:
     """读出图片段的原始字节（下载 / 本地路径 / base64 都走 vision 那套）。"""
     return [raw for raw, _sticker in _image_bytes_tagged(segments)]
 
 
 def _image_bytes_tagged(segments: list[dict]) -> list[tuple[bytes, bool]]:
-    """同上，但每张图带回「是不是表情包」，供看图时选不同的提示词。"""
+    """同上，但每张图带回「是不是表情包」，供看图时选不同的提示词。
+
+    本地来源许可从 ``_ImageSegments`` 上读；普通 list 没有就按「不可信、无允许
+    目录」处理（本地路径 fail-closed）。
+    """
+    local_roots = getattr(segments, "local_roots", ())
+    trusted_local = bool(getattr(segments, "trusted_local", False))
     out: list[tuple[bytes, bool]] = []
     for seg in segments:
         if not isinstance(seg, dict) or seg.get("type") != "image":
             continue
         for src in vision._segment_sources(seg):
-            raw = vision._load_bytes(src)
+            raw = vision._load_bytes(src, local_roots=local_roots,
+                                     trusted_local=trusted_local)
             if raw:
                 out.append((raw, _is_sticker(seg)))
                 break
     return out
 
 
-async def _read_images(segments: list[dict], config) -> list[bytes]:
+async def _read_images(segments: list[dict], config, *, local_roots=None,
+                       trusted_local: bool = False) -> list[bytes]:
     loop = asyncio.get_running_loop()
+    marked = _with_source_policy(segments, local_roots, trusted_local)
     try:
-        return await loop.run_in_executor(None, _image_bytes, segments)
+        return await loop.run_in_executor(None, _image_bytes, marked)
     except Exception as e:
         log.debug(f"取原图失败：{type(e).__name__}")
         return []
 
 
-async def _see(raws: list[bytes], config, mode: str = "") -> tuple[str, list[str]]:
+async def _preview_urls(raws: list[bytes]) -> list[str]:
+    """给主模型看的原图 / 宫格预览；失败只回空，不影响转述。"""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, vision.preview_urls, raws)
+    except Exception as e:
+        log.debug(f"拼预览图失败：{type(e).__name__}")
+        return []
+
+
+async def _see(raws: list[bytes], config, mode: str = "",
+               fact_store=None) -> tuple[str, list[str]]:
     """一次看完这串图，返回 (转述, 给主模型看的 data URL)。
 
-    多张图由 vision.see 拼成宫格只打一次模型，不再逐张串行；
+    多张图由 vision 拼成宫格只打一次模型，不再逐张串行；
     图数 >4 时主模型拿到的是「宫格 + 前 2 张原图」。
     整体有硬超时：宁可没有转述，也不把回覆拖死。
+
+    ``fact_store`` 只在生产路径传进来（``fact_store_for_bot`` 惰性建的
+    ``state/perception`` 缓存）。命中缓存且事实足够时 ``omit_original_image``
+    为真，这里就**不把原图再塞回主模型**，但保留缓存里的事实描述；没命中
+    的新图仍然照旧附图，绝不假装缓存看过一张没见过的图。不传 ``fact_store``
+    时走原来的 ``vision.see`` 路径，老测试/老调用方行为不变。
     """
     raws = [r for r in (raws or []) if r][:vision.MAX_GRID_IMAGES]
     if not raws:
         return "", []
-    loop = asyncio.get_running_loop()
-    try:
-        urls = await loop.run_in_executor(None, vision.preview_urls, raws)
-    except Exception as e:
-        log.debug(f"拼预览图失败：{type(e).__name__}")
-        urls = []
 
     # 看图可以走另一家（主模型换渠道时，这里仍用原来那家的 key）
     key = str(config.get("llm.vision_api_key", "")
               or config.get("llm.api_key", "")).strip()
     if not key:
-        return "", urls
+        return "", await _preview_urls(raws)
     base = str(config.get("llm.vision_base_url", "")
                or config.get("llm.base_url", ""))
     model = str(config.get("llm.vision_model", "") or config.get("llm.model", ""))
@@ -444,6 +596,30 @@ async def _see(raws: list[bytes], config, mode: str = "") -> tuple[str, list[str
     # 备用模型可能跟主模型不是同一个渠道：没单独配 key 就用聊天链的 key
     fallback_key = str(config.get("llm.api_key", "") or "").strip()
     total = budget + (fallback_budget if fallback else 0) + 10
+
+    loop = asyncio.get_running_loop()
+    see_meta = getattr(vision, "see_with_meta", None)
+    if fact_store is not None and callable(see_meta):
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: see_meta(
+                        raws, key, base, model, budget, effort,
+                        fallback, fallback_budget, fallback_key,
+                        mode=mode, fact_store=fact_store)),
+                timeout=total)
+        except Exception as e:
+            log.warn(f"看图超时/失败：{type(e).__name__} {e}")
+            return "", await _preview_urls(raws)
+        desc = str(getattr(result, "text", "") or "")
+        cache_hit = bool(getattr(result, "cache_hit", False))
+        omit = bool(getattr(result, "omit_original_image", False))
+        if cache_hit and omit:
+            return desc, []
+        return desc, await _preview_urls(raws)
+
+    # 老路径：没有 per-bot FactStore（老测试 / 裸 bot）时保持原样。
+    urls = await _preview_urls(raws)
     try:
         desc = await asyncio.wait_for(
             loop.run_in_executor(
@@ -457,30 +633,48 @@ async def _see(raws: list[bytes], config, mode: str = "") -> tuple[str, list[str
         return "", urls
 
 
-async def _describe_images(segments: list[dict], config) -> tuple[str, list[str]]:
+async def _describe_images(segments: list[dict], config, *, local_roots=None,
+                           trusted_local: bool = False) -> tuple[str, list[str]]:
     """先取原图（快、不依赖模型），再尝试详细转述（有超时上限）。"""
-    raws = await _read_images(segments, config)
+    raws = await _read_images(segments, config, local_roots=local_roots,
+                              trusted_local=trusted_local)
     if not raws:
         return "", []
     return await _see(raws, config)
 
 
 async def _image_details(segments: list[dict], config,
-                         describe_budget: int) -> list[dict]:
+                         describe_budget: int, fact_store=None, *,
+                         local_roots=None,
+                         trusted_local: bool = False) -> list[dict]:
     """逐张转述，保留每张图自己的 data URL；描述预算之外的图仍保留原图。
 
     表情包（sub_type=1 / summary 含「表情」）走 sticker 模式：只要「表达什么意思」，
     不要画面描述 —— 群里没人想看「一只橘猫举着牌子写着…」这种转述。
+
+    ``fact_store`` 是可选的生产缓存（``state/perception``）；不传时与旧行为一致。
+    ``local_roots`` / ``trusted_local`` 是本地图片的显式来源许可（见
+    ``vision._load_bytes``），不传时本地路径一律拒绝。
+    每张 detail 同时带回 ``from`` / ``uid``（转发图取自节点发送者），供上层
+    统一编号时保留归属；这些归属字段只存在于内存事件里，不写进事实缓存。
     """
     if not segments:
         return []
-    tagged = await asyncio.get_running_loop().run_in_executor(
-        None, _image_bytes_tagged, segments)
-    details: list[dict] = []
+    image_segments = [seg for seg in segments
+                      if isinstance(seg, dict) and seg.get("type") == "image"]
     loop = asyncio.get_running_loop()
+    marked = _with_source_policy(segments, local_roots, trusted_local)
+    tagged = await loop.run_in_executor(None, _image_bytes_tagged, marked)
+    details: list[dict] = []
     for pos, (raw, sticker) in enumerate(tagged[:vision.MAX_GRID_IMAGES]):
+        source = image_segments[pos] if pos < len(image_segments) else {}
+        src_from = str(source.get("_from") or "")
+        src_uid = identity.uid_of(source.get("_uid"))
         if pos < describe_budget:
-            desc, urls = await _see([raw], config, mode="sticker" if sticker else "")
+            see_kwargs = {"fact_store": fact_store} if fact_store is not None else {}
+            desc, urls = await _see([raw], config,
+                                    mode="sticker" if sticker else "",
+                                    **see_kwargs)
         else:
             desc = ""
             try:
@@ -489,7 +683,8 @@ async def _image_details(segments: list[dict], config,
                 log.debug(f"生成图片预览失败：{type(e).__name__}")
                 urls = []
         details.append({"desc": str(desc or "").strip(), "urls": urls,
-                        "sticker": bool(sticker)})
+                        "sticker": bool(sticker), "from": src_from,
+                        "uid": src_uid})
     return details
 
 
@@ -510,8 +705,10 @@ async def _fetch_quote_chain(conn, reply_id, self_id) -> list[dict]:
             break
         who = str(sender.get("card") or sender.get("nickname") or "")
         plain = _drop_placeholders(msg.to_plain(segs, self_id=self_id))
-        chain.append({"depth": depth, "from": who, "text": plain,
-                      "segments": segs, "sender": sender})
+        # 归属只认真实 sender.user_id（QQ 号），不按昵称反查/硬猜。
+        chain.append({"depth": depth, "from": who,
+                      "uid": identity.uid_of(sender.get("user_id")),
+                      "text": plain, "segments": segs, "sender": sender})
         next_id = msg.find_reply_id(segs)
     return chain
 
@@ -655,6 +852,13 @@ async def enrich(bot, conn, ev) -> None:
 
     ev.quoted_chain = []
     ev.image_items = []
+    # 每次感知都从「没有 uid」开始：取不到真实 sender.user_id 时宁可留空，
+    # 也不能让上一次事件/昵称反查的 uid 串到这一条引用上。
+    ev.quoted_uid = ""
+    ev.quoted_is_self = False
+    # 生产路径用 per-bot 的 FactStore（state/perception）；裸 bot / 老测试为 None，
+    # 继续走 vision 的纯内存默认缓存，测试行为不变。
+    fact_store = fact_store_for_bot(bot)
 
     # 先把消息取回来，图片稍后按「本条 → 引用 → 转发」统一处理。
     quote_chain = []
@@ -668,12 +872,12 @@ async def enrich(bot, conn, ev) -> None:
         if quote_chain:
             sender = quote_chain[0]["sender"]
             ev.quoted_from = quote_chain[0]["from"]
-            uid = sender.get("user_id")
-            if uid not in (None, ""):
-                try:
-                    ev.quoted_is_self = int(uid) == int(getattr(ev, "self_id", 0) or 0)
-                except (TypeError, ValueError):
-                    ev.quoted_is_self = False
+            quoted_uid = quote_chain[0].get("uid") or identity.uid_of(
+                sender.get("user_id"))
+            ev.quoted_uid = quoted_uid
+            if quoted_uid:
+                ev.quoted_is_self = quoted_uid == identity.uid_of(
+                    getattr(ev, "self_id", 0))
 
     forward_id = ""
     for seg in ev.message:
@@ -716,55 +920,77 @@ async def enrich(bot, conn, ev) -> None:
         ev.talked_about = True
 
     # ---------- 图片：统一编号，但旧的原图字段仍按来源分别保留 ----------
+    # 本地图片路径默认不可信（见 vision._load_bytes）：只有 OneBot 数组格式
+    # 事件/回包里的媒体才带 trusted_local 许可；CQ 字符串可能被用户文本伪造，
+    # 只能靠配置的 vision.local_roots 允许目录放行。
+    local_roots = _configured_local_roots(bot.config)
+    transport_trusts_local = _event_transport_trusts_local(ev)
+    detail_kwargs: dict = {}
+    if fact_store is not None:
+        detail_kwargs["fact_store"] = fact_store
+    if local_roots:
+        detail_kwargs["local_roots"] = local_roots
+    own_kwargs = dict(detail_kwargs)
+    if transport_trusts_local:
+        own_kwargs["trusted_local"] = True
     own_segments = [s for s in ev.message if s.get("type") == "image"]
-    own_images = await _image_details(own_segments, bot.config, 4)
+    own_images = await _image_details(own_segments, bot.config, 4, **own_kwargs)
     describe_left = max(0, 4 - len(own_images))
     for item in quote_chain:
+        quote_kwargs = dict(detail_kwargs)
+        if getattr(item.get("segments"), "transport_trusted", False):
+            quote_kwargs["trusted_local"] = True
         item["images"] = await _image_details(
-            item["image_segments"], bot.config, describe_left)
+            item["image_segments"], bot.config, describe_left, **quote_kwargs)
         describe_left = max(0, describe_left - len(item["images"]))
-    forward_images = await _image_details(forward_segments, bot.config, describe_left)
+    forward_kwargs = dict(detail_kwargs)
+    if _forward_local_trusted(forward_segments):
+        forward_kwargs["trusted_local"] = True
+    forward_images = await _image_details(
+        forward_segments, bot.config, describe_left, **forward_kwargs)
 
     own_from = getattr(ev, "sender_name", "") or ""
-    own_uid = str(getattr(ev, "user_id", "") or "")
-    own_self = False
-    try:
-        own_self = bool(own_uid) and own_uid == str(getattr(ev, "self_id", "") or "")
-    except Exception:
-        own_self = False
+    own_uid = identity.uid_of(getattr(ev, "user_id", ""))
+    own_self = bool(own_uid) and own_uid == identity.uid_of(
+        getattr(ev, "self_id", 0))
 
-    groups = [("本条", own_images, own_from, own_self)]
+    groups = [("本条", own_images, own_from, own_uid, own_self)]
     for qitem in quote_chain:
-        q_self = False
         qsender = qitem.get("sender") or {}
-        try:
-            qu = str(qsender.get("user_id") or "")
-            q_self = bool(qu) and qu == str(getattr(ev, "self_id", "") or "")
-        except Exception:
-            q_self = False
-        groups.append(("引用", qitem["images"], qitem.get("from", "") or "", q_self))
-    groups.append(("转发", forward_images, "", False))
-    total = sum(len(images) for _source, images, _from, _self in groups)
+        qui = qitem.get("uid") or identity.uid_of(qsender.get("user_id"))
+        groups.append(("引用", qitem["images"], qitem.get("from", "") or "",
+                       qui, bool(qui) and qui == identity.uid_of(
+                           getattr(ev, "self_id", 0))))
+    groups.append(("转发", forward_images, "", "", False))
+    total = sum(len(images) for _source, images, _from, _uid, _self in groups)
     idx = 0
-    for source, images, src_from, src_self in groups:
+    for source, images, src_from, src_uid, src_self in groups:
         for item in images:
             idx += 1
             item["idx"] = idx
             item["source"] = source
-            # 谁发的：本条=sender，引用=quoted_from，转发=节点里的原发送者
-            item["from"] = src_from or str(item.get("_from") or "") or ""
+            # 谁发的：本条=sender，引用=quoted_from，转发=节点里的原发送者。
+            # 昵称只用于展示，归属以真实 uid 为准。
+            item["from"] = (src_from or str(item.get("from") or "")
+                            or str(item.get("_from") or "") or "")
+            item["uid"] = (src_uid or identity.uid_of(item.get("uid"))
+                           or identity.uid_of(item.get("_uid")))
             item["self"] = bool(src_self)
             item["data_url"] = item["urls"][0] if item["urls"] else ""
             desc = item["desc"]
             item["display_desc"] = f"【图{idx}】{desc}" if total > 1 and desc else desc
             ev.image_items.append({"idx": idx, "desc": item["display_desc"],
                                    "source": source, "data_url": item["data_url"],
-                                   "from": item["from"], "self": item["self"],
+                                   "from": item["from"], "uid": item["uid"],
+                                   "self": item["self"],
                                    "sticker": bool(item.get("sticker"))})
 
     own_urls = [url for item in own_images for url in item["urls"] if url]
     if own_urls:
         ev.image_data = own_urls[:int(bot.config.get("llm.vision_max_images", 4) or 4)]
+    if own_images:
+        # 缓存命中时 urls 为空，仍然记一条带描述的占位：下一轮「刚才那张图」
+        # 还能按 uid + 描述回看，但不会把同一张原图反复塞回主模型。
         _push_recent(bot, ev.session_id,
                      _recent_entries(own_images, own_from, own_uid, own_self))
     if quote_chain:
@@ -779,22 +1005,21 @@ async def enrich(bot, conn, ev) -> None:
         for qitem in quote_chain:
             qfrom = qitem.get("from", "") or ""
             qsender = qitem.get("sender") or {}
-            q_self = False
-            try:
-                qu = str(qsender.get("user_id") or "")
-                q_self = bool(qu) and qu == str(getattr(ev, "self_id", "") or "")
-            except Exception:
-                q_self = False
+            qui = qitem.get("uid") or identity.uid_of(qsender.get("user_id"))
+            q_self = bool(qui) and qui == identity.uid_of(
+                getattr(ev, "self_id", 0))
             _push_recent(bot, ev.session_id,
-                         _recent_entries(qitem["images"], qfrom,
-                                         str(qsender.get("user_id") or ""), q_self))
+                         _recent_entries(qitem["images"], qfrom, qui, q_self))
     forward_urls = [url for item in forward_images for url in item["urls"] if url]
     if forward_urls:
         ev.forward_image_data = forward_urls
     fwd_entries: list[dict] = []
     for item in forward_images:
-        ffrom = str(item.get("_from") or "") or "转发内容里的人"
-        fwd_entries.extend(_recent_entries([item], ffrom, "", False))
+        ffrom = str(item.get("from") or item.get("_from") or "") \
+            or "转发内容里的人"
+        fwd_entries.extend(_recent_entries(
+            [item], ffrom, item.get("uid") or identity.uid_of(item.get("_uid")),
+            False))
     if fwd_entries:
         _push_recent(bot, ev.session_id, fwd_entries)
 
@@ -832,6 +1057,8 @@ async def enrich(bot, conn, ev) -> None:
             ev.quoted_from = ""
             log.info(f"引用消息内容取不到 {ev.reply_id!r}：get_msg 未返回消息段")
         ev.quoted_chain = [{"depth": item["depth"], "from": item["from"],
+                            "uid": item.get("uid") or identity.uid_of(
+                                (item.get("sender") or {}).get("user_id")),
                             "text": item["text"],
                             "images": [d["display_desc"] for d in item["images"]
                                        if d["display_desc"]]}

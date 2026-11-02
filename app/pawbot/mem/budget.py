@@ -36,6 +36,21 @@ from __future__ import annotations
 # 砍的顺序：远的先砍。L0 最后砍 —— 她要回的是「刚才那句」，不是「上周那句」
 砍序 = ("L3", "L2", "L1", "L0")
 
+# 活跃期（shortterm）是**旁路层**：它不参与上面这套「偏好预算」，只受自己的
+# 硬容量（默认 128000 字）约束。放在这里只是让调用方必须显式走旁路参数，
+# 免得以后有人把活跃期塞进 请求 里被静默砍掉。
+旁路层 = ("active",)
+
+
+def 分配带旁路(请求: dict, 旁路请求: dict | None = None,
+               总预算: int | None = None, 上限: dict | None = None,
+               下限: dict | None = None) -> tuple[dict, dict, list[dict]]:
+    """正常四层走预算，旁路层原样返回。返回 (分配, 旁路分配, 砍日志)。"""
+    分配结果, 日志 = 分配(请求, 总预算=总预算, 上限=上限, 下限=下限)
+    旁路 = {str(k): max(0, int(v or 0)) for k, v in (旁路请求 or {}).items()
+            if k in 旁路层}
+    return 分配结果, 旁路, 日志
+
 
 def 单层截断(请求: dict, 上限: dict | None = None) -> tuple[dict, list[dict]]:
     """先按单层上限截一次。返回 (截后, 日志)。"""

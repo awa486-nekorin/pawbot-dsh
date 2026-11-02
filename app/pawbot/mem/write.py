@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 
-from .. import judge
+from .. import identity, judge
 from ..log import log
 from .entities import EntityStore, _短哈希, _天
 
@@ -38,7 +38,10 @@ _提示通用 = (
     "  importance 1~5（1=随口提过，5=约定/关系这种要一直记得的）\n"
     "  keywords   3~8 个关键词\n"
     "  promises   这一小段里新出现的约定；没有就给 []\n"
-    "认人：「昵称(尾号1234)」的尾号才是身份，同名不同尾号是不同的人。"
+    "认人：说话人后面括号里的**完整 uid**（形如 uid:1000000002）才是稳定身份。\n"
+    "昵称会改、别名不可靠、尾号后四位会撞车：同一个 uid 换了昵称还是同一个人；"
+    "昵称相同但 uid 不同，就是不同的人，绝不能合并；只凭昵称或后四位相同更不许合并。\n"
+    "写着「uid未知」的说明没拿到 QQ 号 —— 保持未知，别猜成某一个人，也别并进同名的人。\n"
     "「我（大肥鱼）」是这个 AI 群友自己，小结里称「大肥鱼」。\n\n"
     "【这一小段对话】\n{turn}"
 )
@@ -55,13 +58,27 @@ def _选提示(session_id: str) -> str:
     return _PROMPT["私"] if str(session_id or "").startswith("private_") else _PROMPT["群"]
 
 
+def _说话人(r: dict) -> str:
+    """判官材料里的说话人标签：**完整 uid**，不是昵称、别名或尾号。
+
+    记忆要跨轮、跨天、跨群认人，而昵称随时会改、别名不可靠、尾号后四位会撞车 ——
+    材料里必须出现完整 uid，提示词里那句「完整 uid 才是稳定身份」才落得下去。
+    私聊窗口里既没有昵称也没有 uid 的行仍写「对方」（在场只有大肥鱼和对方，
+    不凭空造一个「群友」）；取不到 uid 的人写「uid未知」，绝不退化成裸昵称。
+    """
+    if r.get("role") == "assistant":
+        return identity.SELF_LABEL
+    if not (str(r.get("who") or "").strip() or str(r.get("uid") or "").strip()):
+        return "对方"
+    return identity.label(r)
+
+
 def _渲染(rows: list[dict], max_chars: int = 2500) -> str:
     """判官材料：一行 = [HH:MM] 谁：正文（跨日才带月日）。
 
     时间基准 = 窗口最后一条的日期（不是「现在」）；截断按整行从尾部取，
     保证时间前缀和说话人标签不被字数截断吃掉。
     """
-    from .. import ctxwin
     行 = []
     if not rows:
         return ""
@@ -71,7 +88,7 @@ def _渲染(rows: list[dict], max_chars: int = 2500) -> str:
         正文 = str(r.get("content") or "").strip()
         if not 正文:
             continue
-        谁 = ctxwin.speaker(r) if (r.get("role") == "assistant" or r.get("who")) else "对方"
+        谁 = _说话人(r)
         ts = float(r.get("ts") or 基准)
         lt = time.localtime(ts)
         前缀 = time.strftime("%H:%M", lt)

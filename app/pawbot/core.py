@@ -29,8 +29,11 @@ from collections import deque
 from typing import Any
 
 from . import event as ev_mod
+from . import identity
 from . import message as msg
+from . import paths as layout
 from . import perceive
+from . import shortterm
 from . import tasks
 from .agent import Agent
 from .bus import BUS
@@ -43,13 +46,14 @@ from .log import log
 from .memory import Memory
 from .memes import MemeBook
 from .longmem import LongMemory
-from .onebot import ActionError, Connection, OneBotServer
+from .onebot import ActionError, Connection, OneBotClient, OneBotServer
 from .persona import Persona
 from .people import PersonBook
 from .spice import Spice
 from .plugin import PluginManager
 from .proactive import Proactive
 from .qzone import Qzone
+from .relay_client import RelayClient
 from .reminders import ReminderService, ReminderStore
 from .safety import SafetyGuard
 from .stickers import StickerBook
@@ -64,11 +68,95 @@ from .tools import ToolBox
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _incoming_body(ev) -> str:
+    """入站消息写进 Store 的正文：文字优先，纯图片保留 `[图片]` 占位。
+
+    ``event.parse`` 已经把消息段转成 ``plain``（图片就是 ``[图片]``），所以正常
+    情况下这里只做去空白；只有上游漏填 ``plain`` 时才按消息段重建，绝不因为
+    「没有文字」把一条只有图片消息丢掉。
+    """
+    body = str(getattr(ev, "plain", "") or "").strip()
+    if body:
+        return body
+    try:
+        return msg.to_plain(getattr(ev, "message", None) or [],
+                            self_id=getattr(ev, "self_id", 0)).strip()
+    except Exception:
+        return ""
+
+
+def _hearing_text(value) -> str:
+    """压成一行、去首尾空白；情绪上下文与判官输入共用。"""
+    return " ".join(str(value or "").split())
+
+
+def _has_meaning(text: str) -> bool:
+    """有没有可解读的内容（字母/数字/汉字）。
+
+    纯标点（「？？！」）不构成情绪刺激：那只是语气符号，不能让她的八维情绪
+    因为一个标点被推着走。图片/语音占位里有汉字，仍然会进判官。
+    """
+    return any(ch.isalnum() for ch in str(text or ""))
+
+
+def _feel_line(row: dict) -> str:
+    """情绪上下文的一行：完整 uid + 清洗过的昵称 + 去换行正文。"""
+    if not isinstance(row, dict):
+        return ""
+    body = _hearing_text(row.get("content"))
+    if not _has_meaning(body):
+        return ""
+    return f"{identity.label(row)}：{body[:60]}"
+
+
+def _open_config(base_dir: str, data_paths) -> Config:
+    """读配置：正常在 ``state/config.json``，还没迁移的数据根就地读旧位置。
+
+    迁移由 ``run.py`` 在 Bot 之前做完；这里只是兜底——直接跑工具脚本、
+    或还没跑过迁移的老数据目录，配置不会「看起来丢了」。
+    """
+    state_config = data_paths.canonical("state", "config.json")
+    if not os.path.isfile(state_config):
+        legacy = os.path.join(base_dir, "data", "config.json")
+        if os.path.isfile(legacy):
+            log.warn("配置仍在旧位置 data/config.json（尚未迁移），本次就地读取；"
+                     "用 run.py 启动时会自动搬进 state/")
+            return Config(os.path.join(base_dir, "data", "config.json"))
+    return Config(state_config)
+
+
+def build_onebot_transport(config, on_event) -> OneBotServer | OneBotClient | RelayClient:
+    """按 ``server.mode`` 选传输方式：reverse（默认，本机监听）/ forward（外拨中继）/
+    relay（高可用后端，lease + ready 门禁 + 内容副本）。
+
+    三者对调用方暴露同一套接口（start/stop/get/connections/on_event），
+    所以 ``Bot.server`` 的既有用法不需要改。forward/relay 不会绑定本地端口。
+    relay 的生命周期回调（on_acquired/on_lost/before_release）由 ``Bot`` 在
+    构造时交给 ``ha_runtime.HARuntime`` 接线；这里只负责按配置构造传输。
+    """
+    mode = str(config.get("server.mode", "reverse") or "reverse").strip().lower()
+    if mode == "forward":
+        return OneBotClient.from_config(config, on_event=on_event)
+    if mode == "relay":
+        return RelayClient.from_config(config, on_event=on_event)
+    if mode not in ("reverse", ""):
+        log.warn(f"未知 server.mode={mode!r}，按 reverse 处理")
+    return OneBotServer(
+        host=config.get("server.host", "0.0.0.0"),
+        port=int(config.get("server.port", 6199)),
+        path=config.get("server.path", "/ws"),
+        access_token=config.get("server.access_token", ""),
+        on_event=on_event,
+    )
+
+
 class Bot:
     def __init__(self, base_dir: str = BASE_DIR):
         self.base_dir = base_dir
-        self.config = Config(os.path.join(base_dir, "data", "config.json"))
-        self.store = Store(os.path.join(base_dir, "data", "sessions.json"),
+        # 数据布局：content/（可搬走）+ state/（机器状态）。数据根仍由 lifecycle 决定。
+        self.paths = layout.resolve(base_dir)
+        self.config = _open_config(base_dir, self.paths)
+        self.store = Store(self.paths.state("sessions.json"),
                            max_turns=int(self.config.get("chat.context_turns", 8)),
                            max_messages=int(self.config.get("chat.context_keep",
                                             self.config.get("chat.context_messages", 300))))
@@ -76,22 +164,23 @@ class Bot:
         self.safety = SafetyGuard(self)
 
         # 人设 / 记忆 / 表情包 / 空间 / 工具 —— 都是纯本地文件，随时可改
-        self.persona = Persona(base_dir, self.config)
-        self.memory = Memory(base_dir, self.config)
-        self.memes = MemeBook(os.path.join(base_dir, "data", "memes.json"), self.config)
-        self.longmem = LongMemory(base_dir, self.config, self.memory)
-        self.diary = Diary(base_dir, self.config)
-        self.hobbies = Hobbies(base_dir, self.config)
-        self.reminders = ReminderStore(os.path.join(base_dir, "data", "reminders.json"))
+        self.persona = Persona(base_dir, self.config, paths=self.paths)
+        self.memory = Memory(base_dir, self.config, paths=self.paths)
+        self.memes = MemeBook(self.paths.content("memes.json"), self.config)
+        self.longmem = LongMemory(base_dir, self.config, self.memory, paths=self.paths)
+        self.diary = Diary(base_dir, self.config, paths=self.paths)
+        self.hobbies = Hobbies(base_dir, self.config, paths=self.paths)
+        self.reminders = ReminderStore(self.paths.state("reminders.json"))
         self.reminder_service = ReminderService(self)
         self._store_flush_task: asyncio.Task | None = None
+        self.minecraft_resident = None
         self._compress_locks: dict[str, asyncio.Lock] = {}
-        self.people = PersonBook(base_dir, self.config)
-        self.spice = Spice(os.path.join(base_dir, "data", "spice.json"),
+        self.people = PersonBook(base_dir, self.config, paths=self.paths)
+        self.spice = Spice(self.paths.state("spice.json"),
                            default=int(self.config.get("spice.default", 0)))
-        self.stickers = StickerBook(base_dir, self.config)
+        self.stickers = StickerBook(base_dir, self.config, paths=self.paths)
         # 图库：带描述的图，专门给「不用再看一遍图」用（跟表情包分开）
-        self.album = Album(base_dir, self.config)
+        self.album = Album(base_dir, self.config, paths=self.paths)
         # 自主改提示词（默认关，见 selfedit.py 的三条硬约束）
         self.selfeditor = SelfEditor(self)
         self.qzone = Qzone(self)
@@ -107,26 +196,25 @@ class Bot:
 
         # 读空气 / 心情 / 主动说话
         self.topic = TopicTracker(self.config.get("topic.history_size", 30),
-                                  os.path.join(base_dir, "data", "topic.json"))
-        self.mood = Mood(os.path.join(base_dir, "data", "mood.json"))
-        self.emotion = Emotion(os.path.join(base_dir, "data", "emotion.json"), self.config)
+                                  self.paths.state("topic.json"))
+        self.mood = Mood(self.paths.state("mood.json"))
+        self.emotion = Emotion(self.paths.state("emotion.json"), self.config)
         # 心情不再单独漂移，改成从八维情绪推导，免得两套状态各说各话
         if self.config.get("emotion.enabled", True):
             self.mood.bind_emotion(self.emotion)
-        self.libido = Libido(os.path.join(base_dir, "data", "libido.json"), self.config)
+        self.libido = Libido(self.paths.state("libido.json"), self.config)
         self.proactive = Proactive(self)
 
         self.plugins = PluginManager(
             os.path.join(base_dir, "plugins"),
-            os.path.join(base_dir, "data", "plugin_state.json"),
+            self.paths.state("plugin_state.json"),
         )
-        self.server = OneBotServer(
-            host=self.config.get("server.host", "0.0.0.0"),
-            port=int(self.config.get("server.port", 6199)),
-            path=self.config.get("server.path", "/ws"),
-            access_token=self.config.get("server.access_token", ""),
-            on_event=self._on_event,
-        )
+        self.server = build_onebot_transport(self.config, self._on_event)
+        # 高可用（server.mode=relay）只在构造时接线一次：reverse / forward 的
+        # 行为完全不变（没有 ha_runtime，也不启动任何额外循环）。
+        self._ha_mode = str(getattr(self.server, "mode", "") or "").lower() == "relay"
+        self._ha_stopping = False
+        self.ha_runtime = self._build_ha_runtime() if self._ha_mode else None
         self.started_at = time.time()
         self.stats = {"recv": 0, "sent": 0, "errors": 0}
         self.recent_events: deque[dict] = deque(maxlen=100)
@@ -138,22 +226,99 @@ class Bot:
         # 用来判断「我这句还没说完，群里是不是已经有人接话了」。
         self.inbound: dict[str, int] = {}
 
+    # ------------------------------------------------------------ 高可用接线
+    def _build_ha_runtime(self):
+        """构造 relay 模式的 HA 运行时，并把三个生命周期回调挂到 ``self.server``。
+
+        这里只依赖 ``RelayClient`` 现有的回调契约（on_acquired/on_lost/
+        before_release）；没有回调或回调失败时返回 None，relay 业务保持关闭
+        （fail closed），但传输层仍可启动。reverse / forward 不会走到这里。
+        """
+        try:
+            from .ha_runtime import HARuntime  # noqa: PLC0415 - 仅 relay 模式需要
+        except Exception as e:  # noqa: BLE001 - 模块缺失时明确降级
+            log.warn(f"HA 运行时不可用，relay 业务保持关闭：{type(e).__name__} {e}")
+            return None
+        try:
+            # 调用方显式注入的副本优先；没有时 HARuntime 会按 relay 的
+            # content_root/content_url 自己构造真实 ContentReplica。
+            replica = getattr(self.server, "replica", None)
+            runtime = HARuntime(self, self.server, replica=replica,
+                                auto_attach=False)
+            base_acquired = runtime.on_acquired
+
+            async def on_acquired(client=None, lease=None):
+                # 先经过 HARuntime 的真实 pull/apply/缓存刷新与 revision 门禁，
+                # 再补刷 core 独有的缓存；两步都完成后才允许返回 revision，
+                # RelayClient 之后才会发 ready。
+                revision = await base_acquired(client, lease)
+                self._refresh_ha_caches()
+                return revision
+
+            # 用包装后的回调接管；attach() 会把它写到 relay 上，并保留旧值。
+            runtime.on_acquired = on_acquired
+            runtime.attach()
+            return runtime
+        except Exception as e:  # noqa: BLE001 - 初始化失败时 relay 仍可启动但无业务
+            log.warn(f"HA 运行时初始化失败，relay 业务保持关闭："
+                     f"{type(e).__name__} {e}")
+            return None
+
+    def _refresh_ha_caches(self) -> dict:
+        """刷新 HARuntime 未覆盖的 core 内存缓存（只读盘，绝不 flush）。
+
+        persona / longmem / memes / hobbies / album / relations 由 HARuntime 的
+        ``refresh_content_caches`` 处理；这里补上 core 自己的 people 与 stickers。
+        失败只记录，不把旧缓存写回磁盘，也不静默假装刷新成功。
+        """
+        refreshed: list[str] = []
+        errors: list[str] = []
+        people = getattr(self, "people", None)
+        cache = getattr(people, "_cache", None)
+        if isinstance(cache, dict):
+            try:
+                cache.clear()
+                refreshed.append("people")
+            except Exception as e:  # noqa: BLE001 - 单个缓存失败不影响其它
+                errors.append(f"people:{type(e).__name__}")
+        stickers = getattr(self, "stickers", None)
+        index = getattr(stickers, "index", None)
+        if callable(index):
+            try:
+                # StickerBook 没有常驻索引缓存，这里做一次显式磁盘读取，
+                # 保证接管后立即看到 canonical 的 stickers/index.json。
+                index()
+                refreshed.append("stickers")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"stickers:{type(e).__name__}")
+        for label in errors:
+            log.warn(f"HA 内容缓存刷新失败：{label}")
+        return {"ok": not errors, "refreshed": refreshed, "errors": errors}
+
     # ------------------------------------------------------------ 生命周期
     async def start(self):
         self.plugins.reload_all()
-        # 云同步：开启 sync.auto_pull_on_start 才后台拉一次；失败只告警，不影响启动
-        try:
-            from . import cloudsync
-            self._auto_pull_thread = cloudsync.start_auto_pull(self.config, self.base_dir)
-        except Exception as e:
-            log.warn(f"云同步启动拉取调度失败（不影响启动）：{type(e).__name__} {e}")
-        # 实时同步：sync.mode=realtime 时起后台线程（本地变化防抖上传 + 远端轮询拉取）
-        try:
-            from . import sync_realtime
-            self.realtime_sync = sync_realtime.start_realtime(self.config, self.base_dir)
-        except Exception as e:
+        self._ha_stopping = False
+        relay_mode = bool(getattr(self, "_ha_mode", False))
+        if relay_mode:
+            # relay 模式的内容只允许 HARuntime 一条通道：legacy 云同步的
+            # auto_pull 与实时同步都是双写来源，必须明确不启动。
+            self._auto_pull_thread = None
             self.realtime_sync = None
-            log.warn(f"实时同步启动调度失败（不影响启动）：{type(e).__name__} {e}")
+        else:
+            # 云同步：开启 sync.auto_pull_on_start 才后台拉一次；失败只告警，不影响启动
+            try:
+                from . import cloudsync
+                self._auto_pull_thread = cloudsync.start_auto_pull(self.config, self.base_dir)
+            except Exception as e:
+                log.warn(f"云同步启动拉取调度失败（不影响启动）：{type(e).__name__} {e}")
+            # 实时同步：sync.mode=realtime 时起后台线程（本地变化防抖上传 + 远端轮询拉取）
+            try:
+                from . import sync_realtime
+                self.realtime_sync = sync_realtime.start_realtime(self.config, self.base_dir)
+            except Exception as e:
+                self.realtime_sync = None
+                log.warn(f"实时同步启动调度失败（不影响启动）：{type(e).__name__} {e}")
         # 本地 TTS 服务不在就后台拉起一次；不 await，别挡住启动
         try:
             from . import tts
@@ -162,13 +327,26 @@ class Bot:
             log.warn(f"TTS 自启动调度失败：{type(e).__name__} {e}")
         if not self._store_flush_task or self._store_flush_task.done():
             self._store_flush_task = asyncio.create_task(self._flush_store_loop(), name="store-flush")
-        try:
-            await self.longmem.maintain(self)
-        except Exception as e:
-            log.warn(f"長期記憶維護失敗：{type(e).__name__} {e}")
+        if not relay_mode:
+            # longmem.maintain 会写 content；standby 阶段不能抢先改便携内容。
+            try:
+                await self.longmem.maintain(self)
+            except Exception as e:
+                log.warn(f"長期記憶維護失敗：{type(e).__name__} {e}")
+        if relay_mode and self.ha_runtime is not None:
+            # 先挂好内容同步循环；业务生产者仍要等 relay ready/can_emit。
+            await self.ha_runtime.start()
         await self.server.start()
+        if relay_mode:
+            # relay 模式的生产者由 HARuntime 在 ready/can_emit 后启动；
+            # 这里绝不提前启动主动发言 / 提醒 / B 站定时任务。
+            if self.ha_runtime is None:
+                log.warn("relay 模式下 HA 运行时不可用：业务生产者保持关闭（fail closed）")
+            return
         await self.proactive.start()
         await self.reminder_service.start()
+        # Minecraft remains optional; any startup failure is logged by the resident and does not affect QQ.
+        await self._start_minecraft_resident()
         # 定时刷 B 站（tools.bili_scroll_times，如 12:40 / 20:00）；没配时间就自己退掉
         try:
             from . import bili_scroll as _bili_scroll
@@ -193,8 +371,43 @@ class Bot:
             except Exception as e:
                 log.warn(f"会话存储落盘失败：{type(e).__name__} {e}")
 
+    async def _start_minecraft_resident(self):
+        if self.config.get("minecraft.enabled", False) is not True:
+            return False
+        try:
+            from .minecraft_resident import MinecraftResident
+            resident = MinecraftResident(self)
+            self.minecraft_resident = resident
+            started = await resident.start()
+            if started is False:
+                self.minecraft_resident = None
+                return False
+            return True
+        except Exception as e:
+            self.minecraft_resident = None
+            log.warn(f"Minecraft resident remains offline: {type(e).__name__}")
+            return False
+
+    async def _stop_minecraft_resident(self):
+        resident = getattr(self, "minecraft_resident", None)
+        self.minecraft_resident = None
+        if resident is not None:
+            try:
+                result = await resident.stop()
+                if result.get("revoked") is not True:
+                    log.warn("Minecraft stop did not confirm guard revocation")
+            except Exception as e:
+                log.warn(f"Minecraft resident stop failed: {type(e).__name__}")
+
     async def stop(self):
+        if getattr(self, "_ha_mode", False):
+            await self._stop_relay()
+            return
+        await self._stop_legacy()
+
+    async def _stop_legacy(self):
         # 部分测试用 Bot.__new__ 造壳，没走 __init__，这里容错一下
+        await self._stop_minecraft_resident()
         刷站 = getattr(self, "_bili_scroll_task", None)
         if 刷站 is not None:
             刷站.cancel()
@@ -231,6 +444,40 @@ class Bot:
         if memes is not None:
             memes.flush()
 
+    async def _stop_relay(self):
+        """relay 模式停机：先让 HARuntime 在仍持 lease 时排空并 flush，再 bye。
+
+        顺序由 ``RelayClient.stop`` 的回调契约保证：它先调 ``before_release``
+        （停生产者 / 排空本 owner 业务 / flush 内容 / push），再发 bye。
+        这里只负责先停本机 state 落盘循环，且**不**使用全局 ``tasks.drain``，
+        更不在非 owner 状态下 flush 便携内容（避免旧缓存覆盖 canonical）。
+        """
+        # 先关 core 自己的业务入口：即使 relay 还在处理停止前的最后一帧，
+        # 也不能再进入业务流水线。
+        self._ha_stopping = True
+        flush_task, self._store_flush_task = self._store_flush_task, None
+        if flush_task is not None:
+            flush_task.cancel()
+            try:
+                await flush_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        server = getattr(self, "server", None)
+        runtime = getattr(self, "ha_runtime", None)
+        try:
+            if server is not None:
+                await server.stop()
+        finally:
+            if runtime is not None:
+                try:
+                    await runtime.stop()
+                except Exception as e:  # noqa: BLE001 - 停机清理不应阻断最后 flush
+                    log.warn(f"停止 HA 运行时失败：{type(e).__name__} {e}")
+            # 只保存本机状态（state）；便携内容已由 before_release 在持 lease 时处理。
+            self.mood.save()
+            self.topic.save(force=True)
+            self.store.flush(force=True)
+
     def conn_for(self, self_id: int | None = None) -> Connection | None:
         return self.server.get(self_id)
 
@@ -244,6 +491,20 @@ class Bot:
 
     # ------------------------------------------------------------ 事件入口
     async def _on_event(self, conn: Connection, raw: dict):
+        """传输层事件入口：relay 模式先过 HA 准入。
+
+        standby / 接管中 / 丢租约后 / fail-closed 时直接丢弃，不解析、不写
+        Store、不产生业务副作用；只有在 active 且 relay 可外发时才进入原流水线。
+        reverse / forward 没有 ``ha_runtime``，行为与旧版完全一致。
+        """
+        runtime = getattr(self, "ha_runtime", None)
+        if getattr(self, "_ha_stopping", False):
+            return None
+        if runtime is None or not callable(getattr(runtime, "handle_event", None)):
+            return await self._on_event_business(conn, raw)
+        return await runtime.handle_event(conn, raw, self._on_event_business)
+
+    async def _on_event_business(self, conn: Connection, raw: dict):
         ev = ev_mod.parse(raw)
         if ev is None:
             return
@@ -278,12 +539,21 @@ class Bot:
 
         # --- 全量入库：300 条上下文靠的是「每条都记」，不是「回过的才记」
         if ev.type == "message" and ev.user_id != ev.self_id:
-            body = ev.plain.strip()
+            body = _incoming_body(ev)
             if body:
-                self.store.append(ev.session_id, "user", body,
-                                  who=ev.sender_name,
-                                  ts=float(getattr(ev, "time", time.time())),
-                                  uid=ev.user_id)
+                # uid / 真实事件时间 / 稳定 message_id 一起进 Store：
+                # 活跃期要靠 message_id 精确认出「当前这条」，只靠昵称或秒级
+                # 时间都可能把同一个人同一秒的两条消息混成一条。
+                extra = {}
+                message_id = getattr(ev, "message_id", 0)
+                if message_id:
+                    extra["message_id"] = message_id
+                self.store.append(
+                    ev.session_id, "user", body,
+                    who=ev.sender_name,
+                    ts=float(getattr(ev, "time", 0) or time.time()),
+                    uid=ev.user_id,
+                    **extra)
 
         # --- 流水线 3：群聊旁听不依赖 @ 或唤醒词
         ctx.state["group_observe"] = bool(
@@ -333,13 +603,35 @@ class Bot:
             tasks.spawn(self._maybe_compress(ev.session_id), name="compress")
 
     async def _feel(self, ev, *, use_judge: bool):
-        """过一遍情绪，回复时就用更新后的情绪。永不抛异常。"""
+        """过一遍情绪，回复时就用更新后的情绪。永不抛异常。
+
+        喂给情绪层的上下文带**完整 uid + 清洗后的昵称**（`identity.label`），
+        不再只给昵称/尾号；当前这条如果已经入库，用 message_id 精确剔掉，
+        不让它同时出现在「上下文」和「新消息」里。纯标点消息不构成刺激，
+        直接跳过，避免一个「？」就把她的心情推走。
+
+        ``addressed`` 沿用调用方已经算好的 ``use_judge``（是否在叫她），
+        这里不重新猜，也不改 emotion.update 的既有契约。
+        """
+        text = _hearing_text(getattr(ev, "plain", "") or "")
+        if not _has_meaning(text):
+            return {}
         window = getattr(self.store, "window", None)
-        rows = window(ev.session_id, 6) if window else []
-        context = "\n".join(f"{r.get('who') or ''}：{str(r.get('content') or '')[:60]}"
-                            for r in rows[:-1][-4:])
-        applied = await self.emotion.update(ev.plain or "", config=self.config,
-                                            context=context, addressed=use_judge,
+        rows = window(ev.session_id, 6) if callable(window) else []
+        try:
+            history = shortterm.exclude_current_event(rows, ev)
+            if (len(history) == len(rows) and rows
+                    and not getattr(ev, "message_id", 0)):
+                # 事件没有 message_id 可定位时，沿用旧行为：
+                # 当前这条刚写进 Store，上下文里去掉最后一条。
+                history = rows[:-1]
+        except Exception:
+            history = rows[:-1] if rows else []
+        context = "\n".join(
+            line for line in (_feel_line(row) for row in history[-4:]) if line)
+        applied = await self.emotion.update(text, config=self.config,
+                                            context=context,
+                                            addressed=use_judge,
                                             use_judge=use_judge)
         if applied:
             log.debug(f"情绪变化 {ev.session_id}：{applied}")
@@ -536,7 +828,7 @@ class Bot:
                 "online_sec": int(time.time() - c.connected_at),
                 "last_alive": int(time.time() - c.alive_at),
             })
-        return {
+        result = {
             "uptime": int(time.time() - self.started_at),
             "connections": conns,
             "handlers": len(BUS.handlers),
@@ -553,6 +845,13 @@ class Bot:
             "libido": {"value": round(self.libido.value, 1), "label": self.libido.label()},
             "proactive": self.proactive.snapshot(),
         }
+        runtime = getattr(self, "ha_runtime", None)
+        if runtime is not None and callable(getattr(runtime, "status", None)):
+            try:
+                result["ha"] = runtime.status()
+            except Exception as e:  # noqa: BLE001 - 状态展示失败不影响主状态
+                result["ha"] = {"error": type(e).__name__}
+        return result
 
     async def manual_send(self, target: str, message: str, is_group: bool = True) -> dict:
         conn = self.conn_for()
