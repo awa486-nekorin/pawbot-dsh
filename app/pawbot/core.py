@@ -361,6 +361,15 @@ class Bot:
                 _bili_post.scheduler(self), name="bili-post")
         except Exception as e:
             log.warn(f"B站自动发动态启动失败：{type(e).__name__} {e}")
+        # 自动互动：回评论 / 发评论 / 发弹幕（tools.bili_auto_*）
+        # 默认关（见 config.py 里 bili_auto_enabled 的说明）；关着就不起任务。
+        if self.config.get("tools.bili_auto_enabled", False) is True:
+            try:
+                from . import bili_auto as _bili_auto
+                self._bili_auto_task = asyncio.create_task(
+                    _bili_auto.scheduler(self), name="bili-auto")
+            except Exception as e:
+                log.warn(f"自动互动启动失败：{type(e).__name__} {e}")
 
     async def _flush_store_loop(self):
         interval = max(0.1, float(self.config.get("store.flush_interval", 2.0) or 2.0))
@@ -424,6 +433,14 @@ class Bot:
             except (asyncio.CancelledError, Exception):
                 pass
             self._bili_post_task = None
+        自动互动 = getattr(self, "_bili_auto_task", None)
+        if 自动互动 is not None:
+            自动互动.cancel()
+            try:
+                await 自动互动
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bili_auto_task = None
         reminder_service = getattr(self, "reminder_service", None)
         if reminder_service is not None:
             await reminder_service.stop()

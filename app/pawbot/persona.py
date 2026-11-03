@@ -78,6 +78,10 @@ class Persona:
     def impression(self) -> str:
         return self._read(self.memory_file("impression.md")).strip()[-MAX_SECTION:]
 
+    def learned_style(self) -> str:
+        """从 B 站评论里学来的说话方式（bili_learn 写入），每轮注入一小段。"""
+        return self._read(self.memory_file("style_learned.md")).strip()[-1600:]
+
     def owner_line(self) -> str:
         """主人是谁、主人=老爹。取不到有效 owner_ids 就不注入（不写「未知」）。
 
@@ -127,6 +131,10 @@ class Persona:
                 parts.append("## 你记得的事（最近的几条）\n" + recent)
 
         parts.append("## 网络用词\n网络用语、梗、缩写是群聊的日常语言，跟着用；不用刻意学，也别刻意避开。")
+
+        learned = self.learned_style()
+        if learned:
+            parts.append("## 学来的说话方式（从 B 站评论里观察来的，照这个语气说，别照抄内容）\n" + learned)
 
         owner = self.owner_line()
         if owner:

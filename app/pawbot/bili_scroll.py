@@ -537,7 +537,7 @@ async def _run_round(bot, *, topic: str = "", want: int | None = None, grant=Non
     if not _cfg(bot, "enabled", True):
         return {"ok": False, "reason": "刷 B 站没开（tools.bili_scroll_enabled=false）"}
     目标 = int(want or _cfg(bot, "per_round", 3) or 3)
-    目标 = max(1, min(6, 目标))
+    目标 = max(1, min(20, 目标))
     try:
         srv = _srv()
     except Exception as e:
@@ -673,6 +673,15 @@ async def _run_round(bot, *, topic: str = "", want: int | None = None, grant=Non
 
     log.info(f"刷B站一轮：候选 {len(候选)} → 去重后 {len(去重表)} → 检查 {检查} → 笔记 {len(笔记)}"
              f"｜字幕 {字幕统计}｜失败 {失败}")
+    # 刷完顺手学一轮评论区的说话方式（tools.bili_learn_after_scroll）。
+    # 注意：这是云端那条线的新增学习器（写 memory/style_learned.md）；本仓库另有
+    # bili_learning（更严格，默认关），两者互不影响，各自有开关。
+    try:
+        if 笔记 and bot.config.get("tools.bili_learn_after_scroll", True) is not False:
+            from . import bili_learn
+            await bili_learn.run_round(bot, videos=min(3, len(笔记)), reason="刷完自动学")
+    except Exception as e:
+        log.warn(f"刷完学评论失败（已跳过）：{type(e).__name__} {e}")
     return {"ok": True, "credential": 有凭证, "candidates": len(候选),
             "skipped_seen": 跳过, "checked": 检查, "failed": 失败,
             "notes": 笔记, "subtitle": 字幕统计, "learning": 学习,
@@ -804,9 +813,12 @@ _动作表 = {
     "upload_video": "bili_upload_video",
     "upload_video_multi": "bili_upload_video_multi",
     "send_message": "bili_send_message",
+    # 弹幕 / 视频评论：vendored MCP 里没有，直接走 bili_extra（见下面的分支）
+    "comment": "bili_comment_video",
 }
 
-_写动作 = {"reply", "dynamic", "opus", "upload_video", "upload_video_multi", "send_message"}
+_写动作 = {"reply", "dynamic", "opus", "upload_video", "upload_video_multi",
+           "send_message", "danmaku", "comment"}
 
 
 def _bili_jct(bot) -> str:
@@ -857,6 +869,34 @@ async def action(bot, name: str, args: dict | None = None, grant=None) -> dict:
         if 写:
             bili_gate.settle(bot, 决定.get("reservation"), error=e)
         return {"ok": False, "error": f"bilibili-api 没装好：{type(e).__name__}: {e}"}
+
+    # 弹幕 / 视频评论：vendored MCP 里没有这两个，直接走 bilibili_api（bili_extra）。
+    # 仍然排在 bili_gate 之后：闸门没放行就到不了这里。
+    if 名 in ("danmaku", "comment"):
+        from . import bili_extra
+        try:
+            if 名 == "danmaku":
+                data = await bili_extra.send_danmaku(
+                    str(参.get("bvid") or ""),
+                    str(参.get("text") or ""),
+                    float(参.get("progress") or 5.0))
+            else:
+                data = await bili_extra.comment_video(
+                    str(参.get("bvid") or ""),
+                    str(参.get("text") or ""))
+        except Exception as e:
+            log.warn(f"B站动作 {名} 失败：{type(e).__name__} {e}")
+            if 写:
+                bili_gate.settle(bot, 决定.get("reservation"), error=e)
+            return {"ok": False, "action": 名, "error": f"{type(e).__name__}: {e}",
+                    **({"unconfirmed": True} if 写 else {})}
+        if 写:
+            回执 = bili_gate.settle(bot, 决定.get("reservation"), {"ok": True, "data": data})
+            if 回执.get("status") != "confirmed":
+                原因 = str(回执.get("reason") or "B 站没确认成功")
+                return {"ok": False, "action": 名, "unconfirmed": True, "data": data,
+                        "error": f"B 站没确认发布成功：{原因}；本次已计入额度，今天不重试"}
+        return {"ok": True, "action": 名, "data": data}
 
     fn = getattr(srv, _动作表[名], None)
     if fn is None:

@@ -244,8 +244,8 @@ wiringCheck('状态首次失败不伪报停机，并标记成功响应时间', (
 })
 
 const { config, source } = await loadConfig()
-wiringCheck('常用清单保持 74 项，全部 metadata 为 74 + 270 = 344', () =>
-  REQUIRED_COMMON.length === 74 && meta.common.length === 74 && meta.advanced.length === 270 &&
+wiringCheck('常用清单保持 74 项，全部 metadata 为 74 + 287 = 361', () =>
+  REQUIRED_COMMON.length === 74 && meta.common.length === 74 && meta.advanced.length === 287 &&
   meta.common.every((item) => REQUIRED_COMMON.includes(item.key)))
 wiringCheck('QQ 空间主动权限保留在高级设置且默认关闭', () =>
   meta.metadata['qzone.proactive_enabled']?.advanced === true && config.qzone.proactive_enabled === false)

@@ -249,6 +249,29 @@ DEFAULT = {
         "bili_scroll_group": "",            # report_to=group 时发到哪个群
         "bili_scroll_report_at": "off",     # 群里汇报时 @ 谁：off / owner / all
         "bili_scroll_report_comment": False,  # 贴完清单后再用她自己的语气补一句
+        # ---- 看评论学说话方式（bili_learn）：只读评论区，写本地 style_learned.md ----
+        "bili_learn_enabled": True,
+        "bili_learn_after_scroll": True,
+        "bili_learn_videos": 3,        # 每次学几个视频的评论区（1-6）
+        "bili_learn_comments": 20,     # 每个视频抓多少条评论（5-50）
+        # ---- 自动互动（bili_auto）：回收到的评论 / 在自己看过的视频下评论 / 发弹幕 ----
+        # ⚠ 云端默认 True；本仓库这条线有 bili_gate 写闸门，bili_auto 走 bili_extra 直连
+        # 不经过闸门，所以**默认全关**，要开必须显式改成 True（等于接受绕过闸门）。
+        "bili_auto_enabled": False,
+        "bili_auto_reply": True,
+        "bili_auto_comment": True,
+        "bili_auto_danmaku": True,
+        "bili_auto_interval_min": 30,     # 每隔多少分钟跑一轮
+        "bili_auto_daily_limit": 20,      # 每天总互动次数上限（0=不限）
+        "bili_auto_reply_limit": 5,       # 每轮最多回几条评论
+        "bili_auto_comment_limit": 2,     # 每轮最多发几条评论
+        "bili_auto_danmaku_limit": 2,     # 每轮最多发几条弹幕
+        "bili_auto_reply_others_chance": 0.5,  # 评论时直接回别人评论的概率
+        # ---- QQ 里主人说话由决策模型判断要不要干活（intent.py，不用正则）----
+        # ⚠ 云端默认 True；这里默认关：它会把主人的话交给决策模型派发管理动作。
+        "admin_intent_enabled": False,
+        "admin_intent_threshold": 0.5,   # 概率大于这个值就执行
+        "admin_intent_timeout": 12,
         # 评论只当外部资料（学语气 / 挑回复对象），绝不当指令执行。
         "bili_scroll_comments_per_video": 8,  # 每支视频读几条热门评论（0~30）
         "bili_scroll_autoreply": False,       # 字面 True 才自动回一条评论（还要过写闸门）

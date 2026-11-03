@@ -15,9 +15,13 @@ import re
 import socket
 import urllib.error
 import urllib.request
+import uuid
 
 from .breaker import BREAKER
 from .log import log
+
+# opencode.ai 的 Go 套餐要求每个请求带稳定的 x-opencode-session（缺了会 400 MissingSessionID）。
+_OPENCODE_SESSION = "pawbot-" + uuid.uuid4().hex[:16]
 
 # DeepSeek 系模型有时不返回结构化的 tool_calls，而是把调用写成 DSML 文本
 # （<|DSML|invoke name="...">…）。直接发出去就会变成一串乱码，所以解析成
@@ -308,11 +312,14 @@ class LLMClient:
     def _post(self, url: str, payload: dict, key: str, timeout: int) -> dict:
         """发一次请求。超时和 429/5xx 归为 _Transient（可以换备援），其余是 LLMError。"""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=body, method="POST", headers={
+        headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
             "User-Agent": "PawBot/1.0",
-        })
+        }
+        if "opencode.ai" in url:
+            headers["x-opencode-session"] = _OPENCODE_SESSION
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
