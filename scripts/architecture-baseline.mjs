@@ -94,18 +94,20 @@ const EXPECTED_DSH = Object.freeze({
 
 const PAWBOT_UI_SUBPATHS = Object.freeze([
   'status', 'config', 'persona', 'reload-plugins', 'plugins/reload',
-  'send', 'restart', 'context', 'memory',
+  'send', 'restart', 'stop', 'context', 'memory', 'life',
   'setup/status', 'setup/run',
   'napcat/status', 'napcat/setup', 'napcat/qr',
   'boot', 'boot/status',
 ])
 
 const PAWBOT_UI_METHOD_PAIRS = Object.freeze([
-  'GET boot/status', 'GET config', 'GET context', 'GET memory',
+  'GET boot/status', 'GET config', 'GET context', 'GET life', 'GET memory',
   'GET napcat/status', 'GET persona', 'GET setup/status', 'GET status',
+  'GET sync/scp/status',
   'POST boot', 'POST config', 'POST napcat/qr', 'POST napcat/setup',
   'POST persona', 'POST plugins/reload', 'POST reload-plugins',
-  'POST restart', 'POST send', 'POST setup/run',
+  'POST restart', 'POST send', 'POST setup/run', 'POST stop',
+  'POST sync/scp/pull', 'POST sync/scp/push',
 ])
 
 const CONFIG_SECTIONS = Object.freeze([

@@ -762,7 +762,7 @@ await t('binary：systemctl 失敗 → 用子進程 fallback 並記錄 pid', asy
     spawned = { cmd, args, opts }
     return { pid: 4321, unref() {} }
   }
-  const r = await startNapcat({ mode: 'binary', run, spawnProcess })
+  const r = await startNapcat({ mode: 'binary', run, spawnProcess, platform: 'linux' })
   assert.equal(r.ok, true)
   assert.equal(r.via, 'process')
   assert.equal(r.pid, 4321)

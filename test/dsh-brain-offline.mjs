@@ -149,11 +149,20 @@ check('computerToolGrant：默认只给主人（群友轮次一个都不给）',
   assert.deepEqual(guest.granted, [])
   assert.deepEqual(guest.declared, [])
   assert.ok(guest.reason.includes('owner-only'))
-  const owner = computerToolGrant(DEFAULT_NATIVE_TOOLS, { ownerOnly: true, isOwner: true })
+  const owner = computerToolGrant(DEFAULT_NATIVE_TOOLS, {
+    ownerOnly: true, isOwner: true, computerAccess: true,
+  })
   assert.ok(owner.granted.includes('pwsh') || owner.granted.includes('bash'))
+  // 新版安全边界：主人也要本轮显式 computer_access 才给工具
+  const noAccess = computerToolGrant(DEFAULT_NATIVE_TOOLS, {
+    ownerOnly: true, isOwner: true,
+  })
+  assert.deepEqual(noAccess.granted, [])
+  assert.ok(noAccess.reason.includes('missing-computer-access'))
   const open = computerToolGrant(['read'], { ownerOnly: false, isOwner: false })
-  assert.deepEqual(open.declared, ['read'])
-  assert.deepEqual(open.granted, ['read', 'write', 'edit'])
+  assert.deepEqual(open.declared, [])
+  assert.deepEqual(open.granted, [])
+  assert.ok(open.reason.includes('not-owner'))
   const none = computerToolGrant([], { ownerOnly: false, isOwner: true })
   assert.deepEqual(none.granted, [])
   return true
@@ -435,7 +444,9 @@ await checkAsync('runTurn：群友轮次不给电脑工具（不挂 preset），
 
 await checkAsync('runTurn：主人轮次挂 preset、放开电脑工具、并注入安全边界', async () => {
   const harness = makeTurnHarness({ ownerOnly: true })
-  const { status, payload } = await runOne(harness, { context: { is_owner: true } })
+  const { status, payload } = await runOne(harness, {
+    context: { is_owner: true, computer_access: true },
+  })
   assert.equal(status, 200)
   assert.ok(harness.records.mounted.includes('pawbot-brain'))
   assert.ok(payload.isolation.computer_tools.includes('pwsh') || payload.isolation.computer_tools.includes('bash'))
