@@ -7,7 +7,9 @@
   4. 先持久化「pending」预留额度（fsync 之后才 replace），再**只调用一次**后端；
      回执必须 `success is True` + 可验证的 dynamic_id 才算成功；
   5. 超时/取消都按「未确认」记，额度照扣（宁可少发，不可重复发）；
-  6. 同一天不重复发同一段文字；**跨天也不自动重试没确认过的同一条**。
+  6. 同一天不重复发同一段文字；**跨天也不自动重试没确认过的同一条**；
+  7. 模型写出来的正文还要过 `bili_voice` 的人味检查（近期开头/口头禅/表情/
+     相似度/AI 腔/长度）：不过就放弃这一条，不静默硬发；确认发出后记账。
 
 内容来源：`source=scroll` 用最近的刷片笔记，`source=topic` 按 `topic` 现写。
 写完的账本在 `data/bili_post.json`，只留最近 300 条，但绝不丢掉当天的记录。
@@ -209,12 +211,33 @@ def _material(bot) -> dict:
             "note_body": str(body)[:6000]}
 
 
+def _voice_violations(bot, text: str, limit: int) -> list[str]:
+    """模型写的动态也要过 ``bili_voice`` 的同一套人味检查。
+
+    返回违规原因；空列表 = 可以发。``tools.bili_voice_enabled`` 是**全部检查路径**
+    的总开关：关掉就退回旧写法、一条都不查；成功后的记账/去重照旧。
+    检查本身出错时 fail closed（给一条原因），宁可这条不发，也不静默硬发。
+    """
+    try:
+        from . import bili_voice
+        if not bili_voice.enabled(bot):
+            return []
+        cons = bili_voice.constraints(bot)
+        return list(bili_voice.check(text, bot, "", cons=cons, max_chars=limit))
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"B 站动态的人味检查没跑起来，这条不发：{type(e).__name__}")
+        return [f"检查没跑起来（{type(e).__name__}）"]
+
+
 async def compose(bot) -> str:
-    """让她用自己的语气写一条动态；写不出来就返回空串。
+    """让她用自己的语气写一条动态；写不出来 / 检查不过就返回空串。
 
     两条素材路径（`source=scroll` 的笔记 / `source=topic` 的主题）共用同一套
     结构：写动态的规则放 **system**，素材整块序列化 + 围栏后**只进 user**。
     笔记里的伪指令既碰不到规则，也换不到任何发布授权。
+
+    模型成文后和评论/回复走**同一套**反公式化检查（近期开头/口头禅/表情/
+    相似度/AI 腔/长度）：不过就放弃这一条（返回空串），调用方不会发。
     """
     素材 = _material(bot)
     if not 素材:
@@ -249,7 +272,15 @@ async def compose(bot) -> str:
         return ""
     话 = str((回复 or {}).get("content") or "").strip()
     话 = re.sub(r"\s+", " ", 话)
-    return 话[:上限] if 话 else ""
+    if not 话:
+        return ""
+    话 = 话[:上限]
+    违规 = _voice_violations(bot, 话, 上限)
+    if 违规:
+        # 宁可不发这一条，也不静默硬发：没有「检查失败就照发」的退路。
+        log.info("B 站动态没过人味检查，这条不发：" + "；".join(违规)[:160])
+        return ""
+    return 话
 
 
 # ---------------------------------------------------------------- 发布
@@ -310,6 +341,13 @@ async def post_once(bot, text: str | None = None, grant=None) -> dict:
                 # 只信可验证的 dynamic_id（别把任意 id 字段当成刚发出去那条）
                 record["dynamic_id"] = _find_dynamic_id(数据)
                 回复 = {"ok": True, "dynamic_id": record["dynamic_id"], "text": 正文}
+                # 确认发出才记账：下次写动态时「近期自发言」能看到它，
+                # 相似度/开头去重不会把同一条意思换个说法再发一遍。
+                try:
+                    from . import bili_voice
+                    bili_voice.note_sent(bot, 结果, kind="dynamic", text=正文)
+                except Exception as e:  # noqa: BLE001
+                    log.debug(f"动态发成功但记账失败：{type(e).__name__}")
             elif 结果.get("denied"):
                 record["status"] = "denied"
                 record["reason"] = str(结果.get("error") or "")[:120]
@@ -345,7 +383,8 @@ async def scheduler(bot) -> None:
     times = _parse_times(bot)
     if not times:
         return
-    # 受控定时任务的能力：每次发之前换一枚一次性写凭证；模型/工具参数碰不到它
+    # 受控定时任务的能力：每次发之前换一枚**绑定动作+目标**的一次性写凭证；
+    # 模型/工具参数碰不到它。动态的目标固定是 "dynamic"。
     capability = bili_gate.register_scheduler("bili-post")
     log.info("B站自动发动态已启动：%s" % "、".join(f"{t // 60:02d}:{t % 60:02d}" for t in times))
     while True:
@@ -353,7 +392,8 @@ async def scheduler(bot) -> None:
         try:
             if not enabled(bot):
                 continue
-            凭证 = bili_gate.scheduler_grant(capability)
+            凭证 = bili_gate.scheduler_grant(
+                capability, action="dynamic", target="dynamic")
             结果 = await post_once(bot, grant=凭证)
             if 结果.get("ok"):
                 log.info(f"自动发了条 B 站动态 dynamic_id={结果.get('dynamic_id') or '未知'}")

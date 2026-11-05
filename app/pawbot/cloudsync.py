@@ -70,8 +70,12 @@ _MEMORY_DIR_KEYS = (
     ("people.dir", "people", "people"),
     ("longmem.dir", "longmem", "longmem"),
     ("diary.dir", "diary", "diary"),
+    # 生活与成长状态（goals / self / changes / tombstone）随 content 同步；
+    # 没有 life.dir 配置键时落到规范目录 content/life。
+    ("life.dir", "life", "life"),
 )
-# sessions/media_ledger 属 state（机器状态），relations/memes 属 content（可搬走）
+# sessions/media_ledger 属 state（机器状态），relations/memes 属 content（可搬走）。
+# autonomy.json 是自主活动的运行态（state/），刻意不在这里：它不随内容同步。
 _MEMORY_FILES = ("sessions.json", "relations.json", "media_ledger.json", "memes.json")
 
 _EXCLUDED_DIRS = {"brain", "browser", "backup", "backup-sync", "napcat",
@@ -482,8 +486,9 @@ def _now_local() -> str:
 def _collect_entries(section: dict, config, base_dir: str) -> dict[str, tuple[bytes, str]]:
     """返回 bundle 路径 → (内容, 相对数据根的 target)。
 
-    内容树一律从 content/ 取（人设、记忆、人物档案、长期经历、日记、表情包、
-    梗库、关系网）；state/ 只带原来那几个默认文件（会话、去重账本、配置）。
+    内容树一律从 content/ 取（人设、记忆、人物档案、长期经历、日记、生活与成长、
+    表情包、梗库、关系网）；state/ 只带原来那几个默认文件（会话、去重账本、配置）。
+    自主活动运行态 state/autonomy.json 不属于内容，不会被打进包。
     """
     paths = _layout(base_dir, config)
     used: set[str] = set()
@@ -1272,7 +1277,7 @@ def _target_category(target: str) -> str:
         return "persona"
     if target.startswith("stickers/"):
         return "stickers"
-    for root in ("memory/", "people/", "longmem/", "diary/", "sessions/"):
+    for root in ("memory/", "people/", "longmem/", "diary/", "life/", "sessions/"):
         if target.startswith(root):
             return "memory"
     # sessions/media_ledger → state；relations/memes → content；都归「记忆」这一开关

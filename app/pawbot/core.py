@@ -41,6 +41,7 @@ from .config import Config
 from .context import Context
 from .diary import Diary
 from .hobbies import Hobbies
+from .life_store import LifeStore
 from .llm import LLMClient
 from .log import log
 from .memory import Memory
@@ -162,10 +163,15 @@ class Bot:
                                             self.config.get("chat.context_messages", 300))))
         self.llm = LLMClient(self.config)
         self.safety = SafetyGuard(self)
+        # 生活/成长状态：经历、记忆、目标、自我条目、养成投影。
+        # 构造只读；没有文件时就是空状态，不会造默认剧情。
+        self.life_store = LifeStore(base_dir, self.config, paths=self.paths)
 
         # 人设 / 记忆 / 表情包 / 空间 / 工具 —— 都是纯本地文件，随时可改
         self.persona = Persona(base_dir, self.config, paths=self.paths)
+        self.persona.life_store = self.life_store
         self.memory = Memory(base_dir, self.config, paths=self.paths)
+        self.memory.life_store = self.life_store
         self.memes = MemeBook(self.paths.content("memes.json"), self.config)
         self.longmem = LongMemory(base_dir, self.config, self.memory, paths=self.paths)
         self.diary = Diary(base_dir, self.config, paths=self.paths)
@@ -204,6 +210,10 @@ class Bot:
             self.mood.bind_emotion(self.emotion)
         self.libido = Libido(self.paths.state("libido.json"), self.config)
         self.proactive = Proactive(self)
+        # 自主活动由 Proactive._tick 驱动（不另起永久循环）；构造在这里是为了
+        # tick 之前 bot.autonomy 已经可取，且和其它生活状态共用同一份配置/paths。
+        from .autonomy import Autonomy
+        self.autonomy = Autonomy(self)
 
         self.plugins = PluginManager(
             os.path.join(base_dir, "plugins"),
@@ -362,7 +372,7 @@ class Bot:
         except Exception as e:
             log.warn(f"B站自动发动态启动失败：{type(e).__name__} {e}")
         # 自动互动：回评论 / 发评论 / 发弹幕（tools.bili_auto_*）
-        # 默认关（见 config.py 里 bili_auto_enabled 的说明）；关着就不起任务。
+        # 默认开（见 config.py 里 bili_auto_enabled 的说明）；关掉或不是字面 True 就不起任务。
         if self.config.get("tools.bili_auto_enabled", False) is True:
             try:
                 from . import bili_auto as _bili_auto
@@ -608,6 +618,18 @@ class Bot:
         # --- 流水线 5：分发
         await BUS.dispatch(ctx)
 
+        # 正常回复已经发出去（ai_chat 只在发送成功/已递交给协议端后置位）：
+        # 给主动开口留一个「刚和这个会话聊过」的信号。它只影响主动另起新话题，
+        # 不拦普通对话；纯旁听消息不置位，也不会被当成她聊过。
+        if ev.type == "message" and ctx.state.get("ai_spoke"):
+            note_conversation = getattr(getattr(self, "autonomy", None),
+                                        "note_conversation", None)
+            if callable(note_conversation):
+                try:
+                    note_conversation(ev.session_id)
+                except Exception as e:
+                    log.debug(f"记录最近对话失败：{type(e).__name__} {e}")
+
         # --- 收尾：心情随对话漂移，攒够了就压缩旧对话
         if ev.type == "message" and (ctx.state.get("ai_spoke")
                                       or (ctx.matched_command and will_speak)):
@@ -799,6 +821,11 @@ class Bot:
             if first in commands:
                 matched_cmd = first
                 rest = text[len(first):]
+
+        # 主人约定：只有「//」开头才算指令，其它一律当普通聊天。
+        # 没匹配到指令的「//」消息，把前缀剥掉再交给聊天，免得她看到 "//"。
+        if text.startswith("//") and not matched_cmd:
+            rest = text[2:]
 
         ctx.matched_command = matched_cmd
         ctx.raw_text = rest.strip()

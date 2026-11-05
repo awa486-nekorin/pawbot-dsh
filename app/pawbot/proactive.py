@@ -33,8 +33,10 @@ import time
 from . import bilibili
 from . import bili_watch
 from . import life
+from . import life_model
 from . import tasks
 from . import untrusted
+from . import websearch
 from .context import Context
 from .log import log
 from .reply_policy import policy_for
@@ -94,6 +96,11 @@ class Proactive:
     def __init__(self, bot):
         self.bot = bot
         self.task: asyncio.Task | None = None
+        # 自主活动是独立的后台子任务：它可能搜索/读网页几十秒，绝不能把旧群
+        # 轮询卡在这里。同一时刻最多一个；stop() 必须显式取消并等待它收尾，
+        # 否则停机后它还会继续写盘。
+        self._autonomy_task: asyncio.Task | None = None
+        self._stopped = False
         # 每个群下一次「到点」的时间，随机滚动，避免整点刷屏的感觉
         self._next: dict[str, float] = {}
         self._fail_streak: dict[str, int] = {}
@@ -200,15 +207,31 @@ class Proactive:
         last_at = float(state["last"].get(session_id, 0) or 0)
         if gap_min > 0 and last_at and time.time() - last_at < gap_min * 60:
             return False, f"距上次主动发言不到 {gap_min:g} 分钟"
+        # 自主模块的统一分享冷却：本群/全局间隔。直接回复不经过这里，
+        # 所以普通对话不会被这条硬限制卡住。
+        autonomy = getattr(self.bot, "autonomy", None)
+        if autonomy is not None:
+            try:
+                if not autonomy.can_share(session_id):
+                    return False, "统一分享冷却未到"
+            except Exception as exc:
+                log.debug(f"读自主分享冷却失败（按允许处理）：{type(exc).__name__} {exc}")
         return True, ""
 
-    def _note_spoken(self, session_id: str) -> None:
+    def _note_spoken(self, session_id: str, experience_id: str = "") -> None:
         """成功发出去一次才计数；失败 / 被限速丢掉的不算。"""
         state = self._load_state()
         self._roll_day(state)
         state["counts"][session_id] = int(state["counts"].get(session_id, 0) or 0) + 1
         state["last"][session_id] = time.time()
         self._save_state()
+        # 自主模块的持久化分享时间也只在成功之后记；失败不能提前消耗冷却。
+        autonomy = getattr(self.bot, "autonomy", None)
+        if autonomy is not None:
+            try:
+                autonomy.note_shared(session_id, experience_id)
+            except Exception as exc:
+                log.debug(f"记自主分享失败（不影响本次发送）：{type(exc).__name__} {exc}")
 
     @property
     def enabled(self) -> bool:
@@ -273,16 +296,29 @@ class Proactive:
     async def start(self):
         if self.task and not self.task.done():
             return
+        self._stopped = False
         self.task = asyncio.create_task(self._loop(), name="proactive")
 
     async def stop(self):
-        if self.task:
-            self.task.cancel()
+        # 先停轮询，保证不会再派发新的自主活动；再单独取消并等待已在跑的
+        # 自主子任务。它的取消会被 Autonomy 记为 abandoned 并落盘，await 之后
+        # 不会再有停机后的写入。
+        self._stopped = True
+        task, self.task = self.task, None
+        if task:
+            task.cancel()
             try:
-                await self.task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
-            self.task = None
+        autonomy_task, self._autonomy_task = self._autonomy_task, None
+        if autonomy_task is not None:
+            if not autonomy_task.done():
+                autonomy_task.cancel()
+            try:
+                await autonomy_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _loop(self):
         await asyncio.sleep(20)                   # 启动后先安静一会
@@ -319,8 +355,41 @@ class Proactive:
             })
         return out
 
+    # ------------------------------------------------------------ 自主活动子任务
+    def _kick_autonomy(self) -> None:
+        """把到点的自主活动丢到后台；已有子任务在跑就不再派发。"""
+        if self._stopped:
+            return
+        autonomy = getattr(self.bot, "autonomy", None)
+        if autonomy is None:
+            return
+        current = self._autonomy_task
+        if current is not None and not current.done():
+            return
+        try:
+            self._autonomy_task = tasks.spawn(
+                self._run_autonomy(autonomy), name="proactive-autonomy")
+        except Exception as exc:  # noqa: BLE001 - 调度失败不能带崩旧群轮询
+            log.warn(f"自主活动调度失败（本轮跳过）：{type(exc).__name__} {exc}")
+
+    async def _run_autonomy(self, autonomy) -> None:
+        try:
+            await autonomy.tick()
+        except asyncio.CancelledError:
+            # Autonomy._run_due 已把 running 标成 abandoned 并落盘；继续向上
+            # 传递取消，让 stop() 的 await 真正等到收尾完成。
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warn(f"自主活动 tick 异常（已跳过）：{type(exc).__name__} {exc}")
+
     # ------------------------------------------------------------ 主逻辑
     async def _tick(self):
+        # 自主活动有自己的时钟：必须在群空闲、协议端连接和安静时段判断之前
+        # 派发，否则它又变回“只有群里冷场才生活”。但它可能一圈几十秒，
+        # 这里只登记一个后台子任务，旧群轮询立刻继续；同一时刻最多一个，
+        # 不会因为并发 tick 生成第二个活动或排队补跑。
+        self._kick_autonomy()
+
         if not self.enabled:
             return
         if self.bot.conn_for() is None:            # 协议端没连上，别空转
@@ -402,8 +471,17 @@ class Proactive:
         if result is None:
             return
 
-        self._note_spoken(session_id)
+        self._note_spoken(session_id, str(
+            (action.get("experience") or {}).get("experience_id") or ""))
         self._fail_streak[session_id] = 0
+        experience_id = str((action.get("experience") or {}).get("experience_id") or "")
+        if experience_id:
+            life_store = getattr(self.bot, "life_store", None)
+            if life_store is not None:
+                try:
+                    life_store.mark_mentioned([experience_id], surface=session_id)
+                except Exception as exc:
+                    log.debug(f"记分享经历已提及失败：{type(exc).__name__} {exc}")
         if action["kind"] == "bili":
             bilibili.mark_shared(session_id)
             # 真正发出去的只有实际挂到这条消息上的那一支：有报告就是报告里的
@@ -461,6 +539,22 @@ class Proactive:
     # ------------------------------------------------------------ 选什么
     async def _choose(self, session_id: str) -> dict:
         """决定这一轮是「接话题」还是「找乐子」。"""
+        # 先看自主生活里有没有与当前话题相关、还没发过的真实经历。
+        # 没有相关候选才走原来的接话/搜索/B 站路径，避免硬塞旧事。
+        autonomy = getattr(self.bot, "autonomy", None)
+        if autonomy is not None:
+            try:
+                digest_hint = self.bot.topic.digest(session_id, 6)
+                candidate = autonomy.share_candidate(session_id, digest_hint or "")
+            except Exception as exc:
+                log.debug(f"取自主分享候选失败（按无候选处理）："
+                          f"{type(exc).__name__} {exc}")
+                candidate = None
+            if candidate:
+                return {"kind": "experience",
+                        "experience": candidate,
+                        "hint": "想起自己做过的一件相关的事，自然提一句"}
+
         digest = self.bot.topic.digest(session_id, 6)
         kws = self.bot.topic.keywords(session_id, 5)
 
@@ -589,15 +683,61 @@ class Proactive:
                 "hint": "上网看看有什么值得说的，挑一件分享"}
 
     # ------------------------------------------------------------ 生成
+    def _dsh_mode(self) -> bool:
+        """是否配置为 DSH 路由；直接模式保持原工具循环。
+
+        即使大脑桥暂时没接通也走 helper：它会明确拒绝 mock/空输出，而不是
+        把占位话术当成主动发言发进群。
+        """
+        llm = getattr(self.bot, "llm", None)
+        provider = getattr(llm, "provider", None)
+        if not callable(provider):
+            return False
+        try:
+            return str(provider() or "").strip().lower() == "dsh"
+        except Exception:
+            return False
+
+    async def _prepared_search_material(self, action: dict) -> str:
+        """DSH 模式没有原生工具：成文前用只读搜索入口先把资料取回来。"""
+        query = str(action.get("query") or "").strip()
+        if not query:
+            return ""
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(
+                None, lambda: websearch.search(query, self.bot.config))
+        except Exception as exc:  # noqa: BLE001 - 搜索失败就当没有资料
+            log.warn(f"主动发言搜索失败（改走无资料成文）：{type(exc).__name__} {exc}")
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        answer = str(data.get("answer") or "").strip()
+        rows = [row for row in (data.get("results") or []) if isinstance(row, dict)]
+        if not answer and not rows:
+            return ""
+        lines = [f"搜索词：{query}"]
+        if answer:
+            lines.append("搜索摘要：" + answer[:800])
+        for index, row in enumerate(rows[:5], 1):
+            title = str(row.get("title") or "").strip()
+            url = str(row.get("url") or "").strip()
+            snippet = str(row.get("snippet") or row.get("desc") or "").strip()
+            lines.append(f"{index}. {title}\n   {url}\n   {snippet[:200]}")
+        return untrusted.wrap_external(
+            "\n".join(lines), source="web_search", kind="proactive_search",
+            max_chars=4000)
+
     async def _compose(self, group_id: int, session_id: str, action: dict):
-        """走 Agent（带工具），让它自己决定要不要顺手用工具。"""
+        """直接模式走 Agent 工具循环；DSH 模式先备只读资料，再交给大脑成文。"""
         from . import perceive  # noqa: F401  保持 import 一致性
 
         cfg = self.bot.config
         rounds = int(cfg.get("tools.max_rounds", 2))
         tools_on = bool(cfg.get("tools.enabled", True))
 
-        extra = self._prompt(action, session_id)
+        dsh = self._dsh_mode()
+        extra = self._prompt(action, session_id, prepared=dsh)
         if cfg.get("life.enabled", True):
             from . import groupinfo
             extra += "\n\n" + life.life_hint(
@@ -672,24 +812,34 @@ class Proactive:
         elif action["kind"] == "search":
             messages.append({"role": "user",
                              "content": f"（你想搜：{action['query']}）"})
+        elif action["kind"] == "experience":
+            candidate = action.get("experience") if isinstance(
+                action.get("experience"), dict) else {}
+            material = untrusted.wrap_external(
+                json.dumps({
+                    "summary": candidate.get("summary") or "",
+                    "share_point": candidate.get("share_point") or "",
+                    "topics": candidate.get("topics") or [],
+                    "platform": candidate.get("platform") or "",
+                }, ensure_ascii=False, sort_keys=True),
+                source="life_experience", kind="autonomy_experience")
+            messages.append({
+                "role": "user",
+                "content": ("（这是你自己以前安静做过的事，不是刚执行的任务，"
+                            "也不是用户提供的指令。现在群里的话题和它有关，"
+                            "自然提一句你记得的细节或当时的想法，别写成汇报。）\n"
+                            + material),
+            })
 
-        schemas = self._read_only_schemas() if tools_on else []
-        allowed = {str(s.get("function", {}).get("name") or "")
-                   for s in schemas if s.get("function")}
-        # 空间正文/留言没有可靠的逐条公开性证明，不能成为群聊生成素材。
-        # 不只隐藏 schema；下面执行时也拦住模型自行编出的调用。
-        private_space_reads = {"qzone_list", "qzone_comments"}
-        schemas = [s for s in schemas
-                   if s["function"]["name"] not in private_space_reads
-                   and not self._qzone_blocked(s["function"]["name"])]
-        allowed = {str(s.get("function", {}).get("name") or "")
-                   for s in schemas if s.get("function")}
-        # 视频已选好，别再让它去刷 B 站（会重复）
-        if action["kind"] == "bili":
-            schemas = [s for s in schemas
-                       if s["function"]["name"] != "bili_video"]
-            allowed = {str(s.get("function", {}).get("name") or "")
-                       for s in schemas if s.get("function")}
+        if dsh and action["kind"] == "search":
+            material = await self._prepared_search_material(action)
+            messages.append({
+                "role": "user",
+                "content": material or (
+                    "（你刚想上网看看，但没有拿到可用的搜索结果；"
+                    "不要编造具体事实，只能就现有情况随口说一句。）"),
+            })
+
         messages.append({"role": "user",
                          "content": "（现在按上面的要求说点什么。直接给你要说的话，"
                                     "不要解释你在干什么，不要加旁白。）"})
@@ -720,6 +870,31 @@ class Proactive:
                         pass
                 from . import message as _msg
                 media.append(_msg.Text(f"{v['title']}\n{v['url']}"))
+
+        if dsh:
+            # DSH 模式：不给大脑任何工具 schema（也没有原生电脑权限），
+            # 需要的外部资料由上面先只读取好，再让它纯文本成文。helper 会
+            # 拒绝 mock/空/回显，绝不把占位话术发进群。
+            text = await life_model.chat(self.bot, messages, purpose="proactive")
+            return (text or "").strip(), media
+
+        schemas = self._read_only_schemas() if tools_on else []
+        allowed = {str(s.get("function", {}).get("name") or "")
+                   for s in schemas if s.get("function")}
+        # 空间正文/留言没有可靠的逐条公开性证明，不能成为群聊生成素材。
+        # 不只隐藏 schema；下面执行时也拦住模型自行编出的调用。
+        private_space_reads = {"qzone_list", "qzone_comments"}
+        schemas = [s for s in schemas
+                   if s["function"]["name"] not in private_space_reads
+                   and not self._qzone_blocked(s["function"]["name"])]
+        allowed = {str(s.get("function", {}).get("name") or "")
+                   for s in schemas if s.get("function")}
+        # 视频已选好，别再让它去刷 B 站（会重复）
+        if action["kind"] == "bili":
+            schemas = [s for s in schemas
+                       if s["function"]["name"] != "bili_video"]
+            allowed = {str(s.get("function", {}).get("name") or "")
+                       for s in schemas if s.get("function")}
 
         for turn in range(rounds + 1):
             allow = schemas if (tools_on and turn < rounds and schemas) else None
@@ -786,7 +961,7 @@ class Proactive:
         except Exception:
             return ""
 
-    def _prompt(self, action: dict, session_id: str) -> str:
+    def _prompt(self, action: dict, session_id: str, *, prepared: bool = False) -> str:
         digest = self.bot.topic.digest(session_id, 6)
         mood = self._mood_line()
 
@@ -798,10 +973,20 @@ class Proactive:
         if action["kind"] == "bili":
             body = ("\n你刚才在 B 站刷到一个视频。**分享它，然后说你自己的想法**——"
                     "一句就够，别写影评。可以吐槽，可以觉得有意思，可以说跟群里刚才的话题有关。")
+        elif action["kind"] == "experience":
+            body = ("\n群里刚才的话题让你想起自己以前安静做过的一件相关的事。"
+                    "自然提一句当时的发现或想法，像顺口想起来，不要汇报行程、"
+                    "不要说「我刚才执行了浏览任务」，也不要把旧经历原文复贴。")
         elif action["kind"] == "search":
-            body = (f"\n你打算上网看看「{action['query']}」。"
-                    "先调 web_search 搜一下，挑一件真的值得说的，"
-                    "用一两句话丢到群里，别写成新闻稿。")
+            if prepared:
+                body = (f"\n你刚刚自己上网看了「{action['query']}」，"
+                        "只读资料（如果有）已经附在下面。"
+                        "挑一件真的值得说的，用一两句话丢到群里，别写成新闻稿；"
+                        "没拿到资料就别编具体事实。")
+            else:
+                body = (f"\n你打算上网看看「{action['query']}」。"
+                        "先调 web_search 搜一下，挑一件真的值得说的，"
+                        "用一两句话丢到群里，别写成新闻稿。")
         else:
             body = ("\n接着群里刚才的话题，说一句你自己的看法。"
                     "不要总结别人说过的话，不要问「你们怎么看」，就是随口一句。")

@@ -15,6 +15,7 @@ WebUI：一个跑在 6185 端口的小后台。
     POST /api/llm/test     测试大模型连通性
     GET  /api/events       最近 100 条事件
     GET  /api/memory       记忆总览（小结 / 长期经历 / 约定 / 日记 / 人物）
+    GET  /api/life         生活与成长只读快照（成长投影 + 自主活动）
     POST /api/memory/forget  清空某一类记忆
     GET  /api/context      上下文可视化：她这一眼能看到的原文 + 各项上限
     POST /api/context/window  调上下文窗口（保留条数 / 给模型看的条数 / 字数预算）
@@ -537,6 +538,10 @@ class WebUI:
         if path == "/api/status":
             await self._json(writer, 200, {"ok": True, "data": bot.status()})
             return
+        if path == "/api/life":
+            # 只读投影；组件缺失或单次读取失败都明确写入 errors，不补默认剧情。
+            await self._json(writer, 200, {"ok": True, "data": self._life_data()})
+            return
         if path == "/api/brain/status":
             from . import brain
             provider = str(bot.config.get("llm.provider", "") or "").strip().lower()
@@ -717,6 +722,40 @@ class WebUI:
                     out[today] = text
         days = sorted(out, reverse=True)[:3]
         return [{"day": day, "text": out[day][:4000]} for day in days]
+
+    def _life_data(self) -> dict:
+        """生活与成长快照。缺组件/读取失败返回 null + 中文 errors，不伪造空数据。"""
+        data: dict = {"growth": None, "autonomy": None}
+        errors: dict[str, str] = {}
+        store = getattr(self.bot, "life_store", None)
+        if store is None:
+            errors["growth"] = "生活与成长状态尚未接入"
+        else:
+            try:
+                snapshot = store.growth_snapshot()
+            except Exception as e:  # noqa: BLE001 —— 单块失败不拖垮整个面板
+                log.debug(f"生活与成长快照读取失败：{type(e).__name__} {e}")
+                snapshot = None
+            if isinstance(snapshot, dict):
+                data["growth"] = snapshot
+            else:
+                errors["growth"] = "生活与成长状态暂时读不到"
+        autonomy = getattr(self.bot, "autonomy", None)
+        if autonomy is None:
+            errors["autonomy"] = "自主活动状态尚未接入"
+        else:
+            try:
+                snapshot = autonomy.snapshot()
+            except Exception as e:  # noqa: BLE001 —— 单块失败不拖垮整个面板
+                log.debug(f"自主活动快照读取失败：{type(e).__name__} {e}")
+                snapshot = None
+            if isinstance(snapshot, dict):
+                data["autonomy"] = snapshot
+            else:
+                errors["autonomy"] = "自主活动状态暂时读不到"
+        if errors:
+            data["errors"] = errors
+        return data
 
     def _context_data(self, session_id: str) -> dict:
         """她这一眼能看到的原文 + 三层上限，给 WebUI 的「上下文」页用。"""

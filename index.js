@@ -1819,7 +1819,7 @@ export function apply(ctx, config) {
     add({ kind: 'prefix', path: '/pawbot-ui/' })
     for (const p of [
       'status', 'config', 'persona', 'reload-plugins', 'plugins/reload',
-      'send', 'restart', 'stop', 'context', 'memory',
+      'send', 'restart', 'stop', 'context', 'memory', 'life',
       'setup/status', 'setup/run',
       'napcat/status', 'napcat/setup', 'napcat/qr',
       'boot', 'boot/status',
@@ -1890,3 +1890,4 @@ export function apply(ctx, config) {
 
   log(`已就绪：projectDir=${projectDirectory()} appDir=${appDirectory()} autostart=${cfg.autostart} restartOnCrash=${cfg.restartOnCrash}`)
 }
+

@@ -83,7 +83,8 @@ class ProactiveGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_gate_does_not_invent_verified_actor(self):
         seen, execute = await self.compose("post_qzone", {"qzone.proactive_enabled": True})
         self.assertIn("post_qzone", [s["function"]["name"] for s in seen[0][1]])
-        execute.assert_awaited_once_with(None, "post_qzone", {})
+        execute.assert_awaited_once_with(
+            None, "post_qzone", {}, allowed={"post_qzone", "web_search"})
 
     async def test_disabling_gate_after_schema_still_rejects(self):
         seen, execute = await self.compose("post_qzone", {"qzone.proactive_enabled": True},
@@ -98,7 +99,8 @@ class ProactiveGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_qzone_tools_unchanged(self):
         _, execute = await self.compose("web_search")
-        execute.assert_awaited_once_with(None, "web_search", {})
+        execute.assert_awaited_once_with(
+            None, "web_search", {}, allowed={"web_search"})
 
 
 if __name__ == "__main__":

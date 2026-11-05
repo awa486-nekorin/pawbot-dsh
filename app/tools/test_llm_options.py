@@ -34,8 +34,20 @@ class ReasoningEffortTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertNotIn("reasoning_effort", self.payload(value))
 
-    def test_default_is_medium(self):
-        self.assertEqual(self.payload(None)["reasoning_effort"], "medium")
+    def test_default_is_low(self):
+        """llm.py 的兜底必须与 config.DEFAULT["llm"]["reasoning_effort"] 一致。"""
+        from pawbot.config import DEFAULT
+        self.assertEqual(self.payload(None)["reasoning_effort"], "low")
+        self.assertEqual(DEFAULT["llm"]["reasoning_effort"], "low")
+
+    def test_explicit_override_wins(self):
+        """草稿法两段用 payload 级覆盖强制 low，运行态配置写 medium 也不跟。"""
+        payload = LLMClient(FakeConfig("medium"))._payload(
+            [{"role": "user", "content": "hi"}], reasoning_effort="low")
+        self.assertEqual(payload["reasoning_effort"], "low")
+        payload = LLMClient(FakeConfig(None))._payload(
+            [{"role": "user", "content": "hi"}], reasoning_effort="high")
+        self.assertEqual(payload["reasoning_effort"], "high")
 
     def test_tools_payload_keeps_effort(self):
         payload = LLMClient(FakeConfig("medium"))._payload(
@@ -156,6 +168,29 @@ class OtherCallPathsTests(unittest.TestCase):
         with patch.object(websearch, "_open", fake_open):
             websearch.search("今天新闻", Cfg())
         self.assertEqual(seen["body"]["reasoning_effort"], "high")
+
+
+class AvailabilityTests(unittest.TestCase):
+    """草稿法靠 chat_available()/is_mock_text() 判断要不要跑。"""
+
+    class Cfg(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    def test_chat_available_requires_key_and_base_url(self):
+        base = {"llm.base_url": "https://relay.example/v1", "llm.api_key": "k"}
+        self.assertTrue(LLMClient(self.Cfg(base)).chat_available())
+        self.assertFalse(LLMClient(self.Cfg({**base, "llm.api_key": ""})).chat_available())
+        self.assertFalse(LLMClient(self.Cfg({**base, "llm.api_key": "   "})).chat_available())
+        self.assertFalse(LLMClient(self.Cfg({**base, "llm.base_url": ""})).chat_available())
+        self.assertTrue(LLMClient(self.Cfg({**base, "llm.api_key": ""})).mock_mode())
+
+    def test_is_mock_text_flags_placeholder_output(self):
+        from pawbot.llm import MOCK_NOTICE, is_mock_text
+        self.assertTrue(is_mock_text(MOCK_NOTICE + "我听到你说：hi"))
+        self.assertTrue(is_mock_text("（Mock 模式）占位"))
+        self.assertFalse(is_mock_text(""))
+        self.assertFalse(is_mock_text("问对方吃饭了没有。"))
 
 
 class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):

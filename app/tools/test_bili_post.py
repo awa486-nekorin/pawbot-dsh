@@ -7,10 +7,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pawbot import bili_post
+from pawbot import bili_post, bili_voice
 
 
 class FakeBot:
@@ -201,6 +201,74 @@ class PostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         call.assert_not_called()
         self.assertEqual(self.ledger(), [])
+
+
+class ComposeVoiceCheckTests(unittest.IsolatedAsyncioTestCase):
+    """模型写的动态也要过 bili_voice：不过就放弃这一条，不静默硬发。"""
+
+    def setUp(self):
+        bili_voice.reset_session_own()
+        self.addCleanup(bili_voice.reset_session_own)
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.root = root.name
+
+    def bot(self, **config):
+        base = {"tools.bili_post_enabled": True, "tools.bili_post_daily_limit": 1}
+        return FakeBot(self.root, **{**base, **config})
+
+    async def _post_composed(self, bot, content):
+        async def chat(messages, tools):
+            return {"content": content}
+
+        bot.llm.chat_message = chat
+        with patch.object(bili_post.bili_scroll, "recent_notes",
+                          return_value=[{"name": "n.md"}]), \
+                patch.object(bili_post.bili_scroll, "read_note",
+                             return_value="笔记正文"), \
+                patch.object(bili_post.bili_scroll, "_bili_jct",
+                             return_value="jct"), \
+                patch.object(bili_post.bili_scroll, "action",
+                             new=AsyncMock(return_value={
+                                 "ok": True,
+                                 "data": {"success": True,
+                                          "dynamic_id": "777"}})) as call:
+            result = await bili_post.post_once(bot)
+        return result, call
+
+    async def test_model_text_that_fails_voice_check_is_dropped(self):
+        bot = self.bot()
+        result, call = await self._post_composed(
+            bot, "笑死，今天刷到的片子真有意思")
+        self.assertFalse(result["ok"])
+        call.assert_not_called()
+        self.assertFalse((Path(self.root) / "data" / "bili_post.json").exists())
+
+    async def test_confirmed_dynamic_is_recorded_for_next_time(self):
+        bot = self.bot()
+        result, call = await self._post_composed(
+            bot, "今天刷到的片子挺有意思")
+        self.assertTrue(result["ok"], result)
+        call.assert_called_once()
+        self.assertIn("今天刷到的片子挺有意思",
+                      [row["text"] for row in bili_voice.recent_own(bot)])
+
+    async def test_voice_switch_off_skips_check_but_keeps_posting_and_dedupe(self):
+        bot = self.bot(**{"tools.bili_voice_enabled": False,
+                          "tools.bili_post_daily_limit": 5})
+        result, call = await self._post_composed(
+            bot, "笑死，今天刷到的片子真有意思")
+        self.assertTrue(result["ok"], result)
+        call.assert_called_once()
+        # 不检查 ≠ 不记账：确认发出后仍进「近期自发言」。
+        self.assertIn("笑死，今天刷到的片子真有意思",
+                      [row["text"] for row in bili_voice.recent_own(bot)])
+        # 去重仍生效：同一天同一句不会再发第二次。
+        again, second_call = await self._post_composed(
+            bot, "笑死，今天刷到的片子真有意思")
+        self.assertFalse(again["ok"])
+        self.assertIn("一模一样", again["reason"])
+        second_call.assert_not_called()
 
 
 class ScheduleTests(unittest.IsolatedAsyncioTestCase):

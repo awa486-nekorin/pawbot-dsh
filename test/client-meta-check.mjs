@@ -31,7 +31,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 
 /**
- * 需求指定的「常用」key 清單（73 個）。
+ * 需求指定的「常用」key 清單（74 個）。
  *
  * ⚠️ 這是**測試檔自己的外部常數**，刻意不從 client.js / PANEL_META 取。
  * 從被測檔案取需求清單的話，把某個 key 從兩邊同時刪掉測試照樣全綠，等於沒測。
@@ -244,8 +244,15 @@ wiringCheck('状态首次失败不伪报停机，并标记成功响应时间', (
 })
 
 const { config, source } = await loadConfig()
-wiringCheck('常用清单保持 74 项，全部 metadata 为 74 + 287 = 361', () =>
-  REQUIRED_COMMON.length === 74 && meta.common.length === 74 && meta.advanced.length === 287 &&
+// 2026-11-03：补齐 38 个 B 站写闸门 / 自愈 / 中继 / 评审键后，高级 metadata 从 287 增到 325；
+// 又加了 4 个「逐动作授权」开关（点赞/收藏/投币/删一条评论），高级从 325 增到 329。
+// 完整云端策略（刷片互动 / 自动互动扫描 / 批量删评论）再补 15 个键，高级从 329 增到 344。
+// 2026-11-03 生产热修 replycap 再补 1 个键（每视频每天回复上限），高级从 344 增到 345。
+// 2026-11-04 反公式化发言：新增 6 个人味守门配置键，高级从 345 增到 351。
+// 2026-11-04 猫娘草稿法：新增 5 个三段式草稿配置键，高级从 351 增到 356。
+// 2026-11-04 自主生活与养成：life 段新增 10 个键，高级从 356 增到 366。
+wiringCheck('常用清单保持 74 项，全部 metadata 为 74 + 366 = 440', () =>
+  REQUIRED_COMMON.length === 74 && meta.common.length === 74 && meta.advanced.length === 366 &&
   meta.common.every((item) => REQUIRED_COMMON.includes(item.key)))
 wiringCheck('QQ 空间主动权限保留在高级设置且默认关闭', () =>
   meta.metadata['qzone.proactive_enabled']?.advanced === true && config.qzone.proactive_enabled === false)

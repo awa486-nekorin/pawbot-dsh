@@ -130,7 +130,8 @@ async def ai_chat(ctx):
         return
     ctx.state["group_observe"] = ev.is_group
 
-    text = _clean(ctx.plain, cfg.get("bot.wake_words", []), cfg.get("bot.nickname", ""))
+    text = _clean(getattr(ctx, "raw_text", "") or ctx.plain,
+                  cfg.get("bot.wake_words", []), cfg.get("bot.nickname", ""))
     # 只发了一张图、没配字：给一个「纯附件」占位，不把视觉转述当成他说的话。
     # 图片内容由 perceive 的图片提示单独带归属注入；这里只说明没有文字。
     if not text:

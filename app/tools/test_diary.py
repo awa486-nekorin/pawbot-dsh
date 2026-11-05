@@ -142,19 +142,27 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.diary.recent(1), [(yesterday, "昨天的日記")])
         self.assertEqual(self.diary.recent(0), [])
 
-    async def test_prune_removes_files_outside_keep_days(self):
+    async def test_prune_archives_files_outside_keep_days(self):
         old_day = (datetime.now() - timedelta(days=61)).strftime("%Y-%m-%d")
         fresh_day = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
         bot = fake_bot(self.config, [])
         self.diary._write(bot, old_day, "很舊的日記")
         self.diary._write(bot, fresh_day, "還算新的日記")
         self.assertEqual(self.diary.prune(), 1)
-        self.assertFalse(self.diary.exists(old_day))
+        self.assertFalse(os.path.exists(self.diary.path_for(old_day)))
+        self.assertTrue(os.path.exists(os.path.join(self.diary.dir, "archive",
+                                                    f"{old_day}.md")))
+        self.assertTrue(os.path.exists(os.path.join(self.diary.dir, "archive",
+                                                    f"{old_day}.json")))
+        self.assertTrue(self.diary.exists(old_day))   # archive 透明
         self.assertTrue(self.diary.exists(fresh_day))
+        self.assertEqual(self.diary.search("很舊")[0]["day"], old_day)
+        self.assertIn("很舊的日記", self.diary.read(old_day)["text"])
 
 
 class AgentDiaryInjectionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_diary_injected_before_longmem_and_user(self):
+    async def test_diary_is_not_auto_injected_into_chat(self):
+        """旧 diary.recent 自动注入已取消：日记只在需要时用工具检索。"""
         from pawbot.agent import Agent
         from pawbot.store import Store
 
@@ -198,14 +206,12 @@ class AgentDiaryInjectionTests(unittest.IsolatedAsyncioTestCase):
                                   state={}, matched_command=None)
             await agent.run(ctx, "在聊什麼", [])
             messages = seen["messages"]
-            diary_idx = next(i for i, msg in enumerate(messages)
-                             if "你前两天写的日记" in msg["content"])
+            joined = "\n".join(str(m.get("content") or "") for m in messages)
+            self.assertNotIn("你前两天写的日记", joined)
+            self.assertNotIn("昨天群裡聊了芙莉蓮", joined)
+            diary.recent.assert_not_called()
             long_idx = next(i for i, msg in enumerate(messages)
                             if "你想起来的（内部记忆）" in msg["content"])
-            self.assertLess(diary_idx, long_idx)
-            self.assertEqual(messages[diary_idx]["role"], "system")
-            self.assertIn("2026-10-20", messages[diary_idx]["content"])
-            self.assertIn("2026-10-19", messages[diary_idx]["content"])
             self.assertLess(long_idx, len(messages) - 1)
             self.assertEqual(messages[-1]["role"], "user")
         finally:

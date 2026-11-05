@@ -82,7 +82,10 @@ def l1_turn(bot, session_id: str, *, chars: int = 600) -> tuple[str, dict]:
 
 def l2_days(bot, session_id: str, entities, *, days: int = 2,
             chars: int = 1600, now: float | None = None) -> tuple[str, dict]:
-    """L2 这些天：日摘要（entities 里 kind=day）+ 她自己写的日记。"""
+    """L2 这些天：只放日摘要（entities 里 kind=day）。
+
+    日记不再按最近日期自动灌入；需要回忆时由 diary.search / read 按需查。
+    """
     now = float(now or time.time())
     段: list[str] = []
 
@@ -102,22 +105,6 @@ def l2_days(bot, session_id: str, entities, *, days: int = 2,
             from .entities import _来源标注
             标 = _来源标注(str(row.get("source") or ""), row.get("sources"))
             段.append(f"{_天(float(row.get('ts') or now))}：{正文}{标}")
-
-    try:
-        日记 = bot.diary.recent(days) if getattr(bot, "diary", None) is not None else []
-    except Exception:
-        日记 = []
-    已有日期 = {s.split("：", 1)[0] for s in 段}
-    for item in 日记 or []:
-        try:
-            日期, 正文 = item
-        except (TypeError, ValueError):
-            continue
-        if 日期 in 已有日期:
-            continue
-        正文 = " ".join(str(正文 or "").split())
-        if 正文:
-            段.append(f"{日期}（日记）：{正文}")
 
     if not 段:
         return "", {"chars": 0, "days": 0}

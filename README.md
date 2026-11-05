@@ -14,12 +14,58 @@
 | 部分 | 位置 | 说明 |
 | --- | --- | --- |
 | 插件本体 | `index.js` / `client.js` / `lib/` / `bili-watch/` / `locale/` | DSH Host bundle：PawBot 受管服务 + 「大肥鱼看 B 站」 |
-| **PawBot 本体** | `app/` | PawBot 的 Python 源码：`run.py`、`pawbot/`（核心包）、`plugins/`（内置插件）、`tools/`（测试与辅助脚本）、`data/`（**模板**：配置、人设、空记忆） |
+| **PawBot 本体** | `app/` | PawBot 的 Python 源码：`run.py`、`pawbot/`（核心包）、`plugins/`（内置插件）、`tools/`（测试与辅助脚本）、`data/`（**模板**：`state/config.json` + `content/persona.md`、空记忆/日记/笔记） |
 | 部署说明 | [DEPLOY.md](DEPLOY.md) | 云服务器（Linux）从零部署清单：NapCat、SESSDATA、目录与权限 |
 
 **PawBot 源码已经内附在本仓库的 `app/` 里**——装这个插件就有 PawBot 本体，不需要另外下载/上传。
 `app/data/` 里只有模板：`config.json` 的密钥字段全部为空、`memory/*.md` 是空文件、`people/` 与 `diary/`
-是空目录（只有 `.gitkeep`）。真实会话、群友档案、图片缓存、表情包、密钥都不进仓库（`.gitignore` 已排除）。
+是空目录（只有 `.gitkeep`）。首次启动会按下方布局把它们迁到 `state/` 与 `content/`；真实会话、
+群友档案、图片缓存、表情包、密钥都不进仓库（`.gitignore` 已排除）。
+
+## 你必须自己配置的内容
+
+仓库里的模板不会替你把下面这些填好。**机密只存在本机 `data/state/config.json`，不会进 git**。
+
+| 要配什么 | 配在哪里 | 说明 |
+| --- | --- | --- |
+| PawBot 源码目录 / Python | DSH 插件设置：`projectDir` / `pythonExe` | 指向本 bundle 的 `app/`；Python 建议用独立 venv |
+| 数据目录 | DSH 插件设置：`dataDir` | **强烈建议放插件目录外**（如 `D:/PawBotData`），升级不碰；留空才默认 `<插件>/app/data` |
+| 主人 QQ | PawBot 设置 `account.owner_ids` | 必填；主人指令、电脑工具、写操作都靠它 |
+| LLM 提供商 / 模型 / API key | 面板「API 密钥」或 `llm.base_url` / `llm.api_key` | 不填就只能 mock，不能正常说话；也可切 `llm.provider=dsh` 用宿主模型 |
+| QQ 登录 | NapCat WebUI 扫码 | 插件只负责编排，QQ 账号要自己登 |
+| OneBot 连接 | 插件 / NapCat 网络配置 | 反向 WS 默认 `ws://<host>:6199/ws`，token 自己定 |
+| B 站只读 | `tools.bili_sessdata` 或 `bili.sessdata` | 只看字幕/评论只需要 SESSDATA |
+| B 站写操作 | `tools.bili_jct` | 发评论/动态/弹幕/私信才需要；只有 SESSDATA 只能读 |
+| WebUI token | `webui.token` | 只给本机/受信网络用；公网必须设 |
+| 云端同步口令 | `sync.passphrase` | 要同步含 API key 的 `config.json` 必须设；丢了不可恢复 |
+| 可选能力 key | 面板对应分组 | 搜索、看图、语音、Pixiv 等，不填就降级，不影响主聊天 |
+
+不需要自己准备的：`app/` 源码、`content/` 下的人设/记忆/日记/笔记模板、数据迁移、版本快照。
+插件更新只换代码；**最稳的做法仍然是把 `dataDir` 放到插件目录外**。
+
+## 数据放在哪里：content / state 分开
+
+运行时数据根默认是 `<插件>/app/data`，也可以用插件 Config 的 `dataDir` 或环境变量
+`PAWBOT_DATA_DIR` 指到插件外。根下只有两层，**人设、记忆、笔记、日记各自是独立文件/目录，
+不塞进 `config.json`**：
+
+| 层 | 放什么 | 具体位置 |
+| --- | --- | --- |
+| `content/` | 可以整包搬到另一台机器的用户内容 | `persona.md`、`memory/`、`longmem/`、`diary/`、`bili_notes/`、`people/`、`stickers/`、`album/`、`hobbies.json`、`memes.json`、`relations.json` |
+| `state/` | 只属于这台机器的运行状态 | `config.json`（含密钥）、`sessions.json`、`autonomy.json`、`mood/emotion/topic/libido`、`proactive_state.json`、`run.log`、`backups/`、`browser/`、`brain/`、`napcat/` |
+
+要点：
+
+- **人设**：`content/persona.md`，只影响说话/身份，不碰密钥。
+- **记忆**：`content/memory/` 与 `content/longmem/`，按事实/印象/长期经历分开。
+- **笔记**：B 站刷站笔记在 `content/bili_notes/`，一条视频一个 md。
+- **日记**：`content/diary/`，一天一篇。
+- **配置**：`state/config.json`，只放运行参数和密钥；改配置不会重写人设/记忆。
+- `content/` 可以整体备份/迁移；`state/` 跨机器复用没有意义（会话/心情/日志只属于本机）。
+- 旧版 `data/<x>` 会在启动时自动迁移到 `content/` 或 `state/`，并留兼容链接；新代码只认
+  canonical 路径。旧路径仍可被面板/API 读取，但不要再往旧路径写新数据。
+- 仓库只提交模板，真实内容被 `.gitignore` 排除；升级前的版本快照在
+  `state/backups/plugin-update-<版本>-<时间>/`。详见 [docs/DATA-PERSISTENCE.md](docs/DATA-PERSISTENCE.md)。
 
 ## 结构
 
@@ -47,7 +93,7 @@ app/                          # ★ PawBot 本体的 Python 源码（自包含�
   pawbot/                     #   核心包（OneBot / LLM / 记忆 / 发送层 / WebUI …）
   plugins/                    #   内置插件（basic / ai_chat / life_events / pixiv …）
   tools/                      #   测试（test_*.py）+ 辅助脚本（mock_qq / selftest …）
-  data/                       #   运行时数据（只有模板进库：config.json / persona.md / 空记忆）
+  data/                       #   运行时数据根（模板进库：state/config.json、content/persona.md、空记忆/日记/笔记）
   README.upstream.md, 使用指南.md, ARCHITECTURE.md   # 上游文档
 locale/en.json, locale/zh.json, icon.svg   # 本 bundle 的显示 metadata / 图标
 cordis.patch.yml              # 插入两列：pawbot 与 pawbot-bili-watch
@@ -117,7 +163,7 @@ DEPLOY.md                     # Linux 云服务器部署清单
 | `pawbot_restart` | 重启；**副作用**：杀整棵树→重新 spawn，正在回的话会丢、NapCat 断线（通常自动重连）、服务短暂中断 |
 | `pawbot_health` | 真的请求 PawBot WebUI 的 `GET /api/status`；请求不到就只回进程层状态，不自己造 API |
 | `pawbot_config_get` | 读 config（可 `section` 只回某区段）；secrets 一律遮罩成 `***已设定***`，`reveal:true` 才回真值（有泄漏风险，除非明确要看别用） |
-| `pawbot_config_set` | 改 config（`patch` 深合并、直接写 `data/config.json`）；返回改动前后「键名」差异，不列值；遮罩值会被丢掉 |
+| `pawbot_config_set` | 改 config（`patch` 深合并、直接写 `data/state/config.json`）；返回改动前后「键名」差异，不列值；遮罩值会被丢掉 |
 | `pawbot_brain` | 大肥鱼大脑自检：`action=status` 看通不通（模型路由/沙箱/工具白名单）、`selftest` 真跑一轮、`turn` 用自定义 system/prompt 跑一轮（不发 QQ） |
 
 ## 她的大脑可以长在 DSH 里（2026-10-27）
@@ -180,7 +226,7 @@ py tools\chat_window.py --check "今天好累啊"
 | 控件 | 作用 |
 |---|---|
 | 输入框 + 发送 | Enter 发送、Shift+Enter 换行；群聊自动 @ 她 |
-| 群号 / 我的QQ / 昵称 | 模拟哪个群、谁在说话；保存在 `app/data/chat_window.json`（不进仓库） |
+| 群号 / 我的QQ / 昵称 | 模拟哪个群、谁在说话；保存在 `app/data/state/chat_window.json`（不进仓库） |
 | 私聊测试 | 勾上后按私聊发（不需要 @），适合测主人专属能力 |
 | 设为主人 / 取消主人 | 把「我的QQ」写进/移出 PawBot 的 `account.owner_ids`；**只有主人能用电脑工具** |
 | 清空 | 只清窗口，不动 PawBot 的记忆 |
@@ -210,7 +256,7 @@ py tools\chat_window.py --check "今天好累啊"
 
 ## 表情包 2.0 与语气词收敛（2026-10-27）
 
-- **每张表情包都有真实描述**：`data/stickers/index.json` 的条目从 `{tags}` 升级为 `{tags, desc, mood, desc_source}`；入库时用看图模型（默认 togemini `gemini-4-argon-medium`）写「画面/动作/配字」，失败用标签拼人话兜底。工具 `app/tools/describe_stickers.py` 可给旧库补描述（`--dry` / `--apply`，写前备份）。
+- **每张表情包都有真实描述**：`data/content/stickers/index.json` 的条目从 `{tags}` 升级为 `{tags, desc, mood, desc_source}`；入库时用看图模型（默认 togemini `gemini-4-argon-medium`）写「画面/动作/配字」，失败用标签拼人话兜底。工具 `app/tools/describe_stickers.py` 可给旧库补描述（`--dry` / `--apply`，写前备份）。
 - **按描述挑图**：`pick_sticker(query)` 的 query 现在是「想发的画面/情绪描述」，匹配时 tags +2、desc/mood/文件名 +1；系统提示里会列当前情绪下最贴的 8 条 `描述（tags）` 供她挑。
 - **不再几乎每条都发**：`media.sticker_chance` 默认 0.95 → **0.12**，`persona.sticker_gap` 默认 [1,1] → **[3,6]**；只有**情绪强烈**（默认「强烈」）或主导情绪是 **兴奋/烦躁/感动** 时才绕过随机闸主动发（`media.sticker_force_*` 可调）；对方明确说「发个表情包」也会放行。
 - **语气词收敛**：`reply.tone_trim`（默认 0.7）按确定性哈希削句末「啊/嘛/啦/呀/哦/哟」；「呢/吧/吗」作为疑问/商量语气保留（削了会改意思）；「干嘛/哎呀」这类词不误伤。人设里也把「语气词十句最多一两个」写进规则。
@@ -238,14 +284,15 @@ emotion.decider_weight = 1.0
 
 ## 升级不丢数据（2026-10-27）
 
-插件更新/重装最怕把 `app/data`（人设、记忆、`config.json` 里的 API key）盖掉。现在有两层保护：
+插件更新/重装最怕把数据根（默认 `app/data`，里面是人设、记忆、日记、笔记和 `state/config.json`
+里的 API key）盖掉。现在有两层保护：
 
 1. **版本快照（默认开）**：插件版本一变，自动把 config/persona/记忆快照到
-   `data/backups/plugin-update-<版本>-<时间>/`，保留最近 5 份。
+   `state/backups/plugin-update-<版本>-<时间>/`，保留最近 5 份。
    手动：`pawbot_data_backup action=backup`；查看：`action=status`。
 2. **外部数据目录（强烈推荐）**：DSH 设置 → 插件 → PawBot 的 Config 里把 `dataDir` 填成
    插件目录外的路径（如 `D:/PawBotData`），重载插件。插件会把现有数据**不覆盖地**迁过去，
-   再把 `app/data` 换成指向它的联接；以后升级只换代码，碰不到数据。
+   再把 `app/data` 换成指向它的联接；以后升级只换代码，碰不到 `content/` 与 `state/`。
 
 恢复步骤、留档目录（`data.migrated-*`）与边界见 [docs/DATA-PERSISTENCE.md](docs/DATA-PERSISTENCE.md)。
 
@@ -262,12 +309,12 @@ py tools\cloud_sync.py test                  # 只测连通性
 py tools\cloud_sync.py push --dry            # 只打包，不上传
 py tools\cloud_sync.py push
 py tools\cloud_sync.py pull --dry            # 只看远端有什么/会改什么
-py tools\cloud_sync.py pull                  # 默认只写 data/config.synced.json
+py tools\cloud_sync.py pull                  # 默认只写 data/state/config.synced.json
 py tools\cloud_sync.py pull --overwrite-config
 ```
 
 - **含 API key 的 config 必须加密**：设 `sync.passphrase`（AES-256-GCM + PBKDF2，需 `cryptography` 或 `pycryptodome`；都没有会明确报错）。未加密时只允许同步人设/记忆，`include_config=true` 会直接拒绝（fail-closed）。
-- **拉取不粗暴覆盖**：默认只落地 `data/config.synced.json` 并给出 key 级 diff；加 `--overwrite-config` 才覆盖，覆盖前自动备份到 `data/backup-sync-<时间>/`，并保留本机 `sync` 段（不会把本机同步凭据冲掉）。
+- **拉取不粗暴覆盖**：默认只落地 `data/state/config.synced.json` 并给出 key 级 diff；加 `--overwrite-config` 才覆盖，覆盖前自动备份到 `data/state/backup-sync-<时间>/`，并保留本机 `sync` 段（不会把本机同步凭据冲掉）。
 - 启动自动拉取：`sync.auto_pull_on_start=true` 时后台拉一次，失败只记日志、不影响启动。
 - 安全：日志/返回值/status 都不含 password/token/passphrase；拒绝路径穿越/符号链接；密钥会上传到你的云，**必须信得过那台服务器**；passphrase 丢了无法恢复。
 - 配置字段在面板「设置 → 高级 → 云端同步」或「API 密钥 → 云端同步」组里填；完整说明见 [docs/CLOUD-SYNC.md](docs/CLOUD-SYNC.md)。
@@ -288,7 +335,7 @@ py tools\cloud_sync.py pull --overwrite-config
 | 状态 | running / PID / uptime / spawn 次数 / PawBot `/api/status`（连接、会话、插件数、心情）；按钮：重启 PawBot（两段式确认）、重载插件；每 5 秒刷新，离开面板即停 |
 | API 密钥 | 15 个 key / endpoint / 模型按服务分组统一填写；顶部显示密钥配置统计 |
 | 设置 | **全部 37 个区段、331 个键**分组表单（bool→开关、number→数字框、string→输入框/textarea、数组与对象→JSON），有搜索框、折叠、原始 JSON 模式；**只送出改动过的键**；机密栏显示「已设置（不改）」 |
-| 人设 | 直接编辑 `data/persona.md`（保存前两段式确认，显示字数）；发测试消息、看上下文与记忆 |
+| 人设 | 直接编辑 `data/content/persona.md`（保存前两段式确认，显示字数）；发测试消息、看上下文与记忆 |
 
 | 路由（同源，相对 DSH GUI 根） | 方法 | 作用 |
 | --- | --- | --- |
@@ -305,8 +352,9 @@ py tools\cloud_sync.py pull --overwrite-config
 **安全**：返回给浏览器的 config 一律把 `api_key` / `token` / `access_token` / `cloud_key` /
 `*secret*` 等遮成 `"***已设定***"`，且写回时把「值等于遮罩字符串」的键丢掉——**API key / token 不会进浏览器**。
 
-**人设文件路径注意**：PawBot 的 `/api/file` 只允许读写 `data/` 底下的相对路径，所以人设文件
-（项目根的 `data/persona.md`）在 API 里的路径是 `persona.md`，**不是** `data/persona.md`。
+**人设文件路径注意**：PawBot 的 `/api/file` 只允许读写数据根内的相对路径，所以人设文件
+（canonical 是 `data/content/persona.md`）在 API 里的路径可以写 `persona.md`，也可以写
+`content/persona.md`，**不能**写 `data/content/persona.md`。
 
 ### 如何验证（重启 DSH 后）
 
@@ -359,7 +407,7 @@ py tools\cloud_sync.py pull --overwrite-config
   `~/.dsh/sessions/` 落一份 7~50KB 的日志（DSH 的持久化语义，当前没有 delete API）。
   图片暂时进不了大脑（降级为「只按文字回」）。没有真 NapCat 的机器上，QQ 链路只能用协议端探针验证。
   完整清单见 `docs/BRAIN.md` §7 与 `docs/BRAIN-VERIFICATION.md` §5。
-- 本 bundle **自带 `app/`（PawBot 源码 + `data/` 模板）**；运行时只写 `app/data/` 下的数据文件，
+- 本 bundle **自带 `app/`（PawBot 源码 + `data/` 模板）**；运行时只写数据根下的 `content/` 与 `state/`，
   **不改 `app/pawbot/` 等源码**、**不改 profile 的 package.json / cordis.patch.yml**、**不装其他 npm 包**。
 
 ## 安装 / 验证
@@ -382,13 +430,13 @@ PawBot 本体**已内附在 `app/`**，安装时不需要另外准备 Python 项
 
 `app/pawbot/bili_scroll.py` 让 PawBot 自己刷站：搜/热门 → 去重 → **读字幕原文**（走内置的
 `app/pawbot/bili_mcp/`，即 [bilibili-mcp](https://github.com/adoresever/bilibili-mcp)，MIT）→ 判断值不值得看
-→ 每条写一份笔记到 `app/data/bili_notes/<标题>-<YYMMDD>.md`。
+→ 每条写一份笔记到 `app/data/content/bili_notes/<标题>-<YYMMDD>.md`。
 
 - **可选依赖**：字幕要 `app/requirements-bili.txt`（`mcp<2` + `bilibili-api-python`）。不装也能刷，
   只是没有字幕、笔记降级成标题+简介。
 - **凭据**：SESSDATA 从 `tools.bili_sessdata` / `bili.sessdata` 配置或 bili-watch 共享目录的
-  `credential.json` 读取，同步到 `app/pawbot/bili_mcp/bili_credential.json`。
-  ⚠️ 那个文件已在 `.gitignore` 里，**永远不要提交**。
-- **配置**：`app/data/config.json` 的 `tools.bili_scroll_*`（主题、每轮条数、最低播放量、时长上限、
+  `credential.json` 读取，同步到 `app/data/state/bili_credential.json`（子进程需要的 vendor 副本另算）。
+  ⚠️ 凭证文件已在 `.gitignore` 里，**永远不要提交**。
+- **配置**：`app/data/state/config.json` 的 `tools.bili_scroll_*`（主题、每轮条数、最低播放量、时长上限、
   笔记目录、定时时段 `bili_scroll_times`、报告发给谁）。
 - **工具**：`bili_scroll`（现在刷一轮）、`bili_notes`（看笔记）、`bili_action`（B 站写操作，需 `bili_jct`）。

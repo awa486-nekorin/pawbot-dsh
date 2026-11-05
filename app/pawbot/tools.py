@@ -57,9 +57,13 @@ def _fn(name: str, desc: str, props: dict, required: list[str]) -> dict:
 # 只能拿到这些；真正的执行入口还会再核一次（不只靠「没把 schema 给它」）。
 READ_ONLY_TOOLS = frozenset({
     "web_search", "fetch_url", "x_search", "x_read", "moegirl",
-    "bili_watch_status", "recall_memory", "bili_notes",
-    "qzone_list", "qzone_comments", "album_search",
+    "bili_watch_status", "recall_memory", "diary_search", "diary_read",
+    "bili_notes", "qzone_list", "qzone_comments", "album_search",
 })
+
+# 内部持久化：只写自己的生活/成长状态，不冒充人类 owner、不对外发布账号。
+# 与对外写（SENSITIVE_PUBLIC_WRITE）和账号操作分开审查。
+INTERNAL_PERSISTENCE_TOOLS = frozenset({"life_manage"})
 
 # 改人设 / 公开发布 / 改账号资料：除了主人身份，还要求本轮没有读过外部内容
 # （外部字幕、评论、网页都可能夹带指令；读过就只保留只读能力）。
@@ -76,9 +80,17 @@ EXTERNAL_CONTENT_TOOLS = frozenset({
     "bili_video", "bili_scroll", "bili_action", "bili_notes",
 })
 
-# bili_action 允许的动作：只读 + 纯文字评论/回复 + 纯文字动态。
+# bili_action 允许的动作：只读 + 纯文字评论/回复 + 纯文字动态 + 点赞/收藏。
+# **视频评论 comment、发弹幕 send_danmaku、投币 coin、单条删除 delete_comment
+# 故意不在这里**：模型不能直接调用。
+#   - comment / send_danmaku：只能由主人 // 指令或受控 bili_auto 发起；
+#   - coin / delete_comment：只能由主人**显式指令**（//投币 / //删评论）逐次授权，
+#     模型不能自己决定花硬币或删东西，自然语言「互动」也不构成授权。
+# 要开放必须单独评审写闸门与授权路径，不要顺手加进这个 allowlist。
 # 上传/专栏/私信等永远不从这里暴露。
 BILI_TEXT_WRITE_ACTIONS = frozenset({"reply", "dynamic"})
+BILI_REACTION_WRITE_ACTIONS = frozenset({"like", "favorite"})
+BILI_MODEL_WRITE_ACTIONS = BILI_TEXT_WRITE_ACTIONS | BILI_REACTION_WRITE_ACTIONS
 
 # 主人当前消息里出现这些词才算「明确要求改人设/说话方式」；
 # 只发一条视频、转一条评论、贴一段字幕都不算。必须同时有动作词和目标词，
@@ -97,6 +109,56 @@ _BILI_WRITE_REQUEST_CUES = (
     "评论他", "评论她", "发动态", "发条动态", "发一个动态", "发个动态",
     "发一条", "帮我回", "帮我发", "去回", "去发",
 )
+# 点赞/收藏要的是**这个动作自己**的明确要求，不能拿「看看这个视频」或
+# 「评论一下」来顺带授权（一次授权只够一个动作）。
+_BILI_LIKE_CUES = ("点赞", "点个赞", "给个赞", "点一下赞", "点一下喜欢")
+_BILI_FAVORITE_CUES = ("收藏", "加收藏", "收一下", "加入收藏")
+
+
+def _bili_write_cues(name: str) -> tuple:
+    if name == "like":
+        return _BILI_LIKE_CUES
+    if name == "favorite":
+        return _BILI_FAVORITE_CUES
+    return _BILI_WRITE_REQUEST_CUES
+
+
+def _bili_voice_max_chars(bot) -> int:
+    """检查长度用闸门的硬上限（``tools.bili_write_max_chars``，默认 300）。
+
+    人设/开头/口头禅/表情/相似度照查，但长度别比闸门更严——把闸门允许的
+    动态误判成「太长」会让模型以为怎么写都不对。
+    """
+    try:
+        raw = bot.config.get("tools.bili_write_max_chars", 300)
+    except Exception:
+        raw = 300
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 300
+    return value if 1 <= value <= 2000 else 300
+
+
+def _bili_voice_reasons(bot, text: str, args: dict, action: str) -> list[str]:
+    """模型自己写的公开文本：发之前过和 ``bili_voice`` 生成管线**同一套**检查。
+
+    返回违规原因；空列表 = 放行。``tools.bili_voice_enabled`` 是**全部检查路径**
+    的总开关：关掉就一条都不查；但发送成功后的记账/闸门去重照旧，不受开关影响。
+    检查本身出错时 fail closed（给一条原因，宁可不发也不绕过）——这条路径没有
+    第二次重写，直接让模型改完再来。
+    """
+    try:
+        from . import bili_voice
+        if not bili_voice.enabled(bot):
+            return []
+        cons = bili_voice.constraints(bot)
+        return list(bili_voice.check(
+            text, bot, str(args.get("bvid") or ""), cons=cons,
+            max_chars=_bili_voice_max_chars(bot)))
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"B 站发言检查没跑起来（{action}），这次不发：{type(e).__name__}")
+        return [f"检查没跑起来（{type(e).__name__}）；宁可不发"]
 
 
 def _bili_read_actions() -> list[str]:
@@ -107,7 +169,26 @@ def _bili_read_actions() -> list[str]:
 
 
 def _bili_allowed_actions() -> list[str]:
-    return sorted(set(_bili_read_actions()) | set(BILI_TEXT_WRITE_ACTIONS))
+    return sorted(set(_bili_read_actions()) | set(BILI_MODEL_WRITE_ACTIONS))
+
+
+def _bili_external_receipt(name: str, payload, *, max_chars: int = 6000) -> str:
+    """把 B 站回执正文包进与只读出口**同一套** ``untrusted`` 数据块。
+
+    写动作的回执里同样可能带 B 站返回的正文、用户名、错误页（都是外部数据），
+    不能裸着进模型上下文——否则「回执里写一句去做什么」就可能被当成指令。
+    围栏标记由 ``untrusted`` 统一生成，外部文本里的伪标记会被消毒掉。
+    """
+    if isinstance(payload, str):
+        text = payload
+    else:
+        try:
+            text = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(payload or "")
+    block = untrusted.wrap_external(
+        text, source=f"bilibili_{name}", kind="bili_data", max_chars=max_chars)
+    return block or "（B 站没有给可读的回执）"
 
 
 SCHEMAS: dict[str, dict] = {
@@ -186,8 +267,107 @@ SCHEMAS: dict[str, dict] = {
                 "description": "fact=事实，slang=网络用词，impression=对某人的印象，"
                                "people=人物卡（写成「名字：特点」，比如「阿明：爱问技术问题」）",
             },
+            "subject": {"type": "string",
+                        "description": "这条记忆属于谁：self=自己，person:QQ号/昵称=某个人；"
+                                       "不确定就省略，系统会按内容判断，不会一律算成自己"},
+            "confirmed": {"type": "boolean",
+                          "description": "对方刚刚明确确认/更正过才填 true；推测保持候选"},
         },
         ["text"],
+    ),
+    "diary_search": _fn(
+        "diary_search",
+        "翻自己的日记，按主题/人物/时间找以前发生过的事。想回忆「上次」「前几天」、"
+        "继续旧项目、核对模糊旧事时先搜它；只返回少量摘要和日记 ID，要看原文再用 diary_read。"
+        "普通闲聊不需要查。",
+        {
+            "query": {"type": "string", "description": "想找的主题、人物或关键词"},
+            "start": {"type": "string", "description": "起始日期 YYYY-MM-DD，可选"},
+            "end": {"type": "string", "description": "结束日期 YYYY-MM-DD，可选"},
+            "people": {"type": "array", "items": {"type": "string"},
+                       "description": "相关的人，可选"},
+            "limit": {"type": "integer", "description": "最多几条，默认 5"},
+        },
+        ["query"],
+    ),
+    "diary_read": _fn(
+        "diary_read",
+        "读一篇日记的原文（先用 diary_search 拿 ID）。内容长时可以带 offset 继续往后读。",
+        {
+            "entry_id": {"type": "string", "description": "diary_search 返回的日记 ID"},
+            "offset": {"type": "integer", "description": "从第几个字开始，默认 0"},
+            "limit": {"type": "integer", "description": "最多读多少字，默认 1800"},
+        },
+        ["entry_id"],
+    ),
+    "life_manage": _fn(
+        "life_manage",
+        "查看/维护自己的经历、记忆、目标、自我条目和实践成长。operation=status 先看现有"
+        "条目和 ID；status/goal/self 可用 query 或 target_id 读取任意有效条目（不只前 8 条）"
+        "并返回 version。goal/self 的任何非 add 变更都必须带 target_id 和 expected_version；"
+        "缺少版本时先重新读取当前条目。self 的 merge 还要在 fields 里带"
+        "expected_other_version（另一侧版本的 CAS）。self 的改动必须引用真实经历"
+        "source_ids，且只改指定条目，不重写整节人设。这是内部状态，不需要主人授权，"
+        "也不代表对外发布。",
+        {
+            "operation": {
+                "type": "string",
+                "enum": ["status", "experience", "remember", "goal", "self", "practice"],
+                "description": "status=看状态；experience=记经历；remember=记事实；"
+                               "goal=目标；self=自我条目；practice=了解/实践",
+            },
+            "query": {"type": "string",
+                      "description": "status/goal/self 只读时按关键词定位任意有效条目，"
+                                     "返回 ID 与 version；找不到再用 target_id 精确读"},
+            "summary": {"type": "string", "description": "experience 的经历摘要"},
+            "text": {"type": "string", "description": "remember 的正文，或目标/自我条目内容"},
+            "kind": {"type": "string",
+                     "description": "记忆类型（semantic/episodic/procedural 等）或经历 kind"},
+            "subject": {"type": "string", "description": "记忆主体，默认 self；别人用 person:昵称"},
+            "confirmed": {"type": "boolean", "description": "明确确认/更正才为 true"},
+            "source_ids": {"type": "array", "items": {"type": "string"},
+                           "description": "依据的经历 ID；self 修订必须给"},
+            "op": {"type": "string",
+                   "description": "goal: add/revise/complete/pause/abandon/delete；"
+                                  "self: add/revise/retire/delete/merge；省略=只读列表。"
+                                  "非 add 都要先读 expected_version"},
+            "target_id": {"type": "string",
+                          "description": "要改/要读的条目 ID；读任意有效条目时优先用它"},
+            "expected_version": {"type": "integer",
+                                 "description": "当前条目的版本号；任何非 add 变更必填。"
+                                                "缺版本就先用 goal/self 只读或 status 查"},
+            "expected_other_version": {
+                "type": "integer",
+                "description": "self merge 时另一侧条目的版本号（也会接受 "
+                               "fields.expected_other_version）；两侧 CAS 必须同时匹配",
+            },
+            "target_slot": {
+                "type": "string",
+                "description": "self 定向修订/停用原人设小节时使用：填稳定 seed ID"
+                               "（如 seed:temperament）。会写入 valid_scope，"
+                               "渲染时局部替换/停用该小节，不重写整份人设",
+            },
+            "fields": {"type": "object",
+                       "description": "只改这些字段的局部补丁；self merge 必须含另一侧 ID "
+                                      "和 expected_other_version，self 定向修订可用 "
+                                      "valid_scope 指向稳定 seed 小节"},
+            "reason": {"type": "string", "description": "为什么改，一句话"},
+            "experience_id": {"type": "string", "description": "practice 依据的经历 ID"},
+            "topic": {"type": "string", "description": "practice 的能力/主题"},
+            "mode": {"type": "string", "enum": ["understanding", "practice"],
+                     "description": "understanding=领域了解；practice=实际练习，"
+                                    "只有 observed_level=executed/practiced 等真实执行经历才算"},
+            "outcome": {"type": "string", "description": "practice 的结果，可选"},
+            "artifact": {"type": "string", "description": "practice 的成果/作品定位，可选"},
+            "people": {"type": "array", "items": {"type": "string"},
+                       "description": "一起经历/练习的人，可选"},
+            "topics": {"type": "array", "items": {"type": "string"},
+                       "description": "经历涉及的主题，可选"},
+            "limit": {"type": "integer",
+                      "description": "status 未指定 query/target_id 时的返回条数上限；"
+                                     "指定后仍有界，但不会只截前 8 条"},
+        },
+        ["operation"],
     ),
     "remind": _fn(
         "remind",
@@ -316,10 +496,15 @@ SCHEMAS: dict[str, dict] = {
     "bili_action": _fn(
         "bili_action",
         "B 站动作入口：只读动作（搜索/详情/字幕/评论/弹幕/排行/热门/热搜词/"
-        "每周必看/UP 主页/投稿列表/收藏夹/未读/@与点赞）+ 纯文字评论回复 reply / "
-        "纯文字动态 dynamic。上传、专栏、私信永远不可用。"
-        "写操作只能由主人本人的当前消息明确要求；评论要绑定 bvid+rpid+text，"
-        "动态要绑定 text。读过外部内容（字幕/评论/网页）的同一轮不能再写。",
+        "每周必看/UP 主页/投稿列表/收藏夹/未读/@与点赞/我的评论 my_comments）+ "
+        "纯文字评论回复 reply / 纯文字动态 dynamic / 点赞 like / 收藏 favorite。"
+        "上传、专栏、私信、视频评论 comment、发弹幕 send_danmaku、投币 coin、"
+        "删除评论 delete_comment 永远不在这里（投币和删除只能由主人显式指令逐次授权）。"
+        "写操作只能由主人本人的当前消息明确要求，且一次授权只够一个动作 + 一个目标；"
+        "评论要绑定 bvid+rpid+text，动态要绑定 text，点赞/收藏要绑定 bvid。"
+        "reply/dynamic 的正文发送前会过人设与反公式化检查（近期开头/口头禅/表情/"
+        "相似度/AI 腔），不过就不发并告诉你原因——改完再试，别硬发。"
+        "读过外部内容（字幕/评论/网页）的同一轮不能再写。",
         {
             "action": {"type": "string",
                        "enum": _bili_allowed_actions(),
@@ -329,13 +514,17 @@ SCHEMAS: dict[str, dict] = {
                                       "user_info/search_user/user_videos 看 UP、"
                                       "favorites/favorite_content 收藏夹、"
                                       "unread/received_replies/received_at 看消息、"
-                                      "reply 发纯文字评论、dynamic 发纯文字动态"},
+                                      "my_comments 看我发过的评论（要 bvid）、"
+                                      "reply 发纯文字评论、dynamic 发纯文字动态、"
+                                      "like 点赞一个视频、favorite 收藏一个视频"},
             "args": {"type": "object",
                      "description": "该动作的参数对象。search={keyword,num,order}、"
                                     "video_info/subtitle/comments/danmaku={bvid}、"
                                     "hot={pn,ps}、rank={category,day}、"
                                     "user_videos={uid,pn,ps,order}、"
-                                    "reply={bvid,text,rpid}、dynamic={text}。"
+                                    "my_comments={bvid,limit}、"
+                                    "reply={bvid,text,rpid}、dynamic={text}、"
+                                    "like={bvid}、favorite={bvid}。"
                                     "多传的会被忽略；不接受 images/grant 之类的字段"},
         },
         ["action"],
@@ -627,6 +816,11 @@ class ToolBox:
     def available(self) -> list[str]:
         names = ["web_search", "fetch_url", "moegirl", "recall_memory", "remember",
                  "pick_sticker", "save_sticker"]
+        if getattr(self.bot, "life_store", None) is not None:
+            names.append("life_manage")       # 内部成长/经历/目标/自我条目
+        if getattr(self.bot, "diary", None) is not None:
+            names.append("diary_search")      # 按需翻日记，不自动注入正文
+            names.append("diary_read")
         # 库是空的也留着 pick_sticker：它会去网上找一张存进库
         names.append("search_image")          # 免 key 也能用，不必再挑图源
         names.append("bili_video")            # B 站接口免登录
@@ -912,15 +1106,398 @@ class ToolBox:
         return "记住了。", []
 
     async def _t_recall_memory(self, ctx, query: str):
-        hits = self.bot.memory.recall(query, limit=6)
-        if not hits:
-            return "记忆区里没有相关的东西。", []
-        return "记忆里翻到：\n" + "\n".join("- " + h for h in hits), []
+        """统一检索：生活记忆 + 真正经历关键词筛选 + 旧记忆（兼容）。"""
+        from .memory import _tokens
 
-    async def _t_remember(self, ctx, text: str, kind: str = "fact"):
+        query = str(query or "").strip()
+        if not query:
+            return "要找什么？给个关键词。", []
+        lines: list[str] = []
+        seen: set[str] = set()
+        store = getattr(self.bot, "life_store", None)
+        if store is not None:
+            try:
+                for row in store.recall(query, limit=6):
+                    body = " ".join(str(row.get("text") or "").split())
+                    key = body.casefold()
+                    if not body or key in seen:
+                        continue
+                    seen.add(key)
+                    tag = "候选·待确认" if row.get("status") == "candidate" else (
+                        row.get("status") or "memory")
+                    lines.append(
+                        f"- 记忆[{row.get('id')}|{tag}|{row.get('subject')}] {body}")
+            except Exception as e:
+                log.debug(f"生活记忆检索失败：{type(e).__name__} {e}")
+            tokens = _tokens(query)
+            if tokens:
+                try:
+                    experiences = store.recent_experiences(30)
+                except Exception:
+                    experiences = []
+                count = 0
+                for row in experiences:
+                    body = " ".join(str(row.get("summary") or "").split())
+                    if not body or not (tokens & _tokens(body)):
+                        continue
+                    key = body.casefold()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    stamp = time.strftime("%Y-%m-%d", time.localtime(
+                        float(row.get("ts") or 0))) if row.get("ts") else "日期不明"
+                    lines.append(
+                        f"- 经历[{row.get('id')}|{stamp}|{row.get('platform')}] {body[:240]}")
+                    count += 1
+                    if count >= 3:
+                        break
+        memory = getattr(self.bot, "memory", None)
+        if memory is not None:
+            try:
+                for hit in memory.recall(query, limit=5):
+                    text = " ".join(str(hit or "").split())
+                    # 去掉统一标签后去重；旧命中仍带稳定 ID。
+                    body = text.split("] ", 1)[-1] if text.startswith("[") else text
+                    key = body.casefold()
+                    if not body or key in seen:
+                        continue
+                    seen.add(key)
+                    lines.append(f"- {text}")
+            except Exception as e:
+                log.debug(f"旧记忆检索失败：{type(e).__name__} {e}")
+        if not lines:
+            return ("记忆里没有相关的东西。要翻以前发生的事可以再用 diary_search；"
+                    "查不到就保持不确定，别编。"), []
+        return ("记忆里翻到（条目前的 ID 可用于后续局部修改或继续读）：\n"
+                + "\n".join(lines[:10])), []
+
+    async def _t_remember(self, ctx, text: str, kind: str = "fact",
+                          subject: str = "", confirmed: bool = False):
         kind = kind if kind in ("fact", "slang", "impression", "people") else "fact"
-        ok = self.bot.memory.remember(text, kind)
-        return ("记住了。" if ok else "这条已经在记忆里了。"), []
+        memory = self.bot.memory
+        try:
+            ok = memory.remember(
+                text, kind, subject=(subject or None), confirmed=bool(confirmed))
+        except TypeError:
+            ok = memory.remember(text, kind)
+        if ok:
+            return "记住了。", []
+        return "这条已经在记忆里了。", []
+
+    async def _t_diary_search(self, ctx, query: str, start: str = "", end: str = "",
+                              people=None, limit: int = 5):
+        diary = getattr(self.bot, "diary", None)
+        if diary is None:
+            return "日记模块没开。", []
+        try:
+            hits = diary.search(query, start=start, end=end, people=people, limit=limit)
+        except Exception as e:
+            return f"日记没搜成：{type(e).__name__}", []
+        if not hits:
+            return "日记里没找到相关的内容；保持记不清，别编旧事。", []
+        lines = []
+        for hit in hits:
+            exp = "、".join(str(x) for x in (hit.get("experience_ids") or [])[:4])
+            lines.append(
+                f"- [{hit.get('id')}] {hit.get('day')}：{hit.get('snippet') or ''}"
+                + (f"（关联经历：{exp}）" if exp else ""))
+        return ("日记里翻到（要看原文用 diary_read）：\n" + "\n".join(lines)), []
+
+    async def _t_diary_read(self, ctx, entry_id: str, offset: int = 0, limit: int = 1800):
+        diary = getattr(self.bot, "diary", None)
+        if diary is None:
+            return "日记模块没开。", []
+        try:
+            result = diary.read(entry_id, offset=offset, limit=limit)
+        except Exception as e:
+            return f"日记没读成：{type(e).__name__}", []
+        if not result.get("ok"):
+            return f"没有这篇日记：{entry_id}", []
+        text = str(result.get("text") or "")
+        tail = ""
+        if result.get("truncated"):
+            tail = (f"\n\n（还没读完；继续读用 entry_id={result.get('day')} "
+                    f"offset={result.get('next_offset')}）")
+        exp = "、".join(str(x) for x in (result.get("experience_ids") or [])[:6])
+        if exp:
+            tail += f"\n相关经历：{exp}"
+        return f"[{result.get('day')}] {text}{tail}", []
+
+    @staticmethod
+    def _life_reply(result, *, label: str = "") -> str:
+        """把 LifeStore 的返回压成模型能继续操作的少量 ID+状态。"""
+        if not isinstance(result, dict):
+            return str(result)
+        if result.get("ok") is False:
+            error = str(result.get("error") or "")
+            text = (f"{label}没成功：{result.get('error') or result.get('message') or '未知原因'}"
+                    + (f"（当前版本 {result.get('version')}）"
+                       if result.get("version") else ""))
+            if error in {"version-required", "version-conflict"}:
+                text += ("；请先用 operation=goal/self 配 query 或 target_id 读取当前条目"
+                         "和 version，再带 expected_version 重试；merge 另一侧版本放"
+                         " fields.expected_other_version。")
+            return text
+        bits = [f"{label or '完成'} ok"]
+        for key in ("id", "version", "status", "stage", "counted", "duplicate",
+                    "downgraded", "merged_id"):
+            if result.get(key) not in (None, ""):
+                bits.append(f"{key}={result[key]}")
+        for key in ("explanation", "stage_reason", "message"):
+            if result.get(key):
+                bits.append(str(result[key]))
+                break
+        return "；".join(str(x) for x in bits)
+
+    @staticmethod
+    def _life_query_rows(rows, *, query: str = "", target_id: str = "",
+                         limit: int = 8) -> list[dict]:
+        """读取任意有效条目：target_id 精确命中，query 按正文/ID/分类匹配。
+
+        不先截前 8 条再筛——那样排在后面的条目永远读不到、拿不到 version。
+        """
+        target = str(target_id or "").strip()
+        text = str(query or "").strip()
+        rows = list(rows or [])
+        if target:
+            exact = [row for row in rows if str(row.get("id") or "") == target]
+            if exact:
+                return exact
+            # 允许给 ID 前缀，但仍只返回真正命中的条目。
+            prefix = [row for row in rows
+                      if str(row.get("id") or "").startswith(target)]
+            if prefix:
+                return prefix
+        if text:
+            from .memory import _tokens
+            tokens = _tokens(text)
+            matched = []
+            for row in rows:
+                body = " ".join(str(row.get("text") or "").split())
+                haystack = " ".join((
+                    body, str(row.get("id") or ""),
+                    str(row.get("category") or ""), str(row.get("type") or ""),
+                    str(row.get("status") or "")))
+                if text in body or text in str(row.get("id") or "") \
+                        or (tokens and tokens & _tokens(haystack)):
+                    matched.append(row)
+            if matched:
+                return matched
+        if target or text:
+            return []
+        try:
+            count = max(1, min(int(limit or 8), 20))
+        except (TypeError, ValueError):
+            count = 8
+        return rows[:count]
+
+    @staticmethod
+    def _life_list_line(row: dict, *, include_type: bool = False) -> str:
+        bits = [f"[{row.get('id')}|v{row.get('version')}|{row.get('status')}"]
+        if include_type:
+            bits.append(f"|{row.get('type')}")
+        if row.get("category"):
+            bits.append(f"|{row.get('category')}")
+        if row.get("valid_scope"):
+            bits.append(f"|scope={row.get('valid_scope')}")
+        bits.append("] ")
+        return "".join(str(x) for x in bits) + str(row.get("text") or "")
+
+    async def _t_life_manage(self, ctx, operation: str, query: str = "",
+                             summary: str = "", text: str = "", kind: str = "",
+                             subject: str = "", confirmed: bool = False,
+                             source_ids=None, op: str = "", target_id: str = "",
+                             expected_version: int | None = None, fields=None,
+                             expected_other_version: int | None = None,
+                             target_slot: str = "",
+                             reason: str = "", experience_id: str = "",
+                             topic: str = "", mode: str = "understanding",
+                             outcome: str = "observed", artifact: str = "",
+                             people=None, topics=None, limit: int = 8):
+        store = getattr(self.bot, "life_store", None)
+        if store is None:
+            return "生活状态没开，做不了。", []
+        operation = str(operation or "").strip().lower()
+        source_ids = [str(x) for x in (source_ids or []) if str(x).strip()] \
+            if isinstance(source_ids, (list, tuple)) else []
+        people_list = [str(x) for x in (people or []) if str(x).strip()] \
+            if isinstance(people, (list, tuple)) else []
+        topic_list = [str(x) for x in (topics or []) if str(x).strip()] \
+            if isinstance(topics, (list, tuple)) else []
+
+        if operation == "status":
+            try:
+                snapshot = store.growth_snapshot()
+                goals_all = store.goals(active_only=False)
+                self_all = store.self_entries(active_only=False)
+            except Exception as e:
+                return f"读生活状态失败：{type(e).__name__}", []
+            goals_all = [row for row in goals_all if row.get("status") != "deleted"]
+            self_all = [row for row in self_all if row.get("status") != "deleted"]
+            goals = self._life_query_rows(
+                goals_all, query=query, target_id=target_id, limit=limit)
+            self_rows = self._life_query_rows(
+                self_all, query=query, target_id=target_id, limit=limit)
+            try:
+                count = max(1, min(int(limit or 8), 20))
+            except (TypeError, ValueError):
+                count = 8
+            lines = ["## 成长与状态（有界；资源余额未知）"]
+            skills = snapshot.get("skills") or []
+            if skills:
+                lines.append("技能：" + "；".join(
+                    f"[{row.get('id')}|v{row.get('version')}] {row.get('topic')}"
+                    f" {row.get('stage')}（练{row.get('practice_count', 0)}/"
+                    f"知{row.get('understanding_count', 0)}）"
+                    for row in skills[:count]))
+            if goals:
+                lines.append("目标：" + "；".join(
+                    self._life_list_line(row, include_type=True) for row in goals))
+            if self_rows:
+                lines.append("自我条目：" + "；".join(
+                    self._life_list_line(row) for row in self_rows))
+            mementos = snapshot.get("mementos") or []
+            if mementos:
+                lines.append("纪念：" + "；".join(
+                    f"[{row.get('id')}] {row.get('topic')}（经历 {row.get('experience_id')}）"
+                    for row in mementos[:count]))
+            if len(lines) == 1:
+                lines.append("还没有目标、自我条目或实践记录。")
+            if not goals and str(target_id or query or "").strip():
+                lines.append("没有匹配的目标；确认 ID 或换关键词，别用猜的版本改。")
+            if not self_rows and str(target_id or query or "").strip():
+                lines.append("没有匹配的自我条目；确认 ID 或换关键词，别凭空改。")
+            return "\n".join(lines), []
+
+        if operation == "experience":
+            if not str(summary or "").strip():
+                return "experience 需要 summary。", []
+            session = str(getattr(ctx, "session_id", "") or "local")
+            event = getattr(ctx, "event", None)
+            stamp = getattr(event, "time", None) or getattr(event, "ts", None) or time.time()
+            source = f"qq:{session}:{int(float(stamp))}"
+            try:
+                row = store.record_experience(
+                    source, summary, platform="qq", topics=topic_list or None,
+                    people=people_list, kind=kind or "episode",
+                    confidence=0.6, salience=3)
+            except Exception as e:
+                return f"经历没记成：{type(e).__name__} {e}", []
+            return (f"经历记下了：id={row.get('id')}；source={row.get('root_source_id')}；"
+                    "以后相关时能回忆。"), []
+
+        if operation == "remember":
+            if not str(text or "").strip():
+                return "remember 需要 text。", []
+            body = text
+            subject = subject or "self"
+            try:
+                row = store.remember(
+                    body, kind=kind or "semantic", subject=subject,
+                    source_ids=source_ids or None, confirmed=bool(confirmed),
+                    confidence=0.8 if confirmed else 0.55)
+            except Exception as e:
+                return f"记忆没写成：{type(e).__name__} {e}", []
+            return (f"记住了：id={row.get('id')}；subject={row.get('subject')}；"
+                    f"状态={row.get('status')}。"), []
+
+        if operation == "goal":
+            if not op:
+                try:
+                    rows = [row for row in store.goals(active_only=False)
+                            if row.get("status") != "deleted"]
+                except Exception as e:
+                    return f"读目标失败：{type(e).__name__}", []
+                rows = self._life_query_rows(
+                    rows, query=query, target_id=target_id, limit=limit)
+                if not rows:
+                    if str(target_id or query or "").strip():
+                        return ("没找到匹配的目标；用 query 换关键词，或确认 target_id。"
+                                "不要猜版本。"), []
+                    return "现在没有目标。", []
+                return ("目标（读数会带 version；任何非 add 改动都要带 target_id 和"
+                        " expected_version，缺版本就回到这里重新读）：\n" + "\n".join(
+                    "- " + self._life_list_line(row, include_type=True)
+                    for row in rows)), []
+            op = str(op or "").strip().lower()
+            if op != "add" and expected_version is None:
+                return ("改不了：goal 的 revise/complete/pause/abandon/delete 必须带"
+                        " expected_version；先用 operation=goal 配 query 或 target_id "
+                        "读取当前条目和 version，再用同一版本重试。"), []
+            patch = dict(fields or {})
+            if text and "text" not in patch:
+                patch["text"] = text
+            try:
+                result = store.patch_goal(
+                    op, target_id=target_id, expected_version=expected_version,
+                    fields=patch, reason=reason, source_ids=source_ids or None)
+            except Exception as e:
+                return f"目标操作失败：{type(e).__name__} {e}", []
+            return self._life_reply(result, label=f"目标{op}"), []
+
+        if operation == "self":
+            if not op:
+                try:
+                    rows = [row for row in store.self_entries(active_only=False)
+                            if row.get("status") != "deleted"]
+                except Exception as e:
+                    return f"读自我条目失败：{type(e).__name__}", []
+                rows = self._life_query_rows(
+                    rows, query=query, target_id=target_id, limit=limit)
+                if not rows:
+                    if str(target_id or query or "").strip():
+                        return ("没找到匹配的自我条目；用 query 换关键词，或确认"
+                                " target_id。不要猜版本。"), []
+                    return "现在没有可看的自我条目。", []
+                return ("当前自我条目（读数会带 version；任何非 add 改动都要带"
+                        " target_id 和 expected_version，merge 还要给另一侧"
+                        " expected_other_version；改动要给真实经历 source_ids）：\n"
+                        + "\n".join("- " + self._life_list_line(row)
+                                    for row in rows)), []
+            op = str(op or "").strip().lower()
+            patch = dict(fields or {})
+            if text and "text" not in patch:
+                patch["text"] = text
+            if str(target_slot or "").strip() and "valid_scope" not in patch:
+                patch["valid_scope"] = str(target_slot).strip()
+            # 自我修订必须有真实经历依据；不能凭一句台词或 emoji 改人格。
+            if op in {"add", "revise", "merge"} and not source_ids:
+                return ("改不了：self 的 add/revise/merge 必须用 source_ids 引用"
+                        "至少一条真实经历；先用 status 看条目和经历 ID。"), []
+            if op != "add" and expected_version is None:
+                return ("改不了：self 的 revise/retire/delete/merge 必须带"
+                        " expected_version；先用 operation=self 配 query 或 target_id "
+                        "读取当前条目和 version，再用同一版本重试。"), []
+            if op == "merge":
+                if expected_other_version is not None \
+                        and "expected_other_version" not in patch:
+                    patch["expected_other_version"] = expected_other_version
+                if patch.get("expected_other_version") is None and \
+                        patch.get("expected_destination_version") is None and \
+                        patch.get("expected_source_version") is None:
+                    return ("改不了：self merge 还要用 fields.expected_other_version "
+                            "给另一侧版本做 CAS；先分别读取两条当前条目。"), []
+            try:
+                result = store.patch_self(
+                    op, target_id=target_id, expected_version=expected_version,
+                    fields=patch, reason=reason, source_ids=source_ids or None)
+            except Exception as e:
+                return f"自我条目操作失败：{type(e).__name__} {e}", []
+            return self._life_reply(result, label=f"自我{op}"), []
+
+        if operation == "practice":
+            if not str(topic or "").strip() or not str(experience_id or "").strip():
+                return "practice 需要 topic 和 experience_id（真实经历）。", []
+            try:
+                result = store.practice(
+                    topic, experience_id=experience_id, mode=mode, outcome=outcome,
+                    artifact=artifact, people=people_list or None)
+            except Exception as e:
+                return f"实践没记成：{type(e).__name__} {e}", []
+            return self._life_reply(result, label="实践"), []
+
+        return ("未知 operation；可用 status/experience/remember/goal/self/practice。"), []
+
 
     async def _t_remind(self, ctx, when: str, what: str):
         """用户说到点提醒：解析时间 → 写待办 → 顺手进长期记忆。"""
@@ -1104,11 +1681,12 @@ class ToolBox:
         return "\n".join(行), []
 
     async def _t_bili_action(self, ctx, action: str, args=None):
-        """B 站动作入口：只读动作 + 纯文字评论回复 / 纯文字动态。
+        """B 站动作入口：只读动作 + 纯文字评论回复/动态 + 点赞/收藏。
 
-        写动作必须同时满足：主人当前消息明确要求 + 本轮没读过外部内容 +
-        低层 `bili_gate` 签发的进程内凭证。`grant` 只能由工具层自己取，
-        **绝不从模型参数里读**（模型塞 grant/dict/字符串都无效）。
+        写动作必须同时满足：主人当前消息**明确要求这个动作** + 本轮没读过外部
+        内容 + 低层 `bili_gate` 签发的进程内凭证（**绑定这个动作和这个目标**）。
+        `grant` 只能由工具层自己取，**绝不从模型参数里读**（模型塞 grant/dict/
+        字符串都无效）。投币和删除评论不在这里：只能由主人的显式 QQ 指令发起。
         """
         名 = str(action or "").strip().lower()
         if 名 not in set(_bili_allowed_actions()):
@@ -1121,26 +1699,51 @@ class ToolBox:
         参.pop("actor", None)
 
         grant = None
-        if 名 in BILI_TEXT_WRITE_ACTIONS:
+        if 名 in BILI_MODEL_WRITE_ACTIONS:
             if not self._is_owner(ctx):
-                return "没成：发评论/动态只能由主人本人的当前消息明确要求。", []
+                return "没成：B 站写操作只能由主人本人的当前消息明确要求。", []
             request = self._current_request_text(ctx)
-            if not any(cue in request for cue in _BILI_WRITE_REQUEST_CUES):
-                return ("没成：当前消息里没有明确要求发评论/动态；"
+            if not any(cue in request for cue in _bili_write_cues(名)):
+                return (f"没成：当前消息里没有明确要求「{名}」；"
                         "只丢来一个视频或说「看看这个」不构成写授权。"), []
             if self._external_tainted(ctx):
                 return ("没成：这一轮已经读过外部内容（字幕/评论/网页），"
-                        "不能在同一个轮次里发评论或动态。"), []
-            grant = bili_gate.owner_turn_grant(self.bot, ctx)
+                        "不能在同一个轮次里写 B 站。"), []
+            # 模型自己写正文的公开写（reply/dynamic）：发送前必须过和
+            # bili_voice 生成管线同一套人味检查（开头/口头禅/表情/相似度/AI 腔/长度）。
+            # 不通过就不发，把原因原样交回模型，让它换说法，而不是硬发出去。
+            if 名 in BILI_TEXT_WRITE_ACTIONS:
+                正文 = str(参.get("text") or "").strip()
+                if not 正文:
+                    return "没成：这次没有要发的正文。", []
+                违规 = _bili_voice_reasons(self.bot, 正文, 参, 名)
+                if 违规:
+                    行 = ["没成：这句没过 B 站发言的人味检查，**没有发出去**。"]
+                    行 += [f"· {reason}" for reason in 违规[:6]]
+                    行.append("换一个开头、换一种说法（别只改一两个字）再来；"
+                              "这次一条都没发，别跟人说已经发了。")
+                    return "\n".join(行), []
+            grant = bili_gate.owner_turn_grant(
+                self.bot, ctx, action=名,
+                target=bili_gate.target_key(名, 参))
             if grant is None:
                 return ("没成：没有拿到本次写操作的进程内凭证；"
                         "需要主人当前这条真实消息重新发起。"), []
 
         结果 = await bili_scroll.action(self.bot, 名, 参, grant=grant)
         if not 结果.get("ok"):
-            行 = [f"没成：{结果.get('error') or '未知原因'}"]
+            # 三态回执：⚠️ 不确定 / ❌ 没成。错误正文可能含 B 站返回的外部文本
+            # （错误页/服务端消息），一律过和只读出口同一个 untrusted 围栏；
+            # 状态标记与「别编」的提示留在围栏外，语义不被围栏吃掉。
+            if 结果.get("unconfirmed"):
+                头 = "⚠️ 不确定：这次没有确认发出去。"
+            else:
+                头 = "❌ 没成：这次没有成功。"
+            行 = [头, _bili_external_receipt(
+                名, str(结果.get("error") or "未知原因"))]
             if 结果.get("hint"):
                 行.append(str(结果["hint"]))
+            行.append("（照实说：这次没成功/没确认，别跟人说你已经做过了。）")
             return "\n".join(行), []
         data = 结果.get("data")
         if 名 in bili_gate.READ_ACTIONS:
@@ -1148,7 +1751,23 @@ class ToolBox:
             payload = json.dumps(data, ensure_ascii=False)[:6000]
             return untrusted.wrap_external(
                 payload, source=f"bilibili_{名}", kind="bili_data"), []
-        return json.dumps(data, ensure_ascii=False)[:6000], []
+        # 写动作走到这里说明 gate 已经确认（未确认会在上面按 ok=False 返回）。
+        # 回执 data 同样可能夹带外部文本（B 站返回的正文/用户名等），所以用
+        # 和只读出口一样的围栏；✅ 与「别编」的提示在围栏外，成功语义照旧。
+        if 名 in BILI_TEXT_WRITE_ACTIONS:
+            # 确认发出去才记账（失败/未确认上面已经返回，不记）：下次生成时
+            # 「近期自发言」能看到它，同一个进程里紧接着的下一条也不会重复。
+            try:
+                from . import bili_voice
+                bili_voice.note_sent(
+                    self.bot, 结果, kind=名,
+                    bvid=str(参.get("bvid") or ""),
+                    text=str(参.get("text") or ""))
+            except Exception as e:  # noqa: BLE001
+                log.debug(f"B 站写成功但记账失败（{名}）：{type(e).__name__}")
+        尾 = "（照着这个结果说：成功就说成功，失败就说失败和原因，不确定就说不确定，别自己编。）"
+        return ("✅ 成功：B 站已确认。\n"
+                + _bili_external_receipt(名, data) + "\n" + 尾), []
 
     async def _t_bili_notes(self, ctx, name: str = "", limit: int = 8):
         """列笔记 / 读某一篇。

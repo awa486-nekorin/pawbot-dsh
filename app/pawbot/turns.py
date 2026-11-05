@@ -135,12 +135,64 @@ async def update(bot, session_id: str) -> str:
     """
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
+        summary = ""
         if str(bot.config.get("memory.engine", "legacy")) == "v2":
             try:
-                return await _update_v2(bot, session_id)
+                summary = await _update_v2(bot, session_id)
             except Exception as e:
                 log.warn(f"小结 v2 失败，退回旧路径：{type(e).__name__} {e}")
-        return await _update(bot, session_id)
+                summary = await _update(bot, session_id)
+        else:
+            summary = await _update(bot, session_id)
+        _record_turn_experience(bot, session_id, summary)
+        return summary
+
+
+async def write_turn(bot, session_id: str) -> str:
+    """兼容旧命名的入口：小结这一轮并写稳定来源的 QQ 经历。"""
+    return await update(bot, session_id)
+
+
+def _meaningful_turn(text: str) -> bool:
+    """只把有实际内容的交流留成经历；纯 emoji/标点/语气词不刷养成。"""
+    body = " ".join(str(text or "").split())
+    if len(body) < 12:
+        return False
+    return sum(1 for ch in body if ch.isalnum()) >= 8
+
+
+def _record_turn_experience(bot, session_id: str, summary: str) -> None:
+    """把这一轮真实 QQ 交流留成情景经历（稳定 source_id，不追加确认事实）。"""
+    store = getattr(bot, "life_store", None)
+    record = getattr(store, "record_experience", None) if store is not None else None
+    if not callable(record) or not _meaningful_turn(summary):
+        return
+    try:
+        rows = bot.store.window(session_id)
+    except Exception:
+        rows = []
+    if not rows:
+        return
+    upto = float(rows[-1].get("ts") or time.time())
+    people = []
+    for row in rows[-40:]:
+        uid = str(row.get("uid") or "").strip()
+        if uid and row.get("role") != "assistant" and uid not in people:
+            people.append(uid)
+    source_id = f"qq:{session_id}:{int(upto)}"
+    try:
+        record(
+            source_id,
+            " ".join(str(summary).split())[:1200],
+            platform="qq",
+            people=people[:8],
+            kind="episode",
+            confidence=0.6,
+            salience=3,
+        )
+    except Exception as e:
+        log.warn(f"QQ 经历写入失败：{type(e).__name__} {e}")
+
 
 
 async def _update_v2(bot, session_id: str) -> str:

@@ -787,6 +787,16 @@ class HARuntime:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"longmem:{type(exc).__name__}")
 
+        life_store = getattr(bot, "life_store", None)
+        reload_life = getattr(life_store, "reload", None)
+        if callable(reload_life):
+            try:
+                # 只重读盘上内容；绝不把本机旧状态写回去。
+                reload_life()
+                refreshed.append("life_store")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"life_store:{type(exc).__name__}")
+
         relations = getattr(bot, "relations", None)
         loader = getattr(relations, "load", None)
         if callable(loader):

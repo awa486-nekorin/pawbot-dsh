@@ -38,10 +38,32 @@ async def ping(ctx):
     ctx.stop()
 
 
+def _command_prefix(bot) -> str:
+    """帮助里展示的前缀必须和真实配置一致（2026-11-03 起默认只有 ``//``）。
+
+    写死 ``/`` 会让用户照着帮助发 ``/ping``，而 ``/ping`` 现在只是普通聊天。
+    """
+    try:
+        prefixes = bot.config.get("bot.command_prefixes", ["//"])
+    except Exception:
+        prefixes = ["//"]
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+    try:
+        for item in prefixes:
+            text = str(item or "")
+            if text:
+                return text
+    except TypeError:
+        pass
+    return "//"
+
+
 @on_command("help", aliases=("帮助", "菜单"), priority=5)
 async def help_cmd(ctx):
     from pawbot.bus import BUS
-    lines = ["可用指令："]
+    前缀 = _command_prefix(ctx.bot)
+    lines = [f"可用指令（都以 {前缀} 开头）："]
     seen = set()
     for h in BUS.handlers:
         if h.kind != "command":
@@ -50,7 +72,8 @@ async def help_cmd(ctx):
         if not names:
             continue
         seen.update(names)
-        lines.append(f"  /{names[0]}" + (f"（{'/'.join(names[1:])}）" if len(names) > 1 else ""))
+        lines.append(f"  {前缀}{names[0]}"
+                     + (f"（{'/'.join(names[1:])}）" if len(names) > 1 else ""))
     await ctx.reply("\n".join(lines))
     ctx.stop()
 

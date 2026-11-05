@@ -203,6 +203,13 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
     if 名单:
         块.append({"role": "system", "content": 名单})
 
+    # ---------- 最终统一预算 ----------
+    # 四层闸门只算 L0~L3；活跃期/桥/梗/在场名单是旁路块。这里对实际要注入的
+    # 全部记忆 system 块再做一次总预算，避免旁路把总量顶穿。
+    块, 统一统计 = 预算.最终记忆预算(
+        块, cfg["总预算"],
+        标记="（记忆预算不足，部分记忆块已省略）")
+
     统计 = {
         "engine": "v2",
         "各层字数": {"L0": len(l0文本), "L1": len(l1文本), "L2": len(l2文本),
@@ -214,7 +221,8 @@ def build(bot, ctx, user_text: str, *, now: float | None = None) -> tuple[list[d
         "active_bypass": 有活跃,
         "梗库": len(梗文本),
         "跨会话": len(桥文本),
-        "总字数": sum(len(m["content"]) for m in 块),
+        "总字数": 统一统计["总字数"],
+        "统一": 统一统计,
         "砍": 砍,
         "L0": l0统计,
         "L1": l1统计,

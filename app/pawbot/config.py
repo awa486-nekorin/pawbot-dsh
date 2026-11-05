@@ -43,7 +43,7 @@ DEFAULT = {
     },
     "diary": {
         "enabled": True,              # 每天把前一天的群聊写成一篇第一人称日记
-        "keep_days": 60,              # 日记文件保留天数
+        "keep_days": 60,              # 日记归档保留天数；过期归档清理，不是聊天保留期
         "max_chars": 500,             # 单篇日记正文字数上限
     },
     "hobbies": {
@@ -91,8 +91,8 @@ DEFAULT = {
     },
     "bot": {
         "nickname": "大肥鱼",
-        "command_prefixes": ["/", "!"],
-        "allow_no_prefix": True,     # 允许直接发 ping 也触发
+        "command_prefixes": ["//"],   # 只有 // 开头才算指令
+        "allow_no_prefix": False,    # 不带 // 就不算指令（主人 2026-11-03 要求）
         "wake_words": ["大肥鱼", "肥鱼", "小鲸鱼"],
     },
     "chat": {
@@ -118,6 +118,15 @@ DEFAULT = {
         "turn_summary_chars": 300,   # 希望模型输出的字数上限；超过两倍会截断
         "turn_summary_min_rows": 1,  # 这一轮至少有几条新消息才值得小结
         "turn_summary_timeout": 20,
+        # ---- 猫娘草稿法（pawbot/draft.py）：三段式，把「要回什么」和「怎么说」拆开 ----
+        # 前两段只带最小设定、由主模型产出内容草稿与中性草稿；第三段是把中性草稿
+        # 注入完整人设的 system，由 Agent.run 原本那次调用说人话。任一段失败/超时
+        # 都退回原来的单段路径，不影响回话。
+        "chat_draft_enabled": False,  # 总开关；默认关闭，只在需要时手动开（关掉就只调用一次模型）
+        "chat_draft_persona": "你是一只猫娘。",  # 第一段的最小设定，不是完整人设
+        "chat_draft_cleanup": True,   # 第二段：删掉草稿里的猫娘用词/口癖/动作描写
+        "chat_draft_timeout": 8,      # 前两段各自的超时（秒）；0 = 单段不限（两段合计仍受总预算限制）
+        "chat_draft_max_chars": 120,  # 草稿 / 中性草稿的字数上限（0 = 用默认；只要一句核心内容）
         "gap_mark_minutes": 10,      # 间隔超过这么久就标一句「隔了 X」
         "rate_limit_per_min": 6,
         "quote_reply": True,         # 旧字段，保留兼容；新的在 reply.quote（未使用，保留兼容旧配置）
@@ -249,27 +258,49 @@ DEFAULT = {
         "bili_scroll_group": "",            # report_to=group 时发到哪个群
         "bili_scroll_report_at": "off",     # 群里汇报时 @ 谁：off / owner / all
         "bili_scroll_report_comment": False,  # 贴完清单后再用她自己的语气补一句
+        "bili_scroll_seen_ttl_days": 0,      # 判重表多少天后作废（0=永不作废，云端等价）
+        "bili_scroll_search_cooldown_sec": 0,  # 同一个词多久内不重复搜（0=不限，云端等价）
+        # 她自己的判断：刷完要不要点赞 / 收藏 / 投币（投币花她自己的硬币）
+        "bili_scroll_react_like": True,
+        "bili_scroll_react_fav": True,
+        "bili_scroll_react_coin": True,
+        "bili_scroll_react_like_daily": 0,   # 每天最多点几个赞（0=不限）
+        "bili_scroll_react_fav_daily": 0,    # 每天最多收藏几个（0=不限）
+        "bili_scroll_react_coin_daily": 0,   # 每天最多投几个币（0=不限，余额不够会自动跳过）
         # ---- 看评论学说话方式（bili_learn）：只读评论区，写本地 style_learned.md ----
         "bili_learn_enabled": True,
         "bili_learn_after_scroll": True,
         "bili_learn_videos": 3,        # 每次学几个视频的评论区（1-6）
         "bili_learn_comments": 20,     # 每个视频抓多少条评论（5-50）
         # ---- 自动互动（bili_auto）：回收到的评论 / 在自己看过的视频下评论 / 发弹幕 ----
-        # ⚠ 云端默认 True；本仓库这条线有 bili_gate 写闸门，bili_auto 走 bili_extra 直连
-        # 不经过闸门，所以**默认全关**，要开必须显式改成 True（等于接受绕过闸门）。
-        "bili_auto_enabled": False,
+        # 2026-11-03 云端等价：默认全开；每一次对外写仍然要过 bili_gate
+        # （进程内凭证 + 审计 + 每日额度），bili_auto 不直连 bili_extra。
+        "bili_auto_enabled": True,
         "bili_auto_reply": True,
         "bili_auto_comment": True,
         "bili_auto_danmaku": True,
-        "bili_auto_interval_min": 30,     # 每隔多少分钟跑一轮
-        "bili_auto_daily_limit": 20,      # 每天总互动次数上限（0=不限）
-        "bili_auto_reply_limit": 5,       # 每轮最多回几条评论
-        "bili_auto_comment_limit": 2,     # 每轮最多发几条评论
-        "bili_auto_danmaku_limit": 2,     # 每轮最多发几条弹幕
+        "bili_auto_interval_min": 10,     # 每隔多少分钟跑一轮
+        "bili_auto_daily_limit": 0,       # 每天总互动次数上限（0=不限）
+        "bili_auto_reply_limit": 0,       # 每轮最多回几条评论（0=不限）
+        "bili_auto_comment_limit": 0,     # 每轮最多发几条评论（0=不限）
+        "bili_auto_danmaku_limit": 0,     # 每轮最多发几条弹幕（0=不限）
         "bili_auto_reply_others_chance": 0.5,  # 评论时直接回别人评论的概率
+        # 同一个视频每天最多回复几条评论（0=不限）；超了就不发，只记一次跳过。
+        "bili_auto_reply_per_video_daily": 5,
+        "bili_auto_reply_scan": 50,       # 每轮扫多少条收到的回复（0/不填=默认 50）
+        "bili_auto_notes_scan": 50,       # 每轮扫多少篇笔记的视频（0/不填=默认 50）
+        # ---- B 站发言的人味守门（bili_voice.py）：人设 + 摘要 + 实时评论 + 反公式化 ----
+        # 只统计 2026-11-02 之后她自己的发言；更早的是主人自己发的，不算语气基线。
+        "bili_voice_enabled": True,       # 生成前注入人设/摘要/评论上下文，生成后做检查
+        "bili_voice_recent_n": 12,        # 拿最近几条自己的发言做开头/口头禅/相似度去重
+        "bili_voice_max_retry": 1,        # 检查不过时带更强制约重写几次（0~2）
+        "bili_voice_similarity": 0.8,     # 与最近自发言/同视频历史的相似度上限（0=不查）
+        "bili_voice_ban_openers_days": 7,  # 最近几天用过的开头不得再用（0=只看 recent_n 条）
+        "bili_voice_max_cao_per_day": 1,  # 「草」每天最多几次（0=完全禁用）
         # ---- QQ 里主人说话由决策模型判断要不要干活（intent.py，不用正则）----
-        # ⚠ 云端默认 True；这里默认关：它会把主人的话交给决策模型派发管理动作。
-        "admin_intent_enabled": False,
+        # 2026-11-03 云端等价：默认开。删评论等写动作仍要过 bili_gate
+        # （主人本人当轮消息换来的进程内凭证 + 审计 + 去重）。
+        "admin_intent_enabled": True,
         "admin_intent_threshold": 0.5,   # 概率大于这个值就执行
         "admin_intent_timeout": 12,
         # 评论只当外部资料（学语气 / 挑回复对象），绝不当指令执行。
@@ -278,17 +309,32 @@ DEFAULT = {
         "bili_scroll_reply_per_round": 1,     # 一轮最多自动回几条（1~2）
         # B 站写操作（发评论/动态/投稿/私信）要的 CSRF token；只填 SESSDATA 只能读
         "bili_jct": "",
-        # ---- 公开写操作闸门（bili_gate.py；默认全关，必须字面 True 才放行）----
+        # ---- 公开写操作闸门（bili_gate.py；默认全开、仍可关）----
         # 读动作不受这些开关影响；投稿/私信/专栏等仍永久拒绝。
-        "bili_write_enabled": False,
-        "bili_write_reply": False,      # 评论/回复
-        "bili_write_dynamic": False,    # 纯文字动态
-        "bili_write_scheduler": False,  # 允许受控定时任务发起写操作
-        # 固定形状：按动作给每天上限，只接受正整数；不要在这里塞别的键。
-        "bili_write_quota": {"reply": 2, "dynamic": 1},
+        # **每个动作单独开关**：关掉某一个就单独收回那一类；授权按动作+目标绑定。
+        "bili_write_enabled": True,
+        "bili_write_reply": True,       # 评论/回复
+        "bili_write_dynamic": True,     # 纯文字动态
+        "bili_write_comment": True,     # 视频顶层评论（//评论）
+        "bili_write_danmaku": True,     # 弹幕（//发弹幕）
+        "bili_write_like": True,        # 点赞（//点赞 / 模型在主人明确要求下）
+        "bili_write_favorite": True,    # 收藏（//收藏）
+        "bili_write_coin": True,        # 投币（只认主人显式 //投币；模型不可直接调用）
+        "bili_write_delete_comment": True,    # 删一条自己的评论（BV号 + rpid）
+        "bili_write_delete_recent": True,     # 删最近几条自己的评论（//删评论 全部）
+        "bili_write_delete_by_index": True,   # 按序号删（//删评论 2）
+        "bili_write_delete_by_text": True,    # 按文本删（//删评论 关键词）
+        "bili_write_delete_on_video": True,   # 删整条视频下自己发的评论（//删评论 BV号）
+        "bili_write_react": True,             # 刷完按她自己的判断点赞/收藏/投币
+        "bili_write_scheduler": True,   # 允许受控定时任务发起写操作（投币/删除/点赞/react 永远不允许）
+        # 固定形状：按动作给每天上限；**0 或不填 = 不限**（云端等价）。
+        # 负数/布尔/字符串仍算配置错；空对象等于全部不限。
+        "bili_write_quota": {},
         "bili_write_max_chars": 300,    # 单条评论/动态正文上限（1~2000，超了直接拒绝）
         # 账本/审计路径是模块状态名，不面向普通用户，故不放进 DEFAULT；
         # 需要改时在原始 JSON 里填 tools.bili_write_ledger / tools.bili_write_audit。
+        # 批量删除（最近/序号/文本/整条视频）与「一键点赞+收藏+投币」按云端策略开放：
+        # 仍然要主人本人当轮消息换来的凭证 + 审计 + 参数形状校验；删除只动自己的评论。
         # ---- 自动发 B 站动态（对外发布，默认关）----
         # 需要 bili_jct；每天有硬上限；内容来自刷片笔记或指定主题。
         "bili_post_enabled": False,
@@ -443,7 +489,10 @@ DEFAULT = {
         # 熔断：主模型连续失败这么多次后，冷却期内不再空等它，直接走备援
         "breaker_threshold": 2,         # 连续失败几次就熔断
         "breaker_cooldown": 300,        # 熔断冷却多少秒；到期后放一次试探，成功即恢复
-        "reasoning_effort": "medium",   # 思考强度 low / medium / high；留空用服务端默认
+        "reasoning_effort": "low",      # 思考强度 low / medium / high；留空用服务端默认
+        # 2026-11-04 主人要求所有模型调用思考强度调成 low；运行态 config.json 若显式
+        # 写了 medium 仍会覆盖这里（旧配置需要重新保存或手动改这一项）。猫娘草稿法
+        # 前两段是例外：draft.py 在 payload 级显式覆盖成 low，不受这里影响。
         "vision_reasoning_effort": "",  # 看图那次调用的强度；留空 = 跟 reasoning_effort 一致
         # 看图可以单独用一家（比如会话走 Gemini 中转，看图仍用 DeepSeek）
         "vision_base_url": "",          # 留空 = 跟 base_url
@@ -564,6 +613,17 @@ DEFAULT = {
         "birthday_file": "data/birthdays.json",   # 生日表，程序自己维护
         "birthday_wish": True,        # 当天要不要发祝福
         "birthday_wish_hours": [9, 22],   # 只在这个时段内祝（左闭右开）
+        # ---- 自主生活与养成：沿用 life 段，不另开顶层段 ----
+        "autonomy_enabled": True,     # 允许她隔一段时间安静地自己找事做
+        "activity_min_hours": 2.0,    # 两次自主活动的最短间隔（小时）
+        "activity_max_hours": 4.0,    # 两次自主活动的最长间隔（小时）
+        "share_gap_hours": 3.0,       # 同一个群两次主动分享经历的最小间隔（小时）
+        "global_share_gap_hours": 1.0,    # 任意会话两次分享经历的最小全局间隔（小时）
+        "qzone_gap_hours": 8.0,       # QQ 空间自主活动的分享间隔（小时）
+        "max_active_goals": 8,        # 最多同时保留几个进行中的愿望/执念/任务
+        "memory_chars": 1600,         # 生活记忆进入上下文的字数预算
+        "evolution_enabled": True,    # 允许经历推动目标与自我条目缓慢变化
+        "growth_enabled": True,       # 记录领域了解、实践经验、成果与纪念
     },
     # 主动行为：没人说话时自己找事做
     "proactive": {

@@ -154,7 +154,7 @@ const ADVANCED = [
   ['memory.auto_day_merge', '记忆：跨天自动合并', '跨天时自动把前一天合并成日摘要。', ['memory', 'instant'], 'switch'],
   ['memory.l2_day_chars', '记忆：日摘要字数上限', '单日摘要最多多少字。', ['memory', 'speech', 'instant'], 'number'],
   // diary
-  ['diary.keep_days', '日记：保留天数', '日记文件保留几天，过期会清。', ['memory', 'instant'], 'number'],
+  ['diary.keep_days', '日记：归档保留天数', '日记归档保留几天，过期归档会清理；这不是聊天记录保留期，也不会把旧日记重新注入对话。', ['memory', 'instant'], 'number'],
   ['diary.max_chars', '日记：单篇字数上限', '一篇日记正文最多多少字。', ['memory', 'speech', 'instant'], 'number'],
   // hobbies
   ['hobbies.enabled', '兴趣：总开关', '让她记得自己在追的番与在玩的游戏。', ['speech', 'instant'], 'switch'],
@@ -263,17 +263,18 @@ const ADVANCED = [
   ['tools.bili_learn_after_scroll', 'B 站：刷完自动学一轮', '每轮自己刷片结束后顺手学一轮评论区；关掉就只能手动喊「学评论」。', ['memory', 'instant'], 'switch'],
   ['tools.bili_learn_videos', 'B 站：每次学几个视频', '一次学几个视频的评论区，范围 1 到 6。', ['instant'], 'number', { min: 1, max: 6, step: 1 }],
   ['tools.bili_learn_comments', 'B 站：每个视频看几条评论', '每个视频抓多少条评论当语料，范围 5 到 50。', ['instant'], 'number', { min: 5, max: 50, step: 5 }],
-  ['tools.bili_auto_enabled', 'B 站：自动互动总开关', '回收到的评论、在看过的视频下评论、发弹幕；都是对外公开发布，默认关闭。', ['napcat', 'instant'], 'switch'],
+  ['tools.bili_auto_enabled', 'B 站：自动互动总开关', '回收到的评论、在看过的视频下评论、发弹幕；2026-11-03 起默认开启，仍可随时关掉。', ['napcat', 'instant'], 'switch'],
   ['tools.bili_auto_reply', 'B 站：自动回评论', '有人回她的评论时，自动用她的语气接一句。', ['instant'], 'switch'],
   ['tools.bili_auto_comment', 'B 站：自动发评论', '在自己刷过的视频下面主动留言，像普通观众那样。', ['instant'], 'switch'],
   ['tools.bili_auto_danmaku', 'B 站：自动发弹幕', '在自己看过的视频里发短弹幕。', ['instant'], 'switch'],
   ['tools.bili_auto_interval_min', 'B 站：自动互动间隔', '每隔多少分钟跑一轮自动互动，最小 10 分钟。', ['instant'], 'number', { min: 10, step: 5 }],
   ['tools.bili_auto_daily_limit', 'B 站：每天互动总次数', '每天所有互动加起来最多几次；填 0 表示不限。', ['instant'], 'number', { min: 0, step: 1 }],
-  ['tools.bili_auto_reply_limit', 'B 站：一轮最多回几条', '每轮自动互动里最多回几条收到的评论。', ['instant'], 'number', { min: 1, step: 1 }],
-  ['tools.bili_auto_comment_limit', 'B 站：一轮最多评几条', '每轮自动互动里最多发几条视频评论。', ['instant'], 'number', { min: 0, step: 1 }],
-  ['tools.bili_auto_danmaku_limit', 'B 站：一轮最多发几条弹幕', '每轮自动互动里最多发几条弹幕。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_auto_reply_limit', 'B 站：一轮最多回几条', '每轮自动互动里最多回几条收到的评论；0 表示不限。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_auto_comment_limit', 'B 站：一轮最多评几条', '每轮自动互动里最多发几条视频评论；0 表示不限。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_auto_danmaku_limit', 'B 站：一轮最多发几条弹幕', '每轮自动互动里最多发几条弹幕；0 表示不限。', ['instant'], 'number', { min: 0, step: 1 }],
   ['tools.bili_auto_reply_others_chance', 'B 站：回别人评论的概率', '发评论时改成直接回复评论区里别人的话的概率，0 到 1。', ['instant'], 'number', { min: 0, max: 1, step: 0.1 }],
-  ['tools.admin_intent_enabled', 'QQ：主人说话自动派活', '用决策模型判断主人这句话是不是在指挥干活，再决定要不要执行；默认关闭。', ['napcat', 'instant'], 'switch'],
+  ['tools.bili_auto_reply_per_video_daily', 'B 站：每个视频每天最多回几条', '同一个视频一天最多回几条评论；到上限就不回、只记一次跳过；填 0 表示不限。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.admin_intent_enabled', 'QQ：主人说话自动派活', '用决策模型判断主人这句话是不是在指挥干活，再决定要不要执行；2026-11-03 起默认开启。', ['napcat', 'instant'], 'switch'],
   ['tools.admin_intent_threshold', 'QQ：派活概率门槛', '决策模型给出的概率大于这个值才真的执行，范围 0 到 1。', ['instant'], 'number', { min: 0, max: 1, step: 0.05 }],
   ['tools.admin_intent_timeout', 'QQ：派活判定超时', '等决策模型判断的秒数，超时就当作不是指令。', ['instant'], 'number', { min: 1, step: 1 }],
   ['tools.bili_jct', 'B 站：CSRF 令牌', 'B 站网页端 bili_jct，配合 SESSDATA 才能做需要登录的操作。', ['instant'], 'secret'],
@@ -407,6 +408,16 @@ const ADVANCED = [
   ['life.birthday_file', '生活：生日表路径', '生日数据文件的位置，程序自己维护。', ['restart'], 'text'],
   ['life.birthday_wish', '生活：生日祝福', '当天要不要发祝福。', ['speech', 'instant'], 'switch'],
   ['life.birthday_wish_hours', '生活：祝福时段', '只在这个时段内祝；格式 [起, 止] 小时。', ['speech', 'instant'], 'json'],
+  ['life.autonomy_enabled', '自主生活：总开关', '允许她隔一段时间安静地自己找事做；关闭后不再安排新的自主活动。', ['speech', 'instant'], 'switch'],
+  ['life.activity_min_hours', '自主生活：最短间隔', '两次自主活动之间至少隔几小时；实际会在最短与最长之间随机。', ['speech', 'instant'], 'number', { min: 0.5, max: 72, step: 0.5 }],
+  ['life.activity_max_hours', '自主生活：最长间隔', '两次自主活动最多隔几小时；必须不小于最短间隔，否则会按两者对调处理。', ['speech', 'instant'], 'number', { min: 0.5, max: 72, step: 0.5 }],
+  ['life.share_gap_hours', '自主生活：同群分享间隔', '同一个群两次主动分享自主经历之间至少隔几小时，避免连续刷同一件事。', ['speech', 'instant'], 'number', { min: 0, max: 72, step: 0.5 }],
+  ['life.global_share_gap_hours', '自主生活：全局分享间隔', '任意会话两次主动分享自主经历之间至少隔几小时，限制整体出现频率。', ['speech', 'instant'], 'number', { min: 0, max: 72, step: 0.5 }],
+  ['life.qzone_gap_hours', '自主生活：空间间隔', 'QQ 空间自主读写之间至少隔几小时；空间行为还要通过空间自身的开关与写闸门。', ['speech', 'instant'], 'number', { min: 0, max: 168, step: 0.5 }],
+  ['life.max_active_goals', '成长：进行中目标上限', '最多同时保留几个进行中的愿望、执念或任务；满了要先完成、暂停或放弃。', ['memory', 'instant'], 'number', { min: 1, max: 50, step: 1 }],
+  ['life.memory_chars', '成长：生活记忆预算', '相关经历、目标与自我条目进入上下文时最多占多少字，避免挤掉眼前对话。', ['memory', 'speech', 'instant'], 'number', { min: 200, max: 10000, step: 100 }],
+  ['life.evolution_enabled', '成长：允许自我变化', '允许实际经历推动目标与自我条目缓慢修订；关闭后只记录，不改现有条目。', ['memory', 'speech', 'instant'], 'switch'],
+  ['life.growth_enabled', '成长：记录养成', '记录领域了解、实践经验、成果与纪念；关闭后不再累计新的成长记录。', ['memory', 'instant'], 'switch'],
   // proactive
   ['proactive.groups', '主动：指定群', '留空等于自动用它收到过消息的群。', ['napcat', 'instant'], 'json'],
   ['proactive.auto_groups', '主动：自动选群', '自动把收过消息的群纳入主动范围。', ['napcat', 'instant'], 'switch'],
@@ -461,6 +472,80 @@ const ADVANCED = [
   ['sync.first_run', '云端同步：首次遇到远端数据', '本机还没同步记录时发现远端有包：保留双份（默认）或直接拉取。', ['instant'], 'select', { options: [['keep_both', '保留双份（推荐）'], ['pull', '直接拉取']] }],
   ['sync.last_push', '云端同步：上次上传', '运行时写回，不用手改。', ['instant'], 'text'],
   ['sync.last_pull', '云端同步：上次拉取', '运行时写回，不用手改。', ['instant'], 'text'],
+
+  // ── 2026-11-03 安全对齐：写闸门 / 学习 / 自愈 / 中继 / 评审 ────────────────
+  ['memory.active_idle_sec', '记忆：活跃段间隔', '两条消息相隔多久仍算同一段活跃记录，单位秒。', ['memory', 'instant'], 'number', { min: 30, step: 30 }],
+  ['memory.active_chars', '记忆：活跃段容量', '一段活跃记录最多保留多少字，超了从最老的一端省略。', ['memory', 'instant'], 'number', { min: 1000, step: 1000 }],
+  ['reply.semantic_guard', '回复：语义护栏', '发送前再检查一次是否跑题或重复；关掉更容易答非所问。', ['speech', 'instant'], 'switch'],
+  ['server.mode', '服务：连接模式', '反向监听、正向外拨或高可用中继；改完要重启。', ['restart'], 'select', { options: [['reverse', '反向监听'], ['forward', '正向外拨'], ['relay', '高可用中继']] }],
+  ['server.forward_host', '服务：转发主机', 'forward/relay 模式下外拨的主机名。', ['restart'], 'text'],
+  ['server.forward_port', '服务：转发端口', 'forward/relay 模式下外拨的端口。', ['restart'], 'number', { min: 1, max: 65535, step: 1 }],
+  ['server.forward_path', '服务：转发路径', '外拨 WebSocket 的路径，通常保持 /ws。', ['restart'], 'text'],
+  ['server.forward_url', '服务：转发地址', '非空时覆盖主机、端口、路径；relay 支持 ws 与 wss。', ['restart'], 'text'],
+  ['server.relay_priority', '中继：优先级', 'local 可抢占 server；两台的优先级要写清楚。', ['restart'], 'select', { options: [['local', '本地优先'], ['server', '服务器优先']] }],
+  ['server.relay_backend_id', '中继：后端标识', '本机在后端里的唯一标识，最多 64 字符。', ['restart'], 'text'],
+  ['server.relay_content_url', '中继：内容地址', 'relay 拉取内容的 HTTP 根地址；留空从转发地址推导。', ['restart'], 'text'],
+  ['server.relay_sync_interval', '中继：同步间隔', '内容 push/pull 的间隔秒数。', ['restart'], 'number', { min: 0.5, step: 0.5 }],
+  ['server.relay_require_content', '中继：必须同步内容', '开启后内容同步成功才对外 ready，避免空壳接管。', ['restart'], 'switch'],
+  ['server.relay_sync_timeout', '中继：同步超时', '单次内容 pull/push 最多等几秒。', ['restart'], 'number', { min: 1, step: 1 }],
+  ['tools.bili_scroll_comments_per_video', 'B 站：每片读几条评论', '刷片时读几条热门评论，只学语气、挑回复对象，绝不当指令。', ['instant'], 'number', { min: 0, max: 30, step: 1 }],
+  ['tools.bili_scroll_autoreply', 'B 站：刷完自动回一条', '必须是字面 true 才自动回评论，而且还要过 bili_gate 写闸门。', ['instant'], 'switch'],
+  ['tools.bili_scroll_reply_per_round', 'B 站：一轮自动回几条', '自动回评论每轮上限，只接受 1 到 2。', ['instant'], 'number', { min: 1, max: 2, step: 1 }],
+  ['tools.bili_write_enabled', 'B 站写：总开关', '公开写操作的总闸；必须是字面 true 才放行，2026-11-03 起默认开启，可关。', ['instant'], 'switch'],
+  ['tools.bili_write_reply', 'B 站写：评论/回复', '允许在视频下发评论或回复；还要主人当前消息的进程内凭证。', ['instant'], 'switch'],
+  ['tools.bili_write_dynamic', 'B 站写：纯文字动态', '允许发纯文字动态；图片、文件、定时参数一律拒绝。', ['instant'], 'switch'],
+  ['tools.bili_write_comment', 'B 站写：视频评论', '允许发顶层视频评论；//评论 指令也要过这道闸。', ['instant'], 'switch'],
+  ['tools.bili_write_danmaku', 'B 站写：弹幕', '允许发弹幕；回执没有 dmid 就算未确认，不谎报成功。', ['instant'], 'switch'],
+  ['tools.bili_write_like', 'B 站写：点赞', '允许给一个视频点赞；一次授权只绑一个 BV 号，读后核验才算成功。', ['instant'], 'switch'],
+  ['tools.bili_write_favorite', 'B 站写：收藏', '允许收藏一个视频到「大肥鱼觉得好的」；读后核验才算成功。', ['instant'], 'switch'],
+  ['tools.bili_write_coin', 'B 站写：投币', '允许投 1 到 2 个硬币；只认主人显式 //投币，模型不能自己决定花硬币。', ['instant'], 'switch'],
+  ['tools.bili_write_delete_comment', 'B 站写：删一条评论', '只认 //删评论 BV号 rpid，且必须核实这条评论是自己发的。', ['instant'], 'switch'],
+  ['tools.bili_write_scheduler', 'B 站写：定时任务', '允许受控定时任务换成一次性写凭证；2026-11-03 起默认开启。', ['instant'], 'switch'],
+  ['tools.bili_write_quota', 'B 站写：每日额度', '按动作给每天上限；0 或不填表示不限（默认），例如 {"reply":2,"comment":1}。', ['instant'], 'json'],
+  ['tools.bili_write_max_chars', 'B 站写：正文上限', '单条评论或动态最多多少字，超了直接拒绝。', ['instant'], 'number', { min: 1, max: 2000, step: 10 }],
+  ['tools.bili_learning_enabled', 'B 站学习：总开关', '从评论区学说话方式，只读评论，结果先落提案再走自我编辑。', ['memory', 'instant'], 'switch'],
+  ['tools.bili_learning_section', 'B 站学习：写回小节', '学到的内容写回人设里哪个已存在的小节。', ['memory', 'instant'], 'text'],
+  ['tools.bili_learning_apply_daily_limit', 'B 站学习：每天应用次数', '每天最多把学到的内容写回人设几次。', ['memory', 'instant'], 'number', { min: 1, step: 1 }],
+  ['selfedit.allowed_sections', '自我编辑：允许小节', '允许自动改写的人设小节白名单；空列表等于全都不允许。', ['instant'], 'json'],
+  ['selfedit.autonomous', '自我编辑：自主模式', '字面 true 才允许无人值守地应用提案；默认关。', ['instant'], 'switch'],
+  ['selfedit.autonomous_grant', '自我编辑：自主凭证', '无人值守应用提案需要的固定形状授权；不填就停用。', ['instant'], 'json'],
+  ['selfedit.lock_timeout_sec', '自我编辑：锁等待', '人设文件被占用时最多等几秒，超时放弃本次修改。', ['instant'], 'number', { min: 1, step: 1 }],
+  ['judge.decider_enabled', '评审决策：总开关', '是否用概率化决策模型判断值不值得发、画质档位等。', ['instant'], 'switch'],
+  ['judge.decider_model', '评审决策：模型名', '决策模型名；留空或失败会自动退回普通判官。', ['instant'], 'text'],
+  ['judge.decider_base_url', '评审决策：接口地址', '决策模型的接口地址；换渠道时改这里。', ['instant'], 'text'],
+  ['judge.decider_api_key', '评审决策：密钥', '决策模型的 key；留空走环境变量或本地凭证文件。', ['instant'], 'secret'],
+  ['judge.decider_timeout', '评审决策：超时', '单次决策请求最多等几秒，失败立刻退回判官。', ['instant'], 'number', { min: 1, step: 1 }],
+  ['judge.decider_min_worth', '评审决策：值得发门槛', '「值得发」概率低于这个值就把分数压低，范围 0 到 1。', ['instant'], 'number', { min: 0, max: 1, step: 0.05 }],
+
+  // ── 2026-11-03 云端等价：刷片互动 / 自动互动扫描 / 批量删评论 ───────────────
+  ['tools.bili_scroll_seen_ttl_days', 'B 站：判重表有效期', '判重记录保留几天后作废；0 表示永不过期（云端等价默认）。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_scroll_search_cooldown_sec', 'B 站：搜索冷却秒数', '同一个搜索词多久内不重复请求；0 表示不设冷却（云端等价默认）。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_scroll_react_like', 'B 站：刷完自己点赞', '刷到值得看的视频后，按她自己的判断点赞；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_scroll_react_fav', 'B 站：刷完自己收藏', '刷到特别想留的视频后收藏到「大肥鱼觉得好的」；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_scroll_react_coin', 'B 站：刷完自己投币', '按她自己的判断投 1 到 2 个硬币（会花她的硬币）；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_scroll_react_like_daily', 'B 站：每天最多点赞几个', '自己刷片时每天最多点几个赞；0 表示不限（云端等价默认）。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_scroll_react_fav_daily', 'B 站：每天最多收藏几个', '自己刷片时每天最多收藏几个；0 表示不限（云端等价默认）。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_scroll_react_coin_daily', 'B 站：每天最多投几个币', '自己刷片时每天最多投几个币；0 表示不限，余额不够会自动跳过。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_auto_reply_scan', 'B 站：每轮扫几条回复', '自动互动每轮去看多少条收到的评论回复；0 或留空按 50。', ['instant'], 'number', { min: 0, step: 10 }],
+  ['tools.bili_auto_notes_scan', 'B 站：每轮扫几篇笔记', '自动互动每轮从最近多少篇刷片笔记里挑视频评论/发弹幕；0 或留空按 50。', ['instant'], 'number', { min: 0, step: 10 }],
+  ['tools.bili_voice_enabled', 'B 站发言：人味守门', '生成前注入人设、视频摘要和实时评论上下文，生成后拦公式化重复；关掉 = 三种路径都不查（自动互动/模型写正文/自动动态），记账与去重照旧。', ['instant'], 'switch'],
+  ['tools.bili_voice_recent_n', 'B 站发言：参考最近几条', '拿最近几条自己的发言做开头、口头禅与相似度去重；只统计 2026-11-02 之后的。', ['instant'], 'number', { min: 1, step: 1 }],
+  ['tools.bili_voice_max_retry', 'B 站发言：检查不过重写几次', '没过反公式化检查时带着更强制约重写几次；0 表示一次不过就放弃不发。', ['instant'], 'number', { min: 0, max: 2, step: 1 }],
+  ['tools.bili_voice_similarity', 'B 站发言：相似度上限', '和最近自发言或同视频历史的相似度达到这个值就算重复；0 表示不查相似度。', ['instant'], 'number', { min: 0, max: 1, step: 0.05 }],
+  ['tools.bili_voice_ban_openers_days', 'B 站发言：开头禁几天', '最近几天用过的开头不能再当开头；0 表示只看最近几条发言。', ['instant'], 'number', { min: 0, step: 1 }],
+  ['tools.bili_voice_max_cao_per_day', 'B 站发言：草每天最多几次', '「草」每天最多出现几次；0 表示完全禁用，超了这次就换说法。', ['instant'], 'number', { min: 0, max: 20, step: 1 }],
+  ['tools.bili_write_react', 'B 站写：按判断互动', '允许「点赞+收藏+投币」按她自己的判断一次完成；默认开启，仍需凭证与账本去重。', ['instant'], 'switch'],
+  ['tools.bili_write_delete_recent', 'B 站写：删最近几条评论', '允许 //删评论 全部 / 自然语言「删评论」删掉账本里最近的自己的评论；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_write_delete_by_index', 'B 站写：按序号删评论', '允许 //删评论 2 按列表序号删自己发过的一条评论；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_write_delete_by_text', 'B 站写：按文本删评论', '允许 //删评论 关键词 删掉内容里含这个词的、自己发过的评论；默认开启。', ['instant'], 'switch'],
+  ['tools.bili_write_delete_on_video', 'B 站写：删整条视频评论', '允许 //删评论 BV号 删掉自己在该视频下发过的全部评论；默认开启。', ['instant'], 'switch'],
+
+  // ── 2026-11-04 猫娘草稿法：内容草稿 → 中性草稿 → 完整人设成稿 ─────────────
+  ['chat.chat_draft_enabled', '猫娘草稿法：总开关', '开启后先用最小设定写内容草稿、再清成中性草稿，最后交给完整人设照意思说；关掉就只调用一次模型。', ['speech', 'instant'], 'switch'],
+  ['chat.chat_draft_persona', '猫娘草稿法：第一段最小设定', '第一段草稿只带这句最小设定，不会看到完整人设；改它可换成别的草稿人格。', ['speech', 'instant'], 'text'],
+  ['chat.chat_draft_cleanup', '猫娘草稿法：清理草稿', '第二段把草稿里的猫娘用词、口癖和动作描写删干净，只留信息与语气骨架。', ['speech', 'instant'], 'switch'],
+  ['chat.chat_draft_timeout', '猫娘草稿法：单段超时', '前两段各自最多等几秒；0 表示单段不限（两段合计仍受总预算限制，且不超过 chat.reply_timeout 的 40%）。超时就跳过草稿法，按原来的单段路径回复。', ['instant'], 'number', { min: 0, max: 60, step: 1 }],
+  ['chat.chat_draft_max_chars', '猫娘草稿法：草稿字数上限', '内容草稿与中性草稿各自的字数上限；超了会截断，0 表示用默认 300。', ['instant'], 'number', { min: 0, step: 10 }],
 ]
 
 const SECTION_LABELS = {
@@ -575,6 +660,8 @@ const API_GROUPS = [
     keys: [
       'judge.enabled', 'judge.model', 'judge.api_key', 'judge.base_url',
       'judge.reasoning_effort', 'judge.timeout',
+      'judge.decider_enabled', 'judge.decider_model', 'judge.decider_base_url',
+      'judge.decider_api_key', 'judge.decider_timeout', 'judge.decider_min_worth',
       'emotion.judge_model', 'emotion.judge_api_key', 'emotion.judge_base_url',
       'emotion.judge_effort', 'emotion.judge_timeout',
       'emotion.decider_enabled', 'emotion.decider_model', 'emotion.decider_base_url',
@@ -784,14 +871,76 @@ function fmtDuration(sec) {
   return `${s} 秒`
 }
 
-function fmtTime(value) {
+/** PawBot API 的时间统一是 epoch 秒；兼容已经是毫秒的旧值。 */
+function toEpochMs(value) {
   const n = Number(value)
-  if (!Number.isFinite(n) || n <= 0) return ''
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return n < 1e12 ? n * 1000 : n
+}
+
+function fmtTime(value) {
+  const n = toEpochMs(value)
+  if (!n) return ''
   try {
     return new Date(n).toLocaleString('zh-TW', { hour12: false })
   } catch {
     return String(n)
   }
+}
+
+/** 只把标量转成可渲染文字；对象/数组一律不交给 React 当 child。 */
+function safeText(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return ''
+}
+
+/** 字符串数组拼成一行；对象数组不在这里渲染。 */
+function safeListText(value) {
+  if (!Array.isArray(value)) return safeText(value)
+  return value.map(safeText).filter(Boolean).join('、')
+}
+
+/** 有界读取列表，坏数据直接过滤，不因单条脏记录让整块面板空白。 */
+function boundedRows(value, limit) {
+  if (!Array.isArray(value)) return []
+  const cap = Math.max(0, Number(limit) || 0)
+  return value.filter((row) => row && typeof row === 'object' && !Array.isArray(row)).slice(0, cap)
+}
+
+/** 人类友好的相对时间；不合法时间返回空串。 */
+function fmtRelative(value, now) {
+  const n = toEpochMs(value)
+  if (!n) return ''
+  const base = toEpochMs(now) || Date.now()
+  const diff = Math.round((base - n) / 1000)
+  const future = diff < 0
+  const sec = Math.abs(diff)
+  if (sec < 45) return future ? '马上' : '刚刚'
+  if (sec < 3600) {
+    const m = Math.max(1, Math.round(sec / 60))
+    return future ? `${m} 分钟后` : `${m} 分钟前`
+  }
+  if (sec < 86400) {
+    const h = Math.max(1, Math.round(sec / 3600))
+    return future ? `${h} 小时后` : `${h} 小时前`
+  }
+  if (sec < 604800) {
+    const d = Math.max(1, Math.round(sec / 86400))
+    return future ? `${d} 天后` : `${d} 天前`
+  }
+  return fmtTime(n)
+}
+
+/** 绝对时间 + 相对时间；两个都拿不到就退回「时间未知」。 */
+function fmtWhen(value) {
+  const absolute = fmtTime(value)
+  const relative = fmtRelative(value)
+  if (absolute && relative) return absolute + ' · ' + relative
+  if (absolute) return absolute
+  if (relative) return relative
+  return '时间未知'
 }
 
 function countOf(value) {
@@ -1061,6 +1210,17 @@ const CSS = `
   color:var(--dsw-alias-label-secondary);}
 [data-pb-empty]{padding:10px 0;}
 [data-pb-search-summary]{font-size:14px;color:var(--dsw-alias-label-primary);}
+
+/* 生活与成长：只读列表，沿用卡片与主题 token */
+[data-pb-life]{display:flex;flex-direction:column;gap:16px;}
+[data-pb-life-grid]{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:10px;}
+[data-pb-life-item]{padding:10px 0;border-top:1px solid var(--dsw-alias-border-l1);}
+[data-pb-life-item]:first-child{border-top:0;padding-top:2px;}
+[data-pb-life-title]{font-size:14px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary);
+  overflow-wrap:anywhere;}
+[data-pb-life-meta]{font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
+[data-pb-life-body]{margin-top:2px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary);
+  white-space:pre-wrap;overflow-wrap:anywhere;}
 
 /* ── 启动页：一键引导流程（hero / stepper / 日志窗 / 就绪卡） ─────────── */
 [data-pb-hero]{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
@@ -3985,11 +4145,241 @@ if (typeof window === 'undefined') {
           h('p', null, '只执行停机，不会自动拉取或重启；确认进程已退出后再点“拉取到本机”。'))))
       }
 
-      /* ── 頂層面板：4 個分頁（启动 / 状态 / 设定 / 人设） ─────────────────── */
+      /* ── 生活与成长：只读视图，不触发活动、不发送消息、不喂食 ───────────── */
+
+      function LifeTab({ active }) {
+        const [data, setData] = useState(null)
+        const [err, setErr] = useState('')
+        const [updatedAt, setUpdatedAt] = useState(0)
+
+        useEffect(() => {
+          if (!active) return undefined
+          let cancelled = false
+          const controller = new AbortController()
+          const load = async () => {
+            try {
+              // 走 Host 同源代理的统一入口：/pawbot-ui/life（由 Host 再转 PawBot /api/life）。
+              const payload = await api('GET', '/life', undefined, controller.signal)
+              if (cancelled) return
+              setData(payload && payload.data ? payload.data : null)
+              setErr('')
+              setUpdatedAt(Date.now())
+            } catch (error) {
+              if (cancelled || isAbortError(error)) return
+              setErr(friendlyError(error))
+            }
+          }
+          load()
+          const timer = window.setInterval(load, 30000)
+          return () => {
+            cancelled = true
+            window.clearInterval(timer)
+            controller.abort()
+          }
+        }, [active])
+
+        const growth = data && data.growth && typeof data.growth === 'object' && !Array.isArray(data.growth)
+          ? data.growth : null
+        const autonomy = data && data.autonomy && typeof data.autonomy === 'object' && !Array.isArray(data.autonomy)
+          ? data.autonomy : null
+        const errors = data && data.errors && typeof data.errors === 'object' && !Array.isArray(data.errors)
+          ? data.errors : null
+        const activity = autonomy && autonomy.activity && typeof autonomy.activity === 'object' && !Array.isArray(autonomy.activity)
+          ? autonomy.activity : {}
+
+        const GOAL_TYPES = { wish: '愿望', obsession: '执念', task: '任务' }
+        const GOAL_STATUS = {
+          active: '进行中', waiting: '等待中', paused: '已暂停',
+          completed: '已完成', abandoned: '已放弃', deleted: '已删除',
+        }
+        const STAGE_LABELS = { understanding: '了解', tried: '尝试过', experienced: '有经验' }
+        const ACTION_LABELS = {
+          search: '搜索', bili: '刷 B 站', qzone_read: '看空间',
+          qzone_post: '写空间', reflect: '反思', skip: '这次没动',
+        }
+        const STATUS_LABELS = {
+          running: '进行中', completed: '完成', skipped: '跳过',
+          failed: '未完成', abandoned: '中断', pending: '等待',
+        }
+        const CHANGE_KIND = { self: '自我', goal: '目标', skill: '能力', memory: '记忆' }
+        const CHANGE_OP = {
+          add: '新增', revise: '修订', retire: '退役', delete: '删除',
+          merge: '合并', complete: '完成', pause: '暂停', abandon: '放弃',
+        }
+
+        const goals = boundedRows(growth && growth.goals, 8)
+        const activeGoals = goals.filter((row) => safeText(row.status) === 'active').length
+        const skills = boundedRows(growth && growth.skills, 8)
+        const changes = boundedRows(growth && growth.changes, 6)
+        const keepsakes = boundedRows(growth && growth.mementos, 4)
+          .concat(boundedRows(growth && growth.artifacts, 4)).slice(0, 5)
+        const history = boundedRows(autonomy && autonomy.history, 5).reverse()
+        const recent = safeText(activity.status) === 'running'
+          ? [activity].concat(history.slice(0, 4)) : history
+
+        const enabled = autonomy ? autonomy.enabled !== false : null
+        let nextValue = '未知'
+        let nextSub = autonomy ? '' : '自主活动组件不可用'
+        if (autonomy) {
+          const nextAt = Number(autonomy.next_at)
+          if (enabled === false) {
+            nextValue = '已关闭'
+            nextSub = '不会安排新的自主活动'
+          } else if (safeText(activity.status) === 'running') {
+            nextValue = '正在进行'
+            nextSub = '这次活动结束后才会安排下一次'
+          } else if (Number.isFinite(nextAt) && nextAt > 0) {
+            nextValue = fmtRelative(nextAt) || fmtWhen(nextAt)
+            nextSub = fmtTime(nextAt)
+          } else {
+            nextValue = '尚未安排'
+            nextSub = '到点后她才会安静地做一件事'
+          }
+        }
+
+        const resourceKnown = growth && growth.resources && growth.resources.known === true
+        const resourceBalance = resourceKnown ? safeText(growth.resources.balance) : ''
+        const resourceUnit = growth && growth.resources ? safeText(growth.resources.unit) : ''
+        const emptyLine = (text) => h('div', { 'data-pb-empty': '' },
+          h('div', { 'data-pb-help': '' }, text))
+
+        if (!data && !err) {
+          return h('div', { 'data-pb-life': '' },
+            h('section', { 'data-pb-card': '' },
+              h('div', { 'data-pb-card-head': '' },
+                h('h2', { 'data-pb-card-title': '' }, '生活与成长'),
+                h('span', { 'data-pb-card-sub': '' }, '只读视图')),
+              h('div', { 'data-pb-help': '' }, '正在读取生活与成长状态…')))
+        }
+
+        return h('div', { 'data-pb-life': '' },
+          err ? h(Notice, { tone: 'err' }, '读取生活与成长状态失败：' + err) : null,
+          errors && errors.growth ? h(Notice, { tone: 'warn' }, '生活与成长：' + safeText(errors.growth)) : null,
+          errors && errors.autonomy ? h(Notice, { tone: 'warn' }, '自主活动：' + safeText(errors.autonomy)) : null,
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '现在'),
+              h('span', { 'data-pb-card-sub': '' },
+                updatedAt ? '只读视图 · 更新于 ' + fmtTime(updatedAt) + ' · 每 30 秒自动刷新' : '只读视图')),
+            h('div', { 'data-pb-life-grid': '' },
+              h(Kpi, {
+                label: '自主活动',
+                value: enabled === null ? '未知' : (enabled ? '已开启' : '已关闭'),
+                sub: autonomy && autonomy.running ? '此刻正在进行一次活动' : '安静进行，不主动发消息',
+              }),
+              h(Kpi, { label: '下次活动', value: nextValue, sub: nextSub || '暂无时间' }),
+              h(Kpi, {
+                label: '进行中目标',
+                value: goals.length ? String(activeGoals) + ' 个' : '—',
+                sub: goals.length ? '共看到 ' + goals.length + ' 个目标' : '还没有留下目标',
+              }),
+              h(Kpi, {
+                label: '了解与实践',
+                value: skills.length ? String(skills.length) + ' 项' : '—',
+                sub: skills.length ? '两个维度分开记录' : '还没有形成能力记录',
+              })),
+            h(Notice, { tone: 'info' }, resourceKnown && resourceBalance
+              ? '资源余额：' + resourceBalance + (resourceUnit ? '（' + resourceUnit + '）' : '')
+              : '资源余额未知。她的活动消耗的是主人的 token；米饭表情只是表情，不会补充资源。')),
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '最近经历'),
+              h('span', { 'data-pb-card-sub': '' }, '最近 5 条已落盘的自主活动')),
+            recent.length
+              ? h('div', {}, recent.map((row, index) => h('div', {
+                key: 'life-activity-' + index, 'data-pb-life-item': '',
+              },
+              h('div', { 'data-pb-life-title': '' },
+                (ACTION_LABELS[safeText(row.action)] || '自主活动') + ' · ' +
+                (STATUS_LABELS[safeText(row.status)] || '状态未知')),
+              h('div', { 'data-pb-life-meta': '' },
+                fmtWhen(row.finished_at || row.at || row.started_at)),
+              safeText(row.reason) || safeText(row.motivation)
+                ? h('div', { 'data-pb-life-body': '' }, safeText(row.reason) || safeText(row.motivation))
+                : null)))
+              : emptyLine('还没有自主经历。到点后她会安静地做一件事，这个面板不会替你触发活动。')),
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '目标'),
+              h('span', { 'data-pb-card-sub': '' }, '愿望、执念与手头任务')),
+            goals.length
+              ? h('div', {}, goals.map((row, index) => h('div', {
+                key: 'life-goal-' + index, 'data-pb-life-item': '',
+              },
+              h('div', { 'data-pb-life-title': '' },
+                safeText(row.text) || safeText(row.title) || '未命名目标'),
+              h('div', { 'data-pb-life-meta': '' },
+                (GOAL_TYPES[safeText(row.type)] || '目标') + ' · ' +
+                (GOAL_STATUS[safeText(row.status)] || '状态未知') +
+                (row.updated_at ? ' · ' + fmtWhen(row.updated_at) : '')))))
+              : emptyLine('还没有目标。她不会为了填满面板而虚构愿望。')),
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '领域了解与实践经验'),
+              h('span', { 'data-pb-card-sub': '' }, '了解过什么，和真正动手做过什么分开记')),
+            skills.length
+              ? h('div', {}, skills.map((row, index) => h('div', {
+                key: 'life-skill-' + index, 'data-pb-life-item': '',
+              },
+              h('div', { 'data-pb-life-title': '' },
+                safeText(row.topic) || '一项能力',
+                ' ',
+                h(Badge, { tone: 'info' }, STAGE_LABELS[safeText(row.stage)] || '记录中')),
+              h('div', { 'data-pb-life-meta': '' },
+                '了解 ' + safeText(row.understanding_count || 0) + ' 次 · 实践 ' +
+                safeText(row.practice_count || 0) + ' 次' +
+                (row.updated_at ? ' · ' + fmtWhen(row.updated_at) : '')),
+              safeText(row.stage_reason)
+                ? h('div', { 'data-pb-life-body': '' }, safeText(row.stage_reason))
+                : null)))
+              : emptyLine('还没有能力记录。看标题和摘要只算了解，不会被写成实践经验。')),
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '成果与纪念'),
+              h('span', { 'data-pb-card-sub': '' }, '真实经历留下的作品和值得记住的事')),
+            keepsakes.length
+              ? h('div', {}, keepsakes.map((row, index) => h('div', {
+                key: 'life-keep-' + index, 'data-pb-life-item': '',
+              },
+              h('div', { 'data-pb-life-title': '' }, safeText(row.topic) || '一段纪念'),
+              h('div', { 'data-pb-life-meta': '' },
+                (safeText(row.outcome) || '没有记录结果') +
+                (row.people ? ' · 与 ' + safeListText(row.people) : '') +
+                (row.created_at ? ' · ' + fmtWhen(row.created_at) : '')),
+              safeText(row.artifact)
+                ? h('div', { 'data-pb-life-body': '' }, safeText(row.artifact))
+                : null)))
+              : emptyLine('还没有成果或纪念。只有真实做过并留下来源的事才会出现在这里。')),
+
+          h('section', { 'data-pb-card': '' },
+            h('div', { 'data-pb-card-head': '' },
+              h('h2', { 'data-pb-card-title': '' }, '自我变化'),
+              h('span', { 'data-pb-card-sub': '' }, '最近 6 条有来源的修订记录')),
+            changes.length
+              ? h('div', {}, changes.map((row, index) => h('div', {
+                key: 'life-change-' + index, 'data-pb-life-item': '',
+              },
+              h('div', { 'data-pb-life-title': '' },
+                (CHANGE_KIND[safeText(row.target_kind)] || '条目') + ' · ' +
+                (CHANGE_OP[safeText(row.op)] || '变更')),
+              h('div', { 'data-pb-life-meta': '' }, fmtWhen(row.at)),
+              safeText(row.reason)
+                ? h('div', { 'data-pb-life-body': '' }, safeText(row.reason))
+                : null)))
+              : emptyLine('还没有自我变化。她不会因为聊天条数或表情符号而改自己。')))
+      }
+
+      /* ── 頂層面板：启动 / 状态 / 生活与成长 / 同步 / API / 设置 / 人设 ───── */
 
       const TABS = [
         ['setup', '启动'],
         ['status', '状态'],
+        ['life', '生活与成长'],
         ['sync', '同步'],
         ['api', 'API 密钥'],
         ['config', '设置'],
@@ -4001,7 +4391,7 @@ if (typeof window === 'undefined') {
         const startTab = initialTab || 'setup'
         const [tab, setTab] = useState(startTab)
         // 只掛載使用者拜訪過的分頁；之後用 CSS 隱藏而不是卸載，避免切走再回來掉草稿。
-        const [mounted, setMounted] = useState({ setup: true, status: false, sync: false, api: false, config: false, persona: false, [startTab]: true })
+        const [mounted, setMounted] = useState({ setup: true, status: false, life: false, sync: false, api: false, config: false, persona: false, [startTab]: true })
         const [configDirty, setConfigDirty] = useState(0)
         const [apiDirty, setApiDirty] = useState(0)
         const [tabNotice, setTabNotice] = useState('')
@@ -4079,6 +4469,8 @@ if (typeof window === 'undefined') {
               : null),
           h('div', panelProps('status'),
             mounted.status ? h(StatusTab, { active: tab === 'status', onGoConfig: () => selectTab('config') }) : null),
+          h('div', panelProps('life'),
+            mounted.life ? h(LifeTab, { active: tab === 'life' }) : null),
           h('div', panelProps('sync'),
             mounted.sync ? h(SyncTab, { active: tab === 'sync' }) : null),
           h('div', panelProps('api'),

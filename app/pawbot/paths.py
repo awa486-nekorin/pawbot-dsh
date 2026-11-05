@@ -3,11 +3,11 @@
 批次 3 只做「解析 + 迁移」，不改任何业务语义。目录约定：
 
     <DataRoot>/
-      content/   人设、记忆、人物档案、日记、长期经历、表情包、图库、B 站笔记、
-                 爱好 / 梗 / 关系网 —— 可以整包拷到另一台机器
-      state/     配置、会话、心情 / 情绪 / 话题、被动引擎状态、额度表、提醒、日志、
-                 同步状态与冲突目录、browser / brain / napcat / backups / logs ——
-                 只属于这台机器，跨机器复用没有意义
+      content/   人设、记忆、人物档案、日记、长期经历、生活与成长状态、表情包、
+                 图库、B 站笔记、爱好 / 梗 / 关系网 —— 可以整包拷到另一台机器
+      state/     配置、会话、心情 / 情绪 / 话题、自主活动运行状态、被动引擎状态、
+                 额度表、提醒、日志、同步状态与冲突目录、browser / brain / napcat /
+                 backups / logs —— 只属于这台机器，跨机器复用没有意义
       .runtime.lock / .locks/ / .data-guard.json   批次 2 基础设施，留在根目录不动
 
 为什么不把这一层的判断散在各模块里：
@@ -71,6 +71,7 @@ CONTENT_NAMES = (
     "people",
     "diary",
     "longmem",
+    "life",
     "stickers",
     "album",
     "bili_notes",
@@ -83,6 +84,7 @@ CONTENT_NAMES = (
 STATE_NAMES = (
     "config.json",
     "sessions.json",
+    "autonomy.json",
     "mood.json",
     "emotion.json",
     "topic.json",

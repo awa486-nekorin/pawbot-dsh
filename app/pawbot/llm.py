@@ -20,6 +20,25 @@ import uuid
 from .breaker import BREAKER
 from .log import log
 
+#: 没配 api_key 时直连路径会返回的 mock 文案（草稿法靠它判断「这不是真草稿」）。
+MOCK_NOTICE = "（mock 模式，未配置 api_key）"
+
+#: 与 config.DEFAULT["llm"]["reasoning_effort"] 保持一致（2026-11-04 起为 low）。
+DEFAULT_REASONING_EFFORT = "low"
+
+
+def is_mock_text(text) -> bool:
+    """True = 这段文本是 mock/占位输出，不能当成真实回复或草稿注入。
+
+    除了 llm.py 自己的 mock 文案，也拦任何带 ``mock`` 字样的文本：草稿法宁可
+    退回单段路径，也不能把占位话术当成「要回什么」注入完整人设。
+    """
+    probe = str(text or "")
+    if not probe.strip():
+        return False
+    return "mock" in probe.casefold() or "未配置 api_key" in probe
+
+
 # opencode.ai 的 Go 套餐要求每个请求带稳定的 x-opencode-session（缺了会 400 MissingSessionID）。
 _OPENCODE_SESSION = "pawbot-" + uuid.uuid4().hex[:16]
 
@@ -125,6 +144,21 @@ class LLMClient:
     def _cfg(self, key, default=None):
         return self.config.get(f"llm.{key}", default)
 
+    # ---------------------------------------------------------- 可用性判定
+    def mock_mode(self) -> bool:
+        """没有 api_key 时直连路径会返回 mock 文本（不是真回复/真草稿）。"""
+        return not str(self._cfg("api_key", "") or "").strip()
+
+    def chat_available(self) -> bool:
+        """直连聊天这一路能不能真的发出去：有 base_url 且不会落到 mock。
+
+        注意：``provider=dsh`` 的轮次由 ``brain_conv`` 改道 DSH 大脑，不走这里；
+        草稿法两条后台调用没有 brain_conv，只能靠这个方法判断自己该不该跑。
+        """
+        if not str(self._cfg("base_url", "") or "").strip():
+            return False
+        return not self.mock_mode()
+
     # ---------------------------------------------------------- DSH 大脑
     def provider(self) -> str:
         return str(self._cfg("provider", "") or "").strip().lower()
@@ -182,7 +216,8 @@ class LLMClient:
         return ctx
 
     def _brain_payload(self, messages: list[dict], tools: list[dict] | None,
-                       brain_conv: str, brain_meta: dict | None = None) -> dict:
+                       brain_conv: str, brain_meta: dict | None = None,
+                       reasoning_effort: str | None = None) -> dict:
         """把 PawBot 的 OpenAI 形状 messages 折成「整段 system + 当前一条 user」。
 
         - **不丢活跃期/记忆块**：所有 system 块按原顺序保留；多出来的 user/assistant/
@@ -248,18 +283,25 @@ class LLMClient:
         seconds = float(self._cfg("brain_timeout", 90) or 90)
         # Python 侧比 Host 早 5 秒放弃/晚 5 秒收线：避免「Host 正常超时回包」被误判成连不上。
         host_ms = int(max(5.0, min(595.0, seconds - 5.0)) * 1000)
+        options = {"timeoutMs": host_ms}
+        # 单次调用可以指定 DSH 这一轮的思考强度；不传则交给 Host 的
+        # brainReasoningEffort / 模型默认，不擅自改其他后台轮次的行为。
+        effort = str(reasoning_effort or "").strip().lower()
+        if effort in ("low", "medium", "high"):
+            options["reasoningEffort"] = effort
         payload = {
             "conv": str(brain_conv),
             "system": system_text,
             "user": user_text,
             "tools": list(tools or []),
             "context": self._brain_context(brain_meta),
-            "options": {"timeoutMs": host_ms},
+            "options": options,
         }
         return payload
 
     def _brain_message(self, messages: list[dict], tools: list[dict] | None,
-                       brain_conv: str, brain_meta: dict | None = None) -> dict:
+                       brain_conv: str, brain_meta: dict | None = None,
+                       reasoning_effort: str | None = None) -> dict:
         from . import brain
 
         if not brain.enabled():
@@ -269,7 +311,8 @@ class LLMClient:
             )
         seconds = float(self._cfg("brain_timeout", 90) or 90)
         try:
-            data = brain.turn(self._brain_payload(messages, tools, brain_conv, brain_meta),
+            data = brain.turn(self._brain_payload(messages, tools, brain_conv, brain_meta,
+                                                  reasoning_effort),
                               timeout=seconds + 5)
         except brain.BrainError as error:
             brain.announce_failure(error)
@@ -291,7 +334,8 @@ class LLMClient:
         }
 
     def _payload(self, messages: list[dict], tools: list[dict] | None = None,
-                 budget: int | None = None, model: str | None = None) -> dict:
+                 budget: int | None = None, model: str | None = None,
+                 reasoning_effort: str | None = None) -> dict:
         payload = {
             "model": model or self._cfg("model", "deepseek-chat"),
             "messages": messages,
@@ -301,7 +345,11 @@ class LLMClient:
         }
         # 思考型模型（deepseek-flash 等）的思考强度：low / medium / high，
         # 留空就交给服务端默认，不认识的写法一律忽略。
-        effort = str(self._cfg("reasoning_effort", "medium") or "").strip().lower()
+        # ``reasoning_effort`` 参数用于单次调用覆盖运行态配置（草稿法强制 low）；
+        # 不传时回退到 llm.reasoning_effort，再缺省则与 config.DEFAULT 一致用 low。
+        raw_effort = (self._cfg("reasoning_effort", DEFAULT_REASONING_EFFORT)
+                      if reasoning_effort is None else reasoning_effort)
+        effort = str(raw_effort or "").strip().lower()
         if effort in ("low", "medium", "high"):
             payload["reasoning_effort"] = effort
         if tools:
@@ -347,7 +395,8 @@ class LLMClient:
     def _request_message(self, messages: list[dict],
                          tools: list[dict] | None = None,
                          brain_conv: str | None = None,
-                         brain_meta: dict | None = None) -> dict:
+                         brain_meta: dict | None = None,
+                         reasoning_effort: str | None = None) -> dict:
         """完整返回 assistant message，含可能的 tool_calls。
 
         主模型先用 llm.first_timeout 等着；超时或 429/5xx 时如果配了
@@ -375,7 +424,8 @@ class LLMClient:
                     )
             else:
                 try:
-                    return self._brain_message(messages, tools, brain_conv, brain_meta)
+                    return self._brain_message(messages, tools, brain_conv, brain_meta,
+                                               reasoning_effort)
                 except LLMError as error:
                     key = str(self._cfg("api_key", "")).strip()
                     if not key:
@@ -398,7 +448,7 @@ class LLMClient:
             if isinstance(last, list):
                 last = " ".join(str(x.get("text", "")) for x in last)
             return {"role": "assistant",
-                    "content": f"（mock 模式，未配置 api_key）我听到你说：{str(last)[:60]}"}
+                    "content": f"{MOCK_NOTICE}我听到你说：{str(last)[:60]}"}
 
         url = base + "/chat/completions"
         budget = int(self._cfg("max_tokens", 900))
@@ -426,7 +476,8 @@ class LLMClient:
         # 预算不够时 finish_reason=length 而 content 是空串。
         # 遇到这种情况就翻倍重试，最多两次——比直接把空回复发到群里强。
         for attempt in range(3):
-            payload = self._payload(messages, tools, budget, model=model)
+            payload = self._payload(messages, tools, budget, model=model,
+                                    reasoning_effort=reasoning_effort)
             try:
                 data = self._post(url, payload, key, model_timeout)
             except _Transient as e:
@@ -435,7 +486,8 @@ class LLMClient:
                     raise LLMError(e.reason) from e
                 log.warn(f"聊天模型 {primary} 失败（{e.reason}），改用 {fallback}")
                 model, model_timeout = fallback, timeout
-                payload = self._payload(messages, tools, budget, model=model)
+                payload = self._payload(messages, tools, budget, model=model,
+                                        reasoning_effort=reasoning_effort)
                 try:
                     data = self._post(url, payload, key, model_timeout)
                 except _Transient as e2:
@@ -469,16 +521,21 @@ class LLMClient:
     async def chat_message(self, messages: list[dict],
                            tools: list[dict] | None = None,
                            brain_conv: str | None = None,
-                           brain_meta: dict | None = None) -> dict:
+                           brain_meta: dict | None = None,
+                           reasoning_effort: str | None = None) -> dict:
         """要工具的那种调用：返回带 tool_calls 的完整 message。
 
         `brain_conv` 非空且 llm.provider=dsh 时走 DSH 大脑；否则行为与以前完全一致。
+        `reasoning_effort` 可单次覆盖思考强度（草稿法两段强制 low）。
         """
         loop = asyncio.get_running_loop()
         if brain_conv is None:
-            return await loop.run_in_executor(None, self._request_message, messages, tools)
+            return await loop.run_in_executor(
+                None, self._request_message, messages, tools,
+                None, None, reasoning_effort)
         return await loop.run_in_executor(
-            None, self._request_message, messages, tools, brain_conv, brain_meta)
+            None, self._request_message, messages, tools,
+            brain_conv, brain_meta, reasoning_effort)
 
     def build_messages(self, user_text: str, history: list[dict],
                        system_prompt: str | None = None,

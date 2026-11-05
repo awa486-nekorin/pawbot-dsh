@@ -32,11 +32,11 @@ class OwnerLineTests(unittest.TestCase):
         line = self._persona(["1000000001"]).owner_line()
         self.assertIn("0001", line)
         self.assertIn("老爹", line)
-        self.assertIn("生活费", line)
-        self.assertIn("token", line)
-        self.assertIn("大白饭", line)
         self.assertIn("不是", line)
         self.assertNotIn("未知", line)
+        # 资源关系不再写进常驻主人提示：不吃白饭、不讨生活费。
+        for stale in ("生活费", "token", "大白饭", "白饭", "讨"):
+            self.assertNotIn(stale, line)
 
     def test_multiple_owners_all_listed(self):
         line = self._persona(["1000000001", "1000000002"]).owner_line()
@@ -59,6 +59,43 @@ class OwnerLineTests(unittest.TestCase):
         self.assertNotIn("你的主人是", out)
         self.assertNotIn("0001", out)
 
+    def test_build_uses_current_self_entries_not_recent_facts(self):
+        """当前自我条目进入 prompt；旧 facts 不再按最近日期保底全灌。"""
+        persona = self._persona([])
+        persona.facts = lambda: "- 很旧的无关事实：上周吃了面"
+        persona.life_store = SimpleNamespace(self_entries=lambda **_: [{
+            "id": "self-1", "version": 2, "category": "preference",
+            "text": "被具体经历改过：现在更喜欢先查清楚再接话",
+        }])
+        out = persona.build(group_id=1, sender="阿明")
+        self.assertIn("现在更喜欢先查清楚再接话", out)
+        self.assertNotIn("很旧的无关事实", out)
+        self.assertIn("初始气质", out)
+
+    def test_intent_only_when_relevant_and_uses_self_goal(self):
+        persona = self._persona([])
+        persona.life_store = SimpleNamespace(
+            self_entries=lambda **_: [{
+                "id": "self-1", "version": 1, "category": "habit",
+                "text": "说好要自己先查机械臂资料"}],
+            goals=lambda **_: [{
+                "id": "goal-1", "version": 1, "status": "active",
+                "text": "把扫地机器人改成坐骑"}],
+        )
+        self.assertEqual(persona.intent("今天天气不错"), "")
+        intent = persona.intent("你那个机械臂到底查清楚没有")
+        self.assertIn("机械臂", intent)
+
+    def test_resource_hint_only_on_relevant_input(self):
+        persona = self._persona([])
+        self.assertEqual(persona.resource_hint("今天吃啥"), "")
+        self.assertEqual(persona.resource_hint("你好呀"), "")
+        hint = persona.resource_hint("你的 token 还剩多少")
+        self.assertIn("token", hint)
+        self.assertIn("🍚", hint)
+        self.assertIn("不补充", hint)
+        self.assertIn("保持未知", hint)
+
 
 class OwnerHintTests(unittest.TestCase):
     def _agent(self, owners):
@@ -69,11 +106,9 @@ class OwnerHintTests(unittest.TestCase):
             SimpleNamespace(user_id="1000000001"))
         self.assertIn("这条是你主人说的", hint)
         self.assertIn("老爹", hint)
-        self.assertIn("生活费", hint)
-        self.assertIn("token", hint)
-        self.assertIn("大白饭", hint)
-        self.assertIn("撒娇", hint)
         self.assertIn("男朋友", hint)
+        for stale in ("生活费", "token", "大白饭", "白饭", "讨"):
+            self.assertNotIn(stale, hint)
 
     def test_non_owner_gets_nothing(self):
         hint = self._agent(["1000000001"])._owner_hint(SimpleNamespace(user_id="123456"))
